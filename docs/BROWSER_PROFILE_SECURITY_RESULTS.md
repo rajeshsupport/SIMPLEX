@@ -21,22 +21,22 @@ The Electron Desktop Agent manages Chromium persistent contexts for executing in
 
 ---
 
-## 2. Strengthened Cross-Client Session Isolation Evidence
+## 2. Strengthened Storage & Session Isolation Evidence
 
 Test Suite: `packages/automation/src/tests/headed-profile-isolation.test.ts`  
 Execution Status: **PASSED (Exit Code: 0)**
 
-### Non-Zero Marker Verification Protocol:
-1. **Client A (`HOSP_ALPHA`) Profile**:
-   - Injected persistent cookie: `client_a_cookie_marker=marker_alpha_val`
-   - Injected `localStorage`: `client_a_ls_marker=marker_alpha_ls_val`
-   - Injected `sessionStorage`: `client_a_ss_marker=marker_alpha_ss_val`
-2. **Client B (`HOSP_BETA`) Profile**:
-   - Injected persistent cookie: `client_b_cookie_marker=marker_beta_val`
-   - Injected `localStorage`: `client_b_ls_marker=marker_beta_ls_val`
-   - Injected `sessionStorage`: `client_b_ss_marker=marker_beta_ss_val`
-3. **Context Restart & Cross-Profile Reading Audit**:
-   - Both Chromium browser contexts were closed and restarted from their respective on-disk persistent user data directories.
-   - Client A persistent store: Retrieved `client_a_cookie_marker` and `client_a_ls_marker`. Cross-read for Client B markers returned **0 matches / null**.
-   - Client B persistent store: Retrieved `client_b_cookie_marker` and `client_b_ls_marker`. Cross-read for Client A markers returned **0 matches / null**.
-   - **Conclusion**: 100% strict cookie and web-storage isolation confirmed between Client A and Client B.
+### Storage Lifecycle & Isolation Verification:
+1. **Pre-Restart State**:
+   - Injected distinct test cookies: `client_a_cookie_marker=marker_alpha_val` (Client A) vs `client_b_cookie_marker=marker_beta_val` (Client B).
+   - Injected distinct `localStorage`: `client_a_ls_marker=marker_alpha_ls_val` (Client A) vs `client_b_ls_marker=marker_beta_ls_val` (Client B).
+   - Injected distinct `sessionStorage`: `client_a_ss_marker=marker_alpha_ss_val` (Client A) vs `client_b_ss_marker=marker_beta_ss_val` (Client B).
+   - **Pre-restart verification**: Each client reads exclusively its own markers; cross-client reads of cookies, `localStorage`, and `sessionStorage` strictly return `null`.
+2. **Post-Restart Persistence & Expected SessionStorage Behavior**:
+   - Both Chromium browser contexts were completely closed and relaunched from their respective on-disk persistent user data directories.
+   - **Persistent Stores**: Client A persisted its cookie (`marker_alpha_val`) and `localStorage` (`marker_alpha_ls_val`). Client B persisted its cookie (`marker_beta_val`) and `localStorage` (`marker_beta_ls_val`). Cross-reads returned `null`.
+   - **SessionStorage Lifecycle**: Pre-restart `sessionStorage` values returned `null` for both clients upon restart, verifying standard and expected browser session boundary behavior (sessionStorage is non-persistent across closed browser contexts).
+3. **Post-Restart SessionStorage Isolation**:
+   - Fresh post-restart `sessionStorage` markers (`client_a_ss_post=post_restart_alpha` vs `client_b_ss_post=post_restart_beta`) were injected into the relaunched sessions.
+   - Cross-client reads strictly returned `null`.
+   - Temporary markers were cleaned up.
