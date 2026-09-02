@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: hmc_mssql_server
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "Rajesh@123"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: hmc_central_api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      MSSQL_HOST: mssql
+      MSSQL_PORT: 1433
+      MSSQL_DATABASE: HMC_CENTRAL_AUTOMATION
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: Rajesh@123
+      MSSQL_ENCRYPT: "false"
+      MSSQL_TRUST_SERVER_CERTIFICATE: "true"
+      PORT: 3000
+      NODE_ENV: production
+      ENCRYPTION_MASTER_KEY: e8b839655f46a7be7e3c15c6b7582b1c853f6517a942bcba5e7e600d89e574ac
+      JWT_SECRET: hmc_central_jwt_secret_dev_key_2026_super_secure_token
+      JWT_REFRESH_SECRET: hmc_central_refresh_secret_dev_key_2026_super_secure_token
+    depends_on:
+      - mssql
+
+volumes:
+  mssql_data:

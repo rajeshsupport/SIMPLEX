@@ -1,0 +1,23 @@
+{
+  "name": "hmc-central-operations-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central Multi-Client Operations and Automation Console for HMC Installations",
+  "scripts": {
+    "build": "pnpm -r --filter=./packages/* --filter=./apps/* build",
+    "test": "pnpm -r test",
+    "test:e2e": "pnpm --filter @hmc/automation test",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "dev:api": "pnpm --filter @hmc/api dev",
+    "dev:web": "pnpm --filter @hmc/web dev",
+    "dev:fixture": "pnpm --filter @hmc/automation fixture",
+    "dev:agent": "pnpm --filter @hmc/desktop-agent dev",
+    "db:migrate": "pnpm --filter @hmc/database migration:run",
+    "db:seed": "pnpm --filter @hmc/database seed"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "typescript": "^5.7.2"
+  }
+}

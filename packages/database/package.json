@@ -1,0 +1,29 @@
+{
+  "name": "@hmc/database",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "typeorm": "typeorm-ts-node-commonjs",
+    "migration:run": "node dist/scripts/run-migrations.js",
+    "seed": "node dist/seeds/seed.js",
+    "test": "node --experimental-strip-types src/tests/envelope-encryption.test.ts"
+  },
+  "dependencies": {
+    "@hmc/shared": "workspace:*",
+    "argon2": "^0.41.1",
+    "dotenv": "^16.4.7",
+    "mssql": "^11.0.1",
+    "reflect-metadata": "^0.2.2",
+    "typeorm": "^0.3.20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}

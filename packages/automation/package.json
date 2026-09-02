@@ -1,0 +1,25 @@
+{
+  "name": "@hmc/automation",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "fixture": "node dist/fixture/server.js",
+    "test": "node dist/tests/automation-engine.test.js"
+  },
+  "dependencies": {
+    "@hmc/shared": "workspace:*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "playwright": "^1.49.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.17.10",
+    "typescript": "^5.7.2"
+  }
+}

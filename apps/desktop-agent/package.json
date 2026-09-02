@@ -1,0 +1,24 @@
+{
+  "name": "@hmc/desktop-agent",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "electron dist/main/main.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'Linting desktop-agent...'"
+  },
+  "dependencies": {
+    "@hmc/automation": "workspace:*",
+    "@hmc/shared": "workspace:*",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.49.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "electron": "^33.2.1",
+    "typescript": "^5.7.2"
+  }
+}
