@@ -4,8 +4,8 @@ import { Activity, Lock, User, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.js';
 
 export const LoginPage: React.FC = () => {
-  const [username, setUsername] = useState('superadmin');
-  const [password, setPassword] = useState('[CONFIGURED_VIA_ADMIN_BOOTSTRAP]');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();

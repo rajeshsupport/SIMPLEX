@@ -5,11 +5,11 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "fixture": "node dist/fixture/server.js",
-    "test": "node dist/tests/automation-engine.test.js"
+    "test": "node dist/tests/automation-engine.test.js && node dist/tests/headed-profile-isolation.test.js"
   },
   "dependencies": {
     "@hmc/shared": "workspace:*",

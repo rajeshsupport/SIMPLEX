@@ -42,17 +42,20 @@ pnpm install
 # 2. Build monorepo packages
 pnpm build
 
-# 3. Run database migrations & seeders
+# 3. Run database migrations & system seeders
 pnpm db:migrate
 pnpm db:seed
 
-# 4. Start local development services
+# 4. Bootstrap Super Administrator (Interactive password setup; NO default passwords)
+pnpm admin:bootstrap
+
+# 5. Start local development services
 pnpm dev:api       # NestJS Central API (http://localhost:3000)
 pnpm dev:web       # React Admin Web Console (http://localhost:5173)
 pnpm dev:fixture   # Mock HMC Client (http://localhost:4000)
 pnpm dev:agent     # Desktop Automation Agent
 
-# 5. Run automated tests
+# 6. Run automated tests
 pnpm test
 ```
 

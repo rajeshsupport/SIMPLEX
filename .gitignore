@@ -11,10 +11,8 @@ out/
 
 # Environment variables & secrets
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*
+!.env.example
 *.pem
 *.key
 
@@ -47,8 +45,17 @@ coverage/
 dist-electron/
 release/
 
-# Temp storage & browser profiles
+# Temp storage, uploads, screenshots & browser profiles
 temp/
 storage/
 profiles/
 .hmc-console/
+uploads/
+screenshots/
+*.cookies
+*.session
+*.png
+*.jpg
+*.jpeg
+*.xlsx
+*.xls

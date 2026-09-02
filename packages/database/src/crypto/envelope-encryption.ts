@@ -13,24 +13,35 @@ export class EnvelopeEncryption {
   private static readonly TAG_LENGTH = 16;
   private static readonly CURRENT_KEY_VERSION = 1;
 
+  public static validateMasterKeyEntropy(keyHex: string): void {
+    if (!keyHex || typeof keyHex !== 'string') {
+      throw new Error('ENCRYPTION_MASTER_KEY is not defined or is not a string');
+    }
+    const cleanHex = keyHex.trim();
+    if (!/^[0-9a-fA-F]{64}$/.test(cleanHex)) {
+      throw new Error('ENCRYPTION_MASTER_KEY must be exactly 64 hexadecimal characters (256-bit key)');
+    }
+
+    // Entropy check: unique character count and byte diversity
+    const uniqueChars = new Set(cleanHex.toLowerCase());
+    if (uniqueChars.size < 8) {
+      throw new Error('ENCRYPTION_MASTER_KEY fails entropy threshold (insufficient character diversity)');
+    }
+
+    const keyBuf = Buffer.from(cleanHex, 'hex');
+    const uniqueBytes = new Set(keyBuf);
+    if (uniqueBytes.size < 12) {
+      throw new Error('ENCRYPTION_MASTER_KEY fails entropy threshold (insufficient byte diversity)');
+    }
+  }
+
   private static getMasterKey(): Buffer {
     const keyHex = process.env.ENCRYPTION_MASTER_KEY;
     if (!keyHex) {
       throw new Error('ENCRYPTION_MASTER_KEY environment variable is not defined.');
     }
-    const key = Buffer.from(keyHex.trim(), 'hex');
-    if (key.length !== 32) {
-      // Fallback: If provided as raw utf8 string or base64
-      if (Buffer.from(keyHex, 'utf8').length === 32) {
-        return Buffer.from(keyHex, 'utf8');
-      }
-      const base64Key = Buffer.from(keyHex, 'base64');
-      if (base64Key.length === 32) {
-        return base64Key;
-      }
-      throw new Error(`ENCRYPTION_MASTER_KEY must be a 32-byte (256-bit) hex key. Current length: ${key.length} bytes.`);
-    }
-    return key;
+    this.validateMasterKeyEntropy(keyHex);
+    return Buffer.from(keyHex.trim(), 'hex');
   }
 
   /**

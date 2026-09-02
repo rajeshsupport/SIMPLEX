@@ -4,11 +4,56 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import { EnvelopeEncryption } from '@hmc/database';
 
 // Load environment variables
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+function validateStartupSecrets() {
+  const isProd = process.env.NODE_ENV === 'production';
+  const logger = new Logger('SecretAudit');
+
+  const encryptionKey = process.env.ENCRYPTION_MASTER_KEY;
+  if (!encryptionKey) {
+    logger.error('[FATAL] ENCRYPTION_MASTER_KEY is required but not defined.');
+    process.exit(1);
+  }
+  try {
+    EnvelopeEncryption.validateMasterKeyEntropy(encryptionKey);
+  } catch (err: any) {
+    logger.error(`[FATAL] Invalid ENCRYPTION_MASTER_KEY: ${err.message}`);
+    process.exit(1);
+  }
+
+  if (isProd) {
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret || jwtSecret.length < 32 || jwtSecret.includes('change_me') || jwtSecret.includes('dev_secret')) {
+      logger.error('[FATAL] Production requires a high-entropy JWT_SECRET of at least 32 characters.');
+      process.exit(1);
+    }
+
+    const jwtRefreshSecret = process.env.JWT_REFRESH_SECRET;
+    if (!jwtRefreshSecret || jwtRefreshSecret.length < 32 || jwtRefreshSecret === jwtSecret) {
+      logger.error('[FATAL] Production requires a distinct, high-entropy JWT_REFRESH_SECRET of at least 32 characters.');
+      process.exit(1);
+    }
+
+    const agentSecret = process.env.AGENT_SHARED_SECRET;
+    if (!agentSecret || agentSecret.length < 16 || agentSecret.includes('change_me')) {
+      logger.error('[FATAL] Production requires a distinct AGENT_SHARED_SECRET of at least 16 characters.');
+      process.exit(1);
+    }
+
+    if (!process.env.MSSQL_PASSWORD) {
+      logger.error('[FATAL] Production requires MSSQL_PASSWORD to be explicitly defined.');
+      process.exit(1);
+    }
+  }
+}
+
+validateStartupSecrets();
 
 import { AppModule } from './app.module.js';
 

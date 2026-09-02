@@ -294,43 +294,8 @@ export async function runSeeds(): Promise<void> {
     }
   }
 
-  console.log('[SEED] 5. Bootstrapping Super Admin user...');
-  const superAdminUsername = process.env.SUPER_ADMIN_USERNAME || 'superadmin';
-  const superAdminEmail = process.env.SUPER_ADMIN_EMAIL || 'admin@hmc-central.local';
-  const superAdminPassword = process.env.SUPER_ADMIN_PASSWORD || '[CONFIGURED_VIA_ADMIN_BOOTSTRAP]';
-
-  let superAdmin = await userRepo.findOne({
-    where: [{ username: superAdminUsername }, { email: superAdminEmail }],
-    relations: ['roles'],
-  });
-
-  const superAdminRole = roleMap.get(SYSTEM_ROLES.SUPER_ADMIN);
-
-  if (!superAdmin) {
-    const passwordHash = await argon2.hash(superAdminPassword, {
-      type: argon2.argon2id,
-      memoryCost: 65536,
-      timeCost: 3,
-      parallelism: 4,
-    });
-
-    superAdmin = userRepo.create({
-      username: superAdminUsername,
-      email: superAdminEmail,
-      fullName: 'System Super Administrator',
-      passwordHash,
-      status: 'ACTIVE',
-      roles: superAdminRole ? [superAdminRole] : [],
-      requirePasswordChange: false,
-      createdBy: 'SYSTEM_BOOTSTRAP',
-    });
-    await userRepo.save(superAdmin);
-    console.log(`[SEED] Created default Super Admin user: ${superAdminUsername}`);
-  } else {
-    console.log(`[SEED] Super Admin user already exists: ${superAdmin.username}`);
-  }
-
-  console.log('[SEED] Database seeding completed successfully.');
+  console.log('[SEED] Database system metadata seeding completed successfully.');
+  console.log('[SECURITY NOTE] No default administrator account was created. Run "pnpm admin:bootstrap" to securely create or initialize the Super Administrator.');
 }
 
 if (require.main === module) {

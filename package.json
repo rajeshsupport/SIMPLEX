@@ -14,7 +14,9 @@
     "dev:fixture": "pnpm --filter @hmc/automation fixture",
     "dev:agent": "pnpm --filter @hmc/desktop-agent dev",
     "db:migrate": "pnpm --filter @hmc/database migration:run",
-    "db:seed": "pnpm --filter @hmc/database seed"
+    "db:seed": "pnpm --filter @hmc/database seed",
+    "admin:bootstrap": "pnpm --filter @hmc/database admin:bootstrap",
+    "admin:revoke-compromised": "pnpm --filter @hmc/database admin:revoke-compromised"
   },
   "devDependencies": {
     "@types/node": "^20.17.10",

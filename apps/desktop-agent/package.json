@@ -4,7 +4,7 @@
   "private": true,
   "main": "dist/main/main.js",
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "dev": "tsc --watch",
     "start": "electron dist/main/main.js",
     "typecheck": "tsc --noEmit",

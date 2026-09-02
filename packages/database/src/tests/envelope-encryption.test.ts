@@ -1,4 +1,4 @@
-import { EnvelopeEncryption } from '../../dist/crypto/envelope-encryption.js';
+import { EnvelopeEncryption } from '../crypto/envelope-encryption.js';
 
 // Setup dev master key for test
 process.env.ENCRYPTION_MASTER_KEY = 'e8b839655f46a7be7e3c15c6b7582b1c853f6517a942bcba5e7e600d89e574ac';

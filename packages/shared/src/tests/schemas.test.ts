@@ -3,7 +3,7 @@ import {
   CreateClientSchema,
   ServiceMasterRowSchema,
   UserImportRowSchema,
-} from '../../dist/index.js';
+} from '../index.js';
 
 function runSchemaTests() {
   console.log('--- Testing Zod Validation Schemas ---');

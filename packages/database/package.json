@@ -5,13 +5,16 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "typeorm": "typeorm-ts-node-commonjs",
     "migration:run": "node dist/scripts/run-migrations.js",
     "seed": "node dist/seeds/seed.js",
-    "test": "node --experimental-strip-types src/tests/envelope-encryption.test.ts"
+    "test": "node dist/tests/envelope-encryption.test.js && node dist/tests/mssql-live.integration.test.js",
+    "admin:bootstrap": "node dist/scripts/admin-bootstrap.js",
+    "admin:revoke-compromised": "node dist/scripts/revoke-compromised-account.js",
+    "admin:mssql-audit": "node dist/scripts/mssql-evidence-audit.js"
   },
   "dependencies": {
     "@hmc/shared": "workspace:*",

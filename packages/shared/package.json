@@ -14,10 +14,10 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/tests/schemas.test.ts",
+    "test": "node dist/tests/schemas.test.js",
     "lint": "echo 'Linting shared...'"
   },
   "dependencies": {

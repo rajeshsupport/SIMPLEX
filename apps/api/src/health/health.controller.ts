@@ -8,6 +8,11 @@ export class HealthController {
     private db: TypeOrmHealthIndicator
   ) {}
 
+  @Get()
+  getRootHealth() {
+    return { status: 'ok', service: 'HMC Central API', timestamp: new Date().toISOString() };
+  }
+
   @Get('live')
   getLiveness() {
     return { status: 'ok', timestamp: new Date().toISOString() };

@@ -1,7 +1,7 @@
 # User Acceptance Testing (UAT) Checklist
 
 ## 1. Authentication & Security
-- [ ] Sign in with valid Super Admin credentials (`superadmin` / `[CONFIGURED_VIA_ADMIN_BOOTSTRAP]`).
+- [ ] Sign in with bootstrapped Super Admin credentials created via `pnpm admin:bootstrap`.
 - [ ] Attempt sign-in with wrong password 5 times; confirm 15-minute account lockout.
 - [ ] Change current password via profile modal; verify old password is invalidated.
 - [ ] Verify JWT refresh token rotates automatically upon access token expiration.

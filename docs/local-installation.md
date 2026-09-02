@@ -50,7 +50,18 @@ pnpm db:seed
 
 ---
 
-## 4. Running the Development Services
+## 4. Bootstrap Super Administrator Account
+
+> **SECURITY NOTICE**: No default administrator accounts or passwords exist in this codebase. You must run the secure interactive bootstrap command to create or reset the Super Administrator account:
+
+```bash
+pnpm admin:bootstrap
+```
+This command prompts for the administrator username, email, and password interactively with masked input, enforces password complexity policies, and hashes the credential with Argon2id.
+
+---
+
+## 5. Running the Development Services
 
 You can run individual components using dedicated scripts:
 
@@ -70,12 +81,9 @@ pnpm dev:agent
 
 ---
 
-## 5. Accessing the Central Console
+## 6. Accessing the Central Console
 
 - Web Console: [http://localhost:5173](http://localhost:5173)
 - API Swagger Docs: [http://localhost:3000/api/docs](http://localhost:3000/api/docs)
 - Mock HMC Client: [http://localhost:4000/hmc/login](http://localhost:4000/hmc/login)
 
-**Default Super Admin Credentials**:
-- Username: `superadmin`
-- Password: `[CONFIGURED_VIA_ADMIN_BOOTSTRAP]`
