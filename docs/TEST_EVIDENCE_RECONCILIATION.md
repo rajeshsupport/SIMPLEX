@@ -16,13 +16,13 @@ This document reconciles all automated tests across the monorepo, separating uni
 | `@hmc/database` | **Integration (Leak Audit)** | `packages/database/src/tests/bootstrap-leak-audit.test.ts` | 4 | 4 | 4 | 4 | 0 | 0 | 0 | 0 | **PASS** |
 | `@hmc/automation` | **Mock-Browser (Headless)** | `packages/automation/src/tests/automation-engine.test.ts` | 3 | 3 | 3 | 3 | 0 | 0 | 0 | 0 | **PASS** |
 | `@hmc/automation` | **Mock-Browser (Headed & Isolation)** | `packages/automation/src/tests/headed-profile-isolation.test.ts` | 4 | 4 | 4 | 4 | 0 | 0 | 0 | 0 | **PASS** |
-| `@hmc/automation` | **Security (Path/Symlink/ACL)** | `packages/automation/src/tests/profile-security.test.ts` | 9 | 8 | 8 | 8 | 0 | 0 | 1 | 0 | **PASS (1 BLOCKED_WINDOWS_ACL)** |
+| `@hmc/automation` | **Security (Path/Symlink/ACL)** | `packages/automation/src/tests/profile-security.test.ts` | 9 | 8 | 8 | 8 | 0 | 0 | 1 | 0 | **PASS (1 WINDOWS_ACL_TEST_BLOCKED)** |
 | `@hmc/automation` | **Runtime Health** | `packages/automation/src/tests/runtime-verification-audit.ts` | 5 | 5 | 5 | 5 | 0 | 0 | 0 | 0 | **PASS** |
 | `@hmc/api` | **Unit (RBAC)** | `apps/api/test/rbac-security.test.ts` | 3 | 3 | 3 | 3 | 0 | 0 | 0 | 0 | **PASS** |
 | `@hmc/api` | **Integration (Import/Audit)** | `apps/api/test/import-resilience-audit.test.ts` | 4 | 4 | 4 | 4 | 0 | 0 | 0 | 0 | **PASS** |
 | `@hmc/api` | **Integration (Revocation)** | `apps/api/test/account-revocation-disable.test.ts` | 5 | 5 | 5 | 5 | 0 | 0 | 0 | 0 | **PASS** |
-| **Real Hospital Clients** | **Real-Client Pilot** | *Scheduled for Pilot Deployment Phase* | 0 | 0 | 0 | 0 | 0 | 0 | 0 | N/A | **PENDING_PILOT** |
-| **Business Stakeholders** | **Human UAT** | *Pending Stakeholder Sign-Off on uat-checklist.md* | 0 | 0 | 0 | 0 | 0 | 0 | 0 | N/A | **PENDING** |
+| **Real Hospital Clients** | **Real-Client Pilot** | *Scheduled for Pilot Deployment Phase* | 0 | 0 | 0 | 0 | 0 | 0 | 0 | N/A | **REAL_CLIENT_PILOT_PENDING** |
+| **Business Stakeholders** | **Human UAT** | *Pending Stakeholder Sign-Off on uat-checklist.md* | 0 | 0 | 0 | 0 | 0 | 0 | 0 | N/A | **HUMAN_UAT_PENDING** |
 
 ---
 
@@ -33,7 +33,7 @@ This document reconciles all automated tests across the monorepo, separating uni
 - **Passed Cases**: 49
 - **Failed Cases**: 0
 - **Skipped Cases**: 0
-- **Blocked Cases**: 1 (`BLOCKED_WINDOWS_ACL_TEST` — Windows ACL runtime verification was unavailable on macOS)
+- **Blocked Cases**: 1 (`WINDOWS_ACL_TEST_BLOCKED` — Windows ACL runtime verification was unavailable on macOS)
 - **Not Executed Cases**: 0
 
 ### Arithmetic Invariants:
