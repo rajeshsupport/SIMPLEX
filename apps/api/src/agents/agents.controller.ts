@@ -37,6 +37,21 @@ export class AgentsController {
     return this.agentsService.getRecentRuns();
   }
 
+  @Get('runs/:runId')
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermissions(PERMISSIONS.CLIENT_OPEN)
+  async getRunById(@Param('runId') runId: string) {
+    return this.agentsService.getRunById(runId);
+  }
+
+  @Post('runs/:runId/cancel')
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermissions(PERMISSIONS.CLIENT_OPEN)
+  @HttpCode(HttpStatus.OK)
+  async cancelRun(@Param('runId') runId: string) {
+    return this.agentsService.cancelRun(runId);
+  }
+
   @Post('pair')
   @HttpCode(HttpStatus.OK)
   async pairAgent(

@@ -7,6 +7,7 @@ import {
   Client,
   AutomationWorkflow,
   AutomationWorkflowVersion,
+  AuditLog,
 } from '@hmc/database';
 import { AgentsService } from './agents.service.js';
 import { AgentsController } from './agents.controller.js';
@@ -21,6 +22,7 @@ import { ClientsModule } from '../clients/clients.module.js';
       Client,
       AutomationWorkflow,
       AutomationWorkflowVersion,
+      AuditLog,
     ]),
     ClientsModule,
   ],

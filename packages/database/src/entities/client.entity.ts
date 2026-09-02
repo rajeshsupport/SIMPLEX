@@ -32,7 +32,7 @@ export class Client {
   applicationPath!: string;
 
   @Column({ type: 'nvarchar', length: 50, default: 'Development' })
-  environment!: 'Production' | 'UAT' | 'Test' | 'Development';
+  environment!: 'Production' | 'Staging' | 'UAT' | 'Test' | 'Development' | 'Local';
 
   @Column({ type: 'nvarchar', length: 50, default: 'v1.0' })
   applicationVersion!: string;

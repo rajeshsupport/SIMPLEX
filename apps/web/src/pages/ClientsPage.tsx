@@ -1,9 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
-  Server,
   Plus,
   KeyRound,
-  ExternalLink,
   ShieldAlert,
   Play,
   CheckCircle,
@@ -11,12 +9,21 @@ import {
   Edit2,
   RefreshCw,
   Search,
+  Loader2,
+  AlertTriangle,
+  ExternalLink,
 } from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { EnvironmentBadge } from '../components/EnvironmentBadge.js';
 import { Modal } from '../components/Modal.js';
 import { ClientWithCredentialInfo, ClientEnvironment, PERMISSIONS } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
+
+interface StepStatusItem {
+  id: string;
+  label: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+}
 
 export const ClientsPage: React.FC = () => {
   const [clients, setClients] = useState<ClientWithCredentialInfo[]>([]);
@@ -28,7 +35,7 @@ export const ClientsPage: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isCredModalOpen, setIsCredModalOpen] = useState(false);
-  const [isOpenLoginModalOpen, setIsOpenLoginModalOpen] = useState(false);
+  const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
   const [selectedClient, setSelectedClient] = useState<ClientWithCredentialInfo | null>(null);
 
   // Form states
@@ -50,10 +57,16 @@ export const ClientsPage: React.FC = () => {
     password: '',
   });
 
-  const [openLoginConfirmation, setOpenLoginConfirmation] = useState('');
+  // Launch Status states
+  const [launchRunId, setLaunchRunId] = useState<string | null>(null);
+  const [launchStatus, setLaunchStatus] = useState<'IDLE' | 'STARTING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'REQUIRES_MANUAL_INTERVENTION'>('IDLE');
+  const [launchErrorMessage, setLaunchErrorMessage] = useState<string | null>(null);
+  const [activeStepText, setActiveStepText] = useState<string>('Starting isolated browser…');
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [launchingClientId, setLaunchingClientId] = useState<string | null>(null);
 
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const { hasPermission } = useAuth();
 
   const loadClients = async () => {
@@ -70,6 +83,9 @@ export const ClientsPage: React.FC = () => {
 
   useEffect(() => {
     loadClients();
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+    };
   }, []);
 
   const handleCreateClient = async (e: React.FormEvent) => {
@@ -152,25 +168,80 @@ export const ClientsPage: React.FC = () => {
     }
   };
 
-  const handleOpenAndLogin = async () => {
-    if (!selectedClient) return;
-    if (selectedClient.environment === 'Production' && openLoginConfirmation !== selectedClient.clientCode) {
-      alert(`For production client access, you must type the client code '${selectedClient.clientCode}'`);
-      return;
-    }
+  const startPollingRun = (runId: string) => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+
+    pollingRef.current = setInterval(async () => {
+      try {
+        const run = await ApiClient.request<any>(`/agents/runs/${runId}`);
+        if (!run) return;
+
+        setLaunchStatus(run.status);
+
+        if (run.steps && run.steps.length > 0) {
+          const latestStep = run.steps[run.steps.length - 1];
+          setActiveStepText(latestStep.stepName || 'Processing step…');
+        }
+
+        if (run.status === 'COMPLETED') {
+          setActiveStepText('Login successful — browser ready.');
+          setLaunchErrorMessage(null);
+          if (pollingRef.current) clearInterval(pollingRef.current);
+        } else if (run.status === 'FAILED') {
+          setLaunchErrorMessage(run.errorMessage || 'Client login failed.');
+          if (pollingRef.current) clearInterval(pollingRef.current);
+        } else if (run.status === 'REQUIRES_MANUAL_INTERVENTION') {
+          setActiveStepText('Manual security verification is required in the opened browser window.');
+          setLaunchErrorMessage(null);
+          if (pollingRef.current) clearInterval(pollingRef.current);
+        }
+      } catch (err: any) {
+        console.warn('Polling error:', err);
+      }
+    }, 600);
+  };
+
+  const handleOpenAndLogin = async (client: ClientWithCredentialInfo) => {
+    if (launchingClientId) return; // Prevent double click
+
+    setSelectedClient(client);
+    setLaunchingClientId(client.id);
+    setIsStatusModalOpen(true);
+    setLaunchStatus('STARTING');
+    setLaunchErrorMessage(null);
+    setActiveStepText('Starting isolated browser…');
 
     try {
-      await ApiClient.request('/agents/dispatch-open-and-login', {
+      const res = await ApiClient.request<{ id: string; status: string }>('/agents/dispatch-open-and-login', {
         method: 'POST',
-        body: JSON.stringify({ clientId: selectedClient.id }),
+        body: JSON.stringify({ clientId: client.id }),
       });
-      setIsOpenLoginModalOpen(false);
-      setOpenLoginConfirmation('');
-      setActionMessage(`🚀 Interactive 'Open & Login' dispatched for client [${selectedClient.clientCode}]. Browser window opening...`);
-      setTimeout(() => setActionMessage(null), 7000);
+
+      setLaunchRunId(res.id);
+      setLaunchStatus('RUNNING');
+      setActiveStepText('Opening client URL…');
+      startPollingRun(res.id);
     } catch (err: any) {
-      alert(`Failed to dispatch open & login: ${err.message}`);
+      setLaunchStatus('FAILED');
+      const msg = err.message && err.message.includes('agent')
+        ? 'Desktop browser agent is not running. Start the agent and try again.'
+        : err.message || 'Failed to dispatch launch';
+      setLaunchErrorMessage(msg);
+    } finally {
+      setLaunchingClientId(null);
     }
+  };
+
+  const handleCancelLaunch = async () => {
+    if (launchRunId) {
+      try {
+        await ApiClient.request(`/agents/runs/${launchRunId}/cancel`, { method: 'POST' });
+      } catch {}
+    }
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    setIsStatusModalOpen(false);
+    setLaunchStatus('IDLE');
+    setLaunchRunId(null);
   };
 
   const filteredClients = clients.filter((c) => {
@@ -221,12 +292,12 @@ export const ClientsPage: React.FC = () => {
           />
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          {['ALL', 'Production', 'UAT', 'Test', 'Development'].map((env) => (
+        <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
+          {['ALL', 'Production', 'Staging', 'UAT', 'Test', 'Development', 'Local'].map((env) => (
             <button
               key={env}
               onClick={() => setSelectedEnv(env)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
                 selectedEnv === env
                   ? 'bg-sky-600 text-white'
                   : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
@@ -263,6 +334,8 @@ export const ClientsPage: React.FC = () => {
             ) : (
               filteredClients.map((client) => {
                 const isProd = client.environment === 'Production';
+                const isLaunching = launchingClientId === client.id;
+
                 return (
                   <tr key={client.id} className={`hover:bg-slate-900/40 transition-colors ${isProd ? 'bg-red-950/10' : ''}`}>
                     <td className="py-3.5 px-4">
@@ -360,17 +433,20 @@ export const ClientsPage: React.FC = () => {
                         {/* Open & Login Button */}
                         {hasPermission(PERMISSIONS.CLIENT_OPEN) && (
                           <button
-                            onClick={() => {
-                              setSelectedClient(client);
-                              setIsOpenLoginModalOpen(true);
-                            }}
-                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold shadow transition-colors ${
+                            onClick={() => handleOpenAndLogin(client)}
+                            disabled={isLaunching || !client.hasCredentials}
+                            title={!client.hasCredentials ? 'Configure credentials first' : 'Launch auto-login browser session'}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold shadow transition-all disabled:opacity-50 ${
                               isProd
-                                ? 'bg-red-900/80 hover:bg-red-800 text-red-200 border border-red-700'
-                                : 'bg-sky-600 hover:bg-sky-500 text-white'
+                                ? 'bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 shadow-red-950/50'
+                                : 'bg-sky-600 hover:bg-sky-500 text-white shadow-sky-950/50'
                             }`}
                           >
-                            <Play className="w-3 h-3 fill-current" />
+                            {isLaunching ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                            )}
                             Open & Login
                           </button>
                         )}
@@ -383,6 +459,113 @@ export const ClientsPage: React.FC = () => {
           </tbody>
         </table>
       </div>
+
+      {/* Launch Live Status Modal */}
+      <Modal
+        isOpen={isStatusModalOpen}
+        onClose={() => {
+          if (launchStatus === 'STARTING' || launchStatus === 'RUNNING') {
+            handleCancelLaunch();
+          } else {
+            setIsStatusModalOpen(false);
+          }
+        }}
+        title={`Opening Client: ${selectedClient?.clientName || selectedClient?.clientCode}`}
+      >
+        <div className="space-y-4 py-2">
+          {/* Progress Banner */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="flex items-center gap-3">
+              {launchStatus === 'STARTING' || launchStatus === 'RUNNING' ? (
+                <div className="w-8 h-8 rounded-full bg-sky-900/60 border border-sky-500 flex items-center justify-center">
+                  <Loader2 className="w-4 h-4 text-sky-400 animate-spin" />
+                </div>
+              ) : launchStatus === 'COMPLETED' ? (
+                <div className="w-8 h-8 rounded-full bg-emerald-950 border border-emerald-500 flex items-center justify-center">
+                  <CheckCircle className="w-5 h-5 text-emerald-400" />
+                </div>
+              ) : launchStatus === 'REQUIRES_MANUAL_INTERVENTION' ? (
+                <div className="w-8 h-8 rounded-full bg-amber-950 border border-amber-500 flex items-center justify-center">
+                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                </div>
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-red-950 border border-red-500 flex items-center justify-center">
+                  <XCircle className="w-5 h-5 text-red-400" />
+                </div>
+              )}
+
+              <div>
+                <div className="text-sm font-semibold text-white">{activeStepText}</div>
+                <div className="text-xs text-slate-400 font-mono mt-0.5">
+                  Profile: ~/.hmc-console/profiles/client_{selectedClient?.clientCode || 'default'}
+                </div>
+              </div>
+            </div>
+
+            {/* Error or Warning Display */}
+            {launchErrorMessage && (
+              <div className="p-3 bg-red-950/60 border border-red-800 rounded-lg text-red-300 text-xs flex items-start gap-2">
+                <XCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <div>{launchErrorMessage}</div>
+              </div>
+            )}
+
+            {launchStatus === 'REQUIRES_MANUAL_INTERVENTION' && (
+              <div className="p-3 bg-amber-950/60 border border-amber-800 rounded-lg text-amber-300 text-xs flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong>Security Checkpoint:</strong> Manual security verification (MFA/OTP/CAPTCHA) is required in the opened browser window. Complete verification in the window to continue.
+                </div>
+              </div>
+            )}
+
+            {launchStatus === 'COMPLETED' && (
+              <div className="p-3 bg-emerald-950/60 border border-emerald-800 rounded-lg text-emerald-300 text-xs flex items-start gap-2">
+                <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <div>
+                  Browser is open and authenticated. You can now use the separate browser window to perform clinical operations.
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Modal Action Buttons */}
+          <div className="flex justify-end gap-3 pt-2">
+            {launchStatus === 'STARTING' || launchStatus === 'RUNNING' ? (
+              <button
+                onClick={handleCancelLaunch}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
+              >
+                Cancel Launch
+              </button>
+            ) : launchStatus === 'FAILED' ? (
+              <>
+                <button
+                  onClick={() => setIsStatusModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
+                >
+                  Close
+                </button>
+                {selectedClient && (
+                  <button
+                    onClick={() => handleOpenAndLogin(selectedClient)}
+                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold"
+                  >
+                    Retry Launch
+                  </button>
+                )}
+              </>
+            ) : (
+              <button
+                onClick={() => setIsStatusModalOpen(false)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold"
+              >
+                Close Status (Keep Browser Open)
+              </button>
+            )}
+          </div>
+        </div>
+      </Modal>
 
       {/* Create / Edit Client Modal */}
       <Modal
@@ -415,8 +598,10 @@ export const ClientsPage: React.FC = () => {
                 className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
               >
                 <option value="Development">Development</option>
+                <option value="Local">Local</option>
                 <option value="Test">Test</option>
                 <option value="UAT">UAT</option>
+                <option value="Staging">Staging</option>
                 <option value="Production">Production (Live)</option>
               </select>
             </div>
@@ -553,56 +738,6 @@ export const ClientsPage: React.FC = () => {
             </button>
           </div>
         </form>
-      </Modal>
-
-      {/* Open & Login Confirmation Modal */}
-      <Modal
-        isOpen={isOpenLoginModalOpen}
-        onClose={() => setIsOpenLoginModalOpen(false)}
-        title={`Launch Browser Session: ${selectedClient?.clientCode}`}
-      >
-        <div className="space-y-4">
-          {selectedClient?.environment === 'Production' ? (
-            <div className="p-4 bg-red-950/60 border border-red-800 rounded-lg text-red-300 text-xs space-y-2">
-              <div className="font-bold flex items-center gap-1.5 text-red-200">
-                <ShieldAlert className="w-4 h-4 text-red-400" />
-                PRODUCTION CLIENT ACCESS WARNING
-              </div>
-              <p>
-                You are about to launch an interactive browser session against a live PRODUCTION instance:
-                <span className="font-mono text-white block mt-1">{selectedClient.baseUrl}</span>
-              </p>
-              <p>To confirm authorization, type the exact client code below:</p>
-              <input
-                type="text"
-                placeholder={selectedClient.clientCode}
-                value={openLoginConfirmation}
-                onChange={(e) => setOpenLoginConfirmation(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-900 border border-red-700 rounded-lg text-xs font-mono text-white focus:outline-none focus:border-red-500"
-              />
-            </div>
-          ) : (
-            <p className="text-xs text-slate-300">
-              The desktop agent will launch an isolated Chromium session for client
-              <strong className="text-white ml-1">[{selectedClient?.clientCode}]</strong>, enter credentials, and leave the window open for interactive use.
-            </p>
-          )}
-
-          <div className="flex justify-end gap-3 pt-4 border-t border-surface-border">
-            <button
-              onClick={() => setIsOpenLoginModalOpen(false)}
-              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs hover:bg-slate-700"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleOpenAndLogin}
-              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold"
-            >
-              Launch Isolated Browser
-            </button>
-          </div>
-        </div>
       </Modal>
     </div>
   );

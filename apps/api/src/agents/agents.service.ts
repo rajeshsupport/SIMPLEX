@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import * as crypto from 'crypto';
 import * as argon2 from 'argon2';
 import {
   DesktopAgent,
@@ -15,6 +16,8 @@ import {
   Client,
   AutomationWorkflow,
   AutomationWorkflowVersion,
+  AuditLog,
+  ApplicationUser,
 } from '@hmc/database';
 import {
   DesktopAgentSummary,
@@ -41,6 +44,8 @@ export class AgentsService {
     private workflowRepo: Repository<AutomationWorkflow>,
     @InjectRepository(AutomationWorkflowVersion)
     private versionRepo: Repository<AutomationWorkflowVersion>,
+    @InjectRepository(AuditLog)
+    private auditRepo: Repository<AuditLog>,
     private clientsService: ClientsService
   ) {}
 
@@ -87,13 +92,22 @@ export class AgentsService {
     const rawToken = `agt_${Date.now()}_${Math.random().toString(36).substring(2)}`;
     const authTokenHash = await argon2.hash(rawToken);
 
+    // Resolve valid user GUID if not provided as GUID
+    let assignedUserId = dto.userId;
+    const isGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(assignedUserId);
+    if (!isGuid) {
+      const userRepo = this.agentRepo.manager.getRepository(ApplicationUser);
+      const user = await userRepo.findOne({ where: {} });
+      if (user) assignedUserId = user.id;
+    }
+
     let agent = await this.agentRepo.findOne({ where: { agentName: dto.agentName } });
     if (!agent) {
       agent = this.agentRepo.create({
         agentName: dto.agentName,
         machineHostname: dto.machineHostname,
         osInfo: dto.osInfo,
-        assignedUserId: dto.userId,
+        assignedUserId,
         authTokenHash,
         status: 'ONLINE',
         lastHeartbeatAt: new Date(),
@@ -101,7 +115,7 @@ export class AgentsService {
     } else {
       agent.machineHostname = dto.machineHostname;
       agent.osInfo = dto.osInfo;
-      agent.assignedUserId = dto.userId;
+      agent.assignedUserId = assignedUserId;
       agent.authTokenHash = authTokenHash;
       agent.status = 'ONLINE';
       agent.lastHeartbeatAt = new Date();
@@ -112,25 +126,51 @@ export class AgentsService {
   }
 
   async recordHeartbeat(dto: AgentHeartbeatPayload): Promise<{ acknowledged: boolean; pendingRun?: AgentTaskAssignment }> {
-    const agent = await this.agentRepo.findOne({ where: { id: dto.agentId } });
-    if (!agent) throw new NotFoundException('Agent not found');
-
-    agent.machineHostname = dto.machineHostname;
-    agent.osInfo = dto.osInfo;
-    agent.status = dto.status;
-    agent.lastHeartbeatAt = new Date();
-    if (dto.systemMetrics) {
-      agent.systemMetricsJson = JSON.stringify(dto.systemMetrics);
+    let agent = await this.agentRepo.findOne({ where: { id: dto.agentId } });
+    if (!agent) {
+      const userRepo = this.agentRepo.manager.getRepository(ApplicationUser);
+      const user = await userRepo.findOne({ where: {} });
+      const rawToken = `agt_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+      const authTokenHash = await argon2.hash(rawToken);
+      // Auto-register local agent if missing
+      agent = this.agentRepo.create({
+        id: dto.agentId,
+        agentName: `Agent-${dto.machineHostname}`,
+        machineHostname: dto.machineHostname,
+        osInfo: dto.osInfo,
+        assignedUserId: user ? user.id : '00000000-0000-0000-0000-000000000000',
+        authTokenHash,
+        status: dto.status,
+        lastHeartbeatAt: new Date(),
+      });
+    } else {
+      agent.machineHostname = dto.machineHostname;
+      agent.osInfo = dto.osInfo;
+      agent.status = dto.status;
+      agent.lastHeartbeatAt = new Date();
+      if (dto.systemMetrics) {
+        agent.systemMetricsJson = JSON.stringify(dto.systemMetrics);
+      }
     }
     await this.agentRepo.save(agent);
 
-    // Check for pending automation run assigned to this agent or user
-    const pendingRun = await this.runRepo.findOne({
+    // Check for pending automation run assigned to this agent or unassigned pending runs
+    let pendingRun = await this.runRepo.findOne({
       where: { desktopAgentId: agent.id, status: 'PENDING' },
       relations: ['client'],
+      order: { createdAt: 'ASC' },
     });
 
+    if (!pendingRun) {
+      pendingRun = await this.runRepo.findOne({
+        where: { desktopAgentId: undefined, status: 'PENDING' },
+        relations: ['client'],
+        order: { createdAt: 'ASC' },
+      });
+    }
+
     if (pendingRun) {
+      pendingRun.desktopAgentId = agent.id;
       const task = await this.buildTaskAssignment(pendingRun);
       pendingRun.status = 'RUNNING';
       pendingRun.startedAt = new Date();
@@ -142,19 +182,26 @@ export class AgentsService {
   }
 
   async dispatchOpenAndLogin(clientId: string, userId: string, agentId?: string): Promise<AutomationRun> {
-    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    const client = await this.clientRepo.findOne({
+      where: { id: clientId },
+      relations: ['credential'],
+    });
     if (!client) throw new NotFoundException('Client not found');
 
-    // Find agent if not explicitly passed
-    let targetAgentId = agentId;
-    if (!targetAgentId) {
-      const activeAgent = await this.agentRepo.findOne({
-        where: { assignedUserId: userId, status: 'ONLINE' },
-      });
-      if (activeAgent) {
-        targetAgentId = activeAgent.id;
-      }
+    if (!client.credential || !client.credential.isActive) {
+      throw new BadRequestException('Client has no active credentials configured. Please configure credentials first.');
     }
+
+    // Check available online desktop agents
+    const allAgents = await this.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE');
+
+    let targetAgentId = agentId;
+    if (!targetAgentId && onlineAgents.length > 0) {
+      targetAgentId = onlineAgents[0].id;
+    }
+
+    const correlationId = crypto.randomUUID();
 
     const run = this.runRepo.create({
       clientId: client.id,
@@ -162,10 +209,57 @@ export class AgentsService {
       triggeredByUserId: userId,
       runType: 'INTERACTIVE_LOGIN',
       status: 'PENDING',
-      parametersJson: JSON.stringify({ isHeaded: true, leaveBrowserOpen: true }),
+      parametersJson: JSON.stringify({ isHeaded: true, leaveBrowserOpen: true, userId }),
     });
 
-    return this.runRepo.save(run);
+    const savedRun = await this.runRepo.save(run);
+
+    // Record Security Audit Log
+    const audit = this.auditRepo.create({
+      action: 'CLIENT_BROWSER_SESSION_LAUNCH',
+      actorUserId: userId,
+      actorUsername: userId,
+      entityType: 'CLIENT',
+      entityId: client.id,
+      result: 'SUCCESS',
+      detailsJson: JSON.stringify({
+        clientCode: client.clientCode,
+        environment: client.environment,
+        runId: savedRun.id,
+        targetAgentId: targetAgentId || 'ANY_AVAILABLE',
+        onlineAgentsCount: onlineAgents.length,
+      }),
+      correlationId,
+    });
+    await this.auditRepo.save(audit);
+
+    return savedRun;
+  }
+
+  async getRunById(runId: string): Promise<AutomationRun> {
+    const run = await this.runRepo.findOne({
+      where: { id: runId },
+      relations: ['client', 'steps', 'desktopAgent'],
+    });
+    if (!run) throw new NotFoundException(`Run ${runId} not found`);
+
+    if (run.steps) {
+      run.steps.sort((a, b) => a.stepIndex - b.stepIndex);
+    }
+    return run;
+  }
+
+  async cancelRun(runId: string): Promise<AutomationRun> {
+    const run = await this.runRepo.findOne({ where: { id: runId } });
+    if (!run) throw new NotFoundException(`Run ${runId} not found`);
+
+    if (run.status === 'PENDING' || run.status === 'RUNNING') {
+      run.status = 'FAILED';
+      run.errorMessage = 'Launch cancelled by user.';
+      run.completedAt = new Date();
+      await this.runRepo.save(run);
+    }
+    return run;
   }
 
   async updateRunTelemetry(
@@ -189,16 +283,28 @@ export class AgentsService {
     await this.runRepo.save(run);
 
     if (dto.step) {
-      const step = this.stepRepo.create({
-        automationRunId: run.id,
-        stepIndex: dto.step.stepIndex,
-        stepName: dto.step.stepName,
-        status: dto.step.status,
-        startedAt: dto.step.startedAt ? new Date(dto.step.startedAt) : new Date(),
-        completedAt: dto.step.completedAt ? new Date(dto.step.completedAt) : undefined,
-        durationMs: dto.step.durationMs,
-        errorMessage: dto.step.errorMessage,
+      let step = await this.stepRepo.findOne({
+        where: { automationRunId: run.id, stepIndex: dto.step.stepIndex },
       });
+
+      if (!step) {
+        step = this.stepRepo.create({
+          automationRunId: run.id,
+          stepIndex: dto.step.stepIndex,
+          stepName: dto.step.stepName,
+          status: dto.step.status,
+          startedAt: dto.step.startedAt ? new Date(dto.step.startedAt) : new Date(),
+          completedAt: dto.step.completedAt ? new Date(dto.step.completedAt) : undefined,
+          durationMs: dto.step.durationMs,
+          errorMessage: dto.step.errorMessage,
+        });
+      } else {
+        step.status = dto.step.status;
+        step.stepName = dto.step.stepName;
+        if (dto.step.completedAt) step.completedAt = new Date(dto.step.completedAt);
+        if (dto.step.durationMs) step.durationMs = dto.step.durationMs;
+        if (dto.step.errorMessage) step.errorMessage = dto.step.errorMessage;
+      }
       await this.stepRepo.save(step);
     }
   }
@@ -236,10 +342,92 @@ export class AgentsService {
       versionNumber: 1,
       applicableAppVersion: 'v1.0',
       pageRoute: client.loginRoute,
-      steps: [],
-      successConditions: [],
-      errorConditions: [],
-      securityBlockConditions: [],
+      steps: [
+        {
+          stepIndex: 1,
+          stepName: 'Opening client URL…',
+          action: 'NAVIGATE' as const,
+          valueTemplate: '{{loginUrl}}',
+          timeoutMs: 15000,
+        },
+        {
+          stepIndex: 2,
+          stepName: 'Enter Username',
+          action: 'FILL' as const,
+          targetSelector: {
+            strategy: 'TEST_ID' as const,
+            value: 'input-username',
+            fallbackSelectors: [
+              { strategy: 'ID' as const, value: 'username' },
+              { strategy: 'NAME' as const, value: 'username' },
+              { strategy: 'LABEL' as const, value: 'Username' },
+              { strategy: 'PLACEHOLDER' as const, value: 'Enter your username' },
+              { strategy: 'CSS' as const, value: 'input[type="text"]' },
+            ],
+          },
+          valueTemplate: '{{username}}',
+          timeoutMs: 10000,
+        },
+        {
+          stepIndex: 3,
+          stepName: 'Entering credentials securely…',
+          action: 'FILL' as const,
+          targetSelector: {
+            strategy: 'TEST_ID' as const,
+            value: 'input-password',
+            fallbackSelectors: [
+              { strategy: 'ID' as const, value: 'password' },
+              { strategy: 'NAME' as const, value: 'password' },
+              { strategy: 'LABEL' as const, value: 'Password' },
+              { strategy: 'PLACEHOLDER' as const, value: 'Enter your password' },
+              { strategy: 'CSS' as const, value: 'input[type="password"]' },
+            ],
+          },
+          valueTemplate: '{{password}}',
+          timeoutMs: 10000,
+        },
+        {
+          stepIndex: 4,
+          stepName: 'Click Sign In Button',
+          action: 'CLICK' as const,
+          targetSelector: {
+            strategy: 'TEST_ID' as const,
+            value: 'btn-login',
+            fallbackSelectors: [
+              { strategy: 'ID' as const, value: 'btnLogin' },
+              { strategy: 'ROLE' as const, value: 'button', roleName: 'Sign In' },
+              { strategy: 'CSS' as const, value: 'button[type="submit"]' },
+            ],
+          },
+          timeoutMs: 10000,
+        },
+        {
+          stepIndex: 5,
+          stepName: 'Verifying login…',
+          action: 'WAIT_FOR_ELEMENT' as const,
+          targetSelector: {
+            strategy: 'TEST_ID' as const,
+            value: 'hmc-dashboard',
+            fallbackSelectors: [
+              { strategy: 'ID' as const, value: 'hmc-app-header' },
+              { strategy: 'CSS' as const, value: '.hmc-authenticated-layout' },
+            ],
+          },
+          timeoutMs: 20000,
+        },
+      ],
+      successConditions: [
+        { type: 'URL_CONTAINS' as const, expectedValue: '/hmc/dashboard', isTerminalSuccess: true },
+        { type: 'ELEMENT_VISIBLE' as const, selector: { strategy: 'TEST_ID' as const, value: 'hmc-dashboard' }, isTerminalSuccess: true },
+      ],
+      errorConditions: [
+        { type: 'TEXT_PRESENT' as const, expectedValue: 'Invalid credentials', isTerminalError: true, errorMessage: 'Client login was unsuccessful. Verify the stored credentials.' },
+        { type: 'TEXT_PRESENT' as const, expectedValue: 'Account locked', isTerminalError: true, errorMessage: 'Account locked out on target HMC' },
+      ],
+      securityBlockConditions: [
+        { type: 'ELEMENT_VISIBLE' as const, selector: { strategy: 'TEST_ID' as const, value: 'mfa-challenge' }, isSecurityControlBlock: true, errorMessage: 'Manual security verification is required in the opened browser window.' },
+        { type: 'ELEMENT_VISIBLE' as const, selector: { strategy: 'TEST_ID' as const, value: 'captcha-container' }, isSecurityControlBlock: true, errorMessage: 'Manual security verification is required in the opened browser window.' },
+      ],
       defaultTimeoutMs: 30000,
       maxRetries: 1,
     };

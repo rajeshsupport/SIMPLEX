@@ -14,6 +14,13 @@ export const EnvironmentBadge: React.FC<{ environment: ClientEnvironment; showIc
           PRODUCTION
         </span>
       );
+    case 'Staging':
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-950/80 text-purple-300 border border-purple-800">
+          {showIcon && <ShieldCheck className="w-3 h-3 text-purple-300" />}
+          STAGING
+        </span>
+      );
     case 'UAT':
       return (
         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-950/80 text-amber-300 border border-amber-800">
@@ -26,6 +33,13 @@ export const EnvironmentBadge: React.FC<{ environment: ClientEnvironment; showIc
         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-950/80 text-blue-300 border border-blue-800">
           {showIcon && <TestTube className="w-3 h-3 text-blue-300" />}
           TEST
+        </span>
+      );
+    case 'Local':
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-950/80 text-emerald-300 border border-emerald-800">
+          {showIcon && <Wrench className="w-3 h-3 text-emerald-400" />}
+          LOCAL
         </span>
       );
     case 'Development':

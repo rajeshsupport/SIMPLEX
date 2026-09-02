@@ -1,4 +1,4 @@
-export type ClientEnvironment = 'Production' | 'UAT' | 'Test' | 'Development';
+export type ClientEnvironment = 'Production' | 'Staging' | 'UAT' | 'Test' | 'Development' | 'Local';
 export type ClientStatus = 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
 export type ClientConnectionStatus = 'CONNECTED' | 'DISCONNECTED' | 'UNKNOWN' | 'ERROR';
 

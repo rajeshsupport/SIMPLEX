@@ -25,7 +25,7 @@ export class AutomationRunStep {
   stepName!: string;
 
   @Column({ type: 'nvarchar', length: 50, default: 'PENDING' })
-  status!: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED';
+  status!: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'REQUIRES_MANUAL_INTERVENTION';
 
   @Column({ type: 'datetime2', nullable: true })
   startedAt?: Date | null;

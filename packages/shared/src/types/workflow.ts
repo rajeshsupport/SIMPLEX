@@ -68,7 +68,7 @@ export type AutomationRunStatus =
 export interface AutomationRunStepTelemetry {
   stepIndex: number;
   stepName: string;
-  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED';
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'REQUIRES_MANUAL_INTERVENTION';
   startedAt: string;
   completedAt?: string;
   durationMs?: number;

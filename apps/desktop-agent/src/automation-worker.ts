@@ -16,12 +16,13 @@ export class AutomationWorker {
     let page: Page | null = null;
 
     try {
-      // 1. Launch isolated persistent browser context
+      // 1. Launch isolated persistent browser context with user profile
+      const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
       context = await BrowserProfileManager.launchPersistentContext({
         clientId: task.clientId,
-        userId: 'operator',
+        userId: effectiveUserId,
         isHeaded: task.options?.isHeaded ?? true,
-        slowMo: task.options?.slowMoMs ?? 100,
+        slowMo: task.options?.slowMoMs ?? 50,
       });
 
       this.activeContexts.set(task.runId, context);
@@ -37,7 +38,7 @@ export class AutomationWorker {
         ...task.payload,
       };
 
-      // 3. Execute workflow steps
+      // 3. Execute workflow steps with session reuse and error mapping
       const result = await WorkflowExecutor.executeWorkflow(
         page,
         task.workflowVersion,
@@ -60,29 +61,35 @@ export class AutomationWorker {
           totalDurationMs,
         });
 
+        // Keep browser open for interactive user session if requested
         if (!task.options?.leaveBrowserOpen) {
           await context.close();
           this.activeContexts.delete(task.runId);
         }
       } else {
-        onProgress?.(`✗ Task ${task.runId} failed: ${result.errorMessage}`);
+        onProgress?.(`✗ Task ${task.runId} ${result.status}: ${result.errorMessage}`);
         await this.agentClient.sendTelemetry(task.runId, {
           status: result.status,
           errorMessage: result.errorMessage,
           totalDurationMs,
         });
 
-        if (!task.options?.leaveBrowserOpen) {
+        // If manual intervention required or leave open, preserve window
+        if (!task.options?.leaveBrowserOpen && result.status !== 'REQUIRES_MANUAL_INTERVENTION') {
           await context.close();
           this.activeContexts.delete(task.runId);
         }
       }
     } catch (err: any) {
       const totalDurationMs = Date.now() - startTime;
-      onProgress?.(`Fatal error during task execution: ${err.message}`);
+      const friendlyError = err.message && err.message.includes('ERR_CONNECTION_REFUSED')
+        ? 'Client application is currently unreachable.'
+        : (err.message || 'Unknown execution failure');
+
+      onProgress?.(`Fatal error during task execution: ${friendlyError}`);
       await this.agentClient.sendTelemetry(task.runId, {
         status: 'FAILED',
-        errorMessage: err.message || 'Unknown execution failure',
+        errorMessage: friendlyError,
         totalDurationMs,
       });
     }
