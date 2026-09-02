@@ -1,41 +1,36 @@
-# Sensitive Backup Retention & Security Register
+# Sensitive & Sanitized Backup Retention Register
 
-> **Status: SENSITIVE_BACKUP_RETENTION_PENDING**  
-> **Retention Policy: RECOVERY_BUNDLE_RETAIN_DO_NOT_DELETE**  
-> **Location Sync Status: BACKUP_LOCATION_SYNC_STATUS_UNVERIFIED**
+> **Unsanitized Backup Status: `UNSANITIZED_BACKUP_PENDING_DELETION_AUTHORIZATION`**  
+> **Sanitized Backup Status: `SANITIZED_RECOVERY_BUNDLE_VERIFIED`**  
+> **Location Sync Status: `SANITIZED_BACKUP_LOCATION_SYNC_STATUS_UNVERIFIED`**
 
 ---
 
-## 1. Sensitive Pre-Rewrite Backup Metadata
+## 1. Inventory of Recovery Artifacts
 
-| Parameter | Recorded Value | Verification Details |
+### A. Existing Unsanitized Sensitive Backup
+| Parameter | Value | Notes |
 |---|---|---|
-| **Artifact Path** | `/Users/sharmila/Music/hmc-console-pre-rewrite-backup.bundle` *(Abbr: `.../Music/hmc-console-pre-rewrite-backup.bundle`)* | Validated outside active repository; non-symlink regular file |
-| **File Size** | `288,367 bytes` (~288 KB) | Confirmed via `ls -la` |
-| **SHA-256 Checksum** | `66f095b8b2ee0287325d7abb8187867c67b40b05218bb90c0639207e8bde6dad` | Verified via `shasum -a 256` without opening content |
-| **Owner / Group** | `sharmila:staff` | Confirmed current authorized local user |
-| **POSIX File Mode** | `0600` (`-rw-------`) | Strict owner read/write only; restricted from group/others |
-| **Parent Directory** | `/Users/sharmila/Music` | Permissions `0700` (`drwx------+`), local APFS encrypted volume |
-| **Location Risk & Sync Status** | `BACKUP_LOCATION_SYNC_STATUS_UNVERIFIED` | Local filesystem verified; no cloud xattrs, but treated access-controlled |
-| **Encryption Tool Availability** | `BLOCKED_BACKUP_ENCRYPTION_TOOL_UNAVAILABLE` | `age` and `gpg` not present in environment; retained under `0600` mode |
+| **Path** | `/Users/sharmila/Music/hmc-console-pre-rewrite-backup.bundle` | Outside active repository; non-symlink |
+| **Size** | `288,367 bytes` (~288 KB) | Confirmed via `ls -la` |
+| **SHA-256** | `66f095b8b2ee0287325d7abb8187867c67b40b05218bb90c0639207e8bde6dad` | Verified checksum |
+| **Permissions** | `0600` (`-rw-------`) | Owner read/write only |
+| **Parent Dir** | `/Users/sharmila/Music` (`0700` mode) | Local APFS volume |
+| **Status** | **`UNSANITIZED_BACKUP_PENDING_DELETION_AUTHORIZATION`** | Contains historical commit `e8a4d17` |
+
+### B. New Clean Sanitized Recovery Bundle
+| Parameter | Value | Notes |
+|---|---|---|
+| **Path** | `/Users/sharmila/HMC_Secure_Backups/hmc-console-sanitized-c30537d.bundle` | Dedicated backup directory; non-symlink |
+| **Sidecar Path** | `/Users/sharmila/HMC_Secure_Backups/hmc-console-sanitized-c30537d.bundle.sha256` | Checksum sidecar file |
+| **Size** | `303,074 bytes` (~303 KB) | Confirmed via `ls -la` |
+| **SHA-256** | `710bf59208c2fb2c8fc4650a41647f9cdd7b0cde0a1f9c82db284c7ae06bd7c5` | Verified checksum |
+| **Permissions** | `0600` on bundle and sidecar; `0700` on parent dir | Strict owner access only |
+| **Parent Dir** | `/Users/sharmila/HMC_Secure_Backups` | Created specifically for clean backups |
+| **Status** | **`SANITIZED_RECOVERY_BUNDLE_VERIFIED`** | Covers active graph through `c30537d` |
 
 ---
 
-## 2. Recovery Drill & Verification Evidence
+## 2. Retention Policy & Containment Notice
 
-- **Verification Command**: `git bundle verify /Users/sharmila/Music/hmc-console-pre-rewrite-backup.bundle` (Exit Code `0`).
-- **Refs Contained**:
-  - `refs/heads/main` (`dd162f7`)
-  - `refs/heads/pre-rewrite-safety-backup` (`dd162f7`)
-  - `HEAD` (`dd162f7`)
-- **Recovery Drill Execution**:
-  - Successfully cloned into temporary directory `/tmp/hmc-recovery-drill-UfZBLF`.
-  - Verified accessibility of all 7 pre-rewrite commits (`dd162f7`, `7d5337a`, `3cd0b7b`, `919586e`, `98dd52a`, `121925f`, `e8a4d17`).
-  - Confirmed pre-rewrite HEAD `dd162f7` was fully recoverable.
-  - Safely deleted temporary directory after drill completion.
-
----
-
-## 3. Formal Retention Statement
-
-> **The active Git revision graph is sanitized. The access-controlled pre-rewrite recovery bundle intentionally retains the original history and is pending an authorized retention or secure-deletion decision.**
+> **The active Git revision graph is sanitized. The new sanitized recovery bundle provides a verified, clean recovery path. The access-controlled pre-rewrite recovery bundle intentionally retains the original history and is pending an authorized retention or secure-deletion decision.**
