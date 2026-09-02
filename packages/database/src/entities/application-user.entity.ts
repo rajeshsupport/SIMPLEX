@@ -34,7 +34,19 @@ export class ApplicationUser {
   passwordHash!: string;
 
   @Column({ type: 'nvarchar', length: 20, default: 'ACTIVE' })
-  status!: 'ACTIVE' | 'INACTIVE' | 'LOCKED';
+  status!: 'ACTIVE' | 'INACTIVE' | 'LOCKED' | 'DISABLED';
+
+  @Column({ type: 'bit', default: false })
+  isDisabled!: boolean;
+
+  @Column({ type: 'datetime2', nullable: true })
+  disabledAt?: Date | null;
+
+  @Column({ type: 'nvarchar', length: 500, nullable: true })
+  disabledReason?: string | null;
+
+  @Column({ type: 'nvarchar', length: 100, nullable: true })
+  disabledBy?: string | null;
 
   @Column({ type: 'int', default: 0 })
   failedAttempts!: number;

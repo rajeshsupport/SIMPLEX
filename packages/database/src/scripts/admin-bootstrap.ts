@@ -9,12 +9,21 @@ import { SYSTEM_ROLES } from '@hmc/shared';
 
 function promptHidden(query: string): Promise<string> {
   return new Promise((resolve) => {
+    if (!process.stdin.isTTY) {
+      // Non-interactive fallback
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on('line', (line) => {
+        rl.close();
+        resolve(line.trim());
+      });
+      return;
+    }
+
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
     });
 
-    // Mask output during password entry
     let isMasking = true;
     (rl as any)._writeToOutput = function _writeToOutput(stringToWrite: string) {
       if (isMasking && stringToWrite !== '\r\n' && stringToWrite !== '\n' && stringToWrite !== query) {
@@ -46,8 +55,8 @@ function promptText(query: string): Promise<string> {
   });
 }
 
-function validatePasswordPolicy(password: string): { valid: boolean; reason?: string } {
-  if (password.length < 10) {
+export function validatePasswordPolicy(password: string): { valid: boolean; reason?: string } {
+  if (!password || password.length < 10) {
     return { valid: false, reason: 'Password must be at least 10 characters long' };
   }
   if (!/[A-Z]/.test(password)) {
@@ -65,7 +74,12 @@ function validatePasswordPolicy(password: string): { valid: boolean; reason?: st
   return { valid: true };
 }
 
-export async function bootstrapAdmin() {
+export async function bootstrapAdmin(options?: {
+  username?: string;
+  email?: string;
+  password?: string;
+  forceReset?: boolean;
+}) {
   console.log('================================================================');
   console.log('      HMC Central Operations Console - Super Admin Bootstrap    ');
   console.log('================================================================');
@@ -76,25 +90,22 @@ export async function bootstrapAdmin() {
     await AppDataSource.initialize();
   }
 
-  const userRepo = AppDataSource.getRepository(ApplicationUser);
   const roleRepo = AppDataSource.getRepository(Role);
-  const auditRepo = AppDataSource.getRepository(AuditLog);
-
   const superAdminRole = await roleRepo.findOne({ where: { name: SYSTEM_ROLES.SUPER_ADMIN } });
   if (!superAdminRole) {
     console.error('[ERROR] Super Admin role not found. Please run "pnpm db:seed" first.');
     process.exit(1);
   }
 
-  const usernameInput = await promptText('Enter Super Admin username (default: superadmin): ');
-  const username = usernameInput || 'superadmin';
+  const username = options?.username || (await promptText('Enter Super Admin username (default: superadmin): ')) || 'superadmin';
 
+  const userRepo = AppDataSource.getRepository(ApplicationUser);
   const existingUser = await userRepo.findOne({
     where: { username },
     relations: ['roles'],
   });
 
-  if (existingUser) {
+  if (existingUser && !options?.forceReset) {
     console.log(`\n[WARNING] An administrator account with username "${username}" already exists.`);
     const confirmOverwrite = await promptText('Do you want to securely reset this administrator password? (y/N): ');
     if (confirmOverwrite.toLowerCase() !== 'y' && confirmOverwrite.toLowerCase() !== 'yes') {
@@ -103,27 +114,36 @@ export async function bootstrapAdmin() {
     }
   }
 
-  let email = 'admin@hmc-central.local';
-  if (!existingUser) {
+  let email = options?.email || 'admin@hmc-central.local';
+  if (!existingUser && !options?.email) {
     const emailInput = await promptText('Enter Super Admin email (default: admin@hmc-central.local): ');
     email = emailInput || 'admin@hmc-central.local';
   }
 
-  let password = '';
+  let password = options?.password || '';
   let isValid = false;
 
   while (!isValid) {
-    password = await promptHidden('Enter Super Admin password: ');
+    if (!password) {
+      password = await promptHidden('Enter Super Admin password: ');
+    }
     const check = validatePasswordPolicy(password);
     if (!check.valid) {
       console.log(`[POLICY REJECTED] ${check.reason}. Please try again.\n`);
+      password = '';
+      if (options?.password) {
+        throw new Error(`Password policy violation: ${check.reason}`);
+      }
       continue;
     }
 
-    const confirmPassword = await promptHidden('Confirm Super Admin password: ');
-    if (password !== confirmPassword) {
-      console.log('[ERROR] Passwords do not match. Please try again.\n');
-      continue;
+    if (!options?.password) {
+      const confirmPassword = await promptHidden('Confirm Super Admin password: ');
+      if (password !== confirmPassword) {
+        console.log('[ERROR] Passwords do not match. Please try again.\n');
+        password = '';
+        continue;
+      }
     }
 
     isValid = true;
@@ -139,72 +159,83 @@ export async function bootstrapAdmin() {
 
   const correlationId = crypto.randomUUID();
 
-  if (existingUser) {
-    existingUser.passwordHash = passwordHash;
-    existingUser.status = 'ACTIVE';
-    existingUser.failedAttempts = 0;
-    existingUser.lockoutUntil = null;
-    existingUser.refreshTokenHash = null; // Revoke all sessions
-    existingUser.requirePasswordChange = false;
-    existingUser.updatedBy = 'CLI_BOOTSTRAP';
+  // Execute in database transaction
+  await AppDataSource.transaction(async (manager) => {
+    const txUserRepo = manager.getRepository(ApplicationUser);
+    const txAuditRepo = manager.getRepository(AuditLog);
 
-    // Ensure role is assigned
-    if (!existingUser.roles.some((r) => r.name === SYSTEM_ROLES.SUPER_ADMIN)) {
-      existingUser.roles.push(superAdminRole);
+    if (existingUser) {
+      existingUser.passwordHash = passwordHash;
+      existingUser.status = 'ACTIVE';
+      existingUser.isDisabled = false;
+      existingUser.disabledAt = null;
+      existingUser.disabledReason = null;
+      existingUser.disabledBy = null;
+      existingUser.failedAttempts = 0;
+      existingUser.lockoutUntil = null;
+      existingUser.refreshTokenHash = null; // Revoke all sessions
+      existingUser.requirePasswordChange = false;
+      existingUser.updatedBy = 'CLI_BOOTSTRAP';
+
+      if (!existingUser.roles.some((r) => r.name === SYSTEM_ROLES.SUPER_ADMIN)) {
+        existingUser.roles.push(superAdminRole);
+      }
+
+      await txUserRepo.save(existingUser);
+
+      const auditEntry = txAuditRepo.create({
+        action: 'ADMIN_CREDENTIAL_RESET_BOOTSTRAP',
+        actorUserId: existingUser.id,
+        actorUsername: existingUser.username,
+        entityType: 'APPLICATION_USER',
+        entityId: existingUser.id,
+        result: 'SUCCESS',
+        detailsJson: JSON.stringify({ message: 'Super Admin password reset via CLI bootstrap' }),
+        correlationId,
+      });
+      await txAuditRepo.save(auditEntry);
+
+      console.log(`[SUCCESS] Super Admin account "${username}" password has been securely reset.`);
+      console.log('[AUDIT] Reset event recorded in audit_logs with correlation ID:', correlationId);
+    } else {
+      const newUser = txUserRepo.create({
+        username,
+        email,
+        fullName: 'System Super Administrator',
+        passwordHash,
+        status: 'ACTIVE',
+        isDisabled: false,
+        roles: [superAdminRole],
+        requirePasswordChange: false,
+        createdBy: 'CLI_BOOTSTRAP',
+      });
+      await txUserRepo.save(newUser);
+
+      const auditEntry = txAuditRepo.create({
+        action: 'ADMIN_ACCOUNT_BOOTSTRAP',
+        actorUserId: newUser.id,
+        actorUsername: newUser.username,
+        entityType: 'APPLICATION_USER',
+        entityId: newUser.id,
+        result: 'SUCCESS',
+        detailsJson: JSON.stringify({ message: 'Initial Super Admin account created via CLI bootstrap' }),
+        correlationId,
+      });
+      await txAuditRepo.save(auditEntry);
+
+      console.log(`[SUCCESS] Super Admin account "${username}" has been successfully created.`);
+      console.log('[AUDIT] Bootstrap event recorded in audit_logs with correlation ID:', correlationId);
     }
-
-    await userRepo.save(existingUser);
-
-    const auditEntry = auditRepo.create({
-      action: 'ADMIN_CREDENTIAL_RESET_BOOTSTRAP',
-      actorUserId: existingUser.id,
-      actorUsername: existingUser.username,
-      entityType: 'APPLICATION_USER',
-      entityId: existingUser.id,
-      result: 'SUCCESS',
-      detailsJson: JSON.stringify({ message: 'Super Admin password reset via CLI bootstrap' }),
-      correlationId,
-    });
-    await auditRepo.save(auditEntry);
-
-    console.log(`[SUCCESS] Super Admin account "${username}" password has been securely reset.`);
-    console.log('[AUDIT] Reset event recorded in audit_logs with correlation ID:', correlationId);
-  } else {
-    const newUser = userRepo.create({
-      username,
-      email,
-      fullName: 'System Super Administrator',
-      passwordHash,
-      status: 'ACTIVE',
-      roles: [superAdminRole],
-      requirePasswordChange: false,
-      createdBy: 'CLI_BOOTSTRAP',
-    });
-    await userRepo.save(newUser);
-
-    const auditEntry = auditRepo.create({
-      action: 'ADMIN_ACCOUNT_BOOTSTRAP',
-      actorUserId: newUser.id,
-      actorUsername: newUser.username,
-      entityType: 'APPLICATION_USER',
-      entityId: newUser.id,
-      result: 'SUCCESS',
-      detailsJson: JSON.stringify({ message: 'Initial Super Admin account created via CLI bootstrap' }),
-      correlationId,
-    });
-    await auditRepo.save(auditEntry);
-
-    console.log(`[SUCCESS] Super Admin account "${username}" has been successfully created.`);
-    console.log('[AUDIT] Bootstrap event recorded in audit_logs with correlation ID:', correlationId);
-  }
+  });
 
   console.log('\nBootstrap complete. You may now log in to the console.\n');
-  process.exit(0);
 }
 
 if (require.main === module) {
-  bootstrapAdmin().catch((err) => {
-    console.error('[FATAL] Bootstrap failed:', err);
-    process.exit(1);
-  });
+  bootstrapAdmin()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('[FATAL] Bootstrap failed:', err);
+      process.exit(1);
+    });
 }

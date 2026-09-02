@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { AppDataSource } from '../data-source.js';
 import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema.js';
+import { AddUserDisableFields1700000000001 } from '../migrations/1700000000001-AddUserDisableFields.js';
 
 export async function runMigrations(): Promise<void> {
   console.log('[MIGRATION] Initializing DataSource for migrations...');
@@ -10,6 +11,11 @@ export async function runMigrations(): Promise<void> {
 
   const queryRunner = AppDataSource.createQueryRunner();
   await queryRunner.connect();
+
+  const migrationsList = [
+    { timestamp: 1700000000000, name: 'InitialSchema1700000000000', instance: new InitialSchema1700000000000() },
+    { timestamp: 1700000000001, name: 'AddUserDisableFields1700000000001', instance: new AddUserDisableFields1700000000001() },
+  ];
 
   try {
     // Create migrations table if not exists
@@ -25,21 +31,23 @@ export async function runMigrations(): Promise<void> {
       END
     `);
 
-    const existing: any[] = await queryRunner.query(
-      "SELECT * FROM migrations WHERE name = 'InitialSchema1700000000000'"
-    );
-
-    if (existing.length === 0) {
-      console.log('[MIGRATION] Executing InitialSchema1700000000000 migration...');
-      const migration = new InitialSchema1700000000000();
-      await migration.up(queryRunner);
-
-      await queryRunner.query(
-        "INSERT INTO migrations (timestamp, name) VALUES (1700000000000, 'InitialSchema1700000000000')"
+    for (const mig of migrationsList) {
+      const existing: any[] = await queryRunner.query(
+        'SELECT * FROM migrations WHERE name = @0',
+        [mig.name]
       );
-      console.log('[MIGRATION] Migration InitialSchema1700000000000 applied successfully.');
-    } else {
-      console.log('[MIGRATION] InitialSchema1700000000000 already applied.');
+
+      if (existing.length === 0) {
+        console.log(`[MIGRATION] Executing ${mig.name}...`);
+        await mig.instance.up(queryRunner);
+        await queryRunner.query(
+          'INSERT INTO migrations (timestamp, name) VALUES (@0, @1)',
+          [mig.timestamp, mig.name]
+        );
+        console.log(`[MIGRATION] Migration ${mig.name} applied successfully.`);
+      } else {
+        console.log(`[MIGRATION] ${mig.name} already applied.`);
+      }
     }
   } finally {
     await queryRunner.release();

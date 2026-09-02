@@ -8,7 +8,7 @@
     "start": "node dist/main.js",
     "lint": "echo 'Linting api...'",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types test/rbac-security.test.ts && node --experimental-strip-types test/import-resilience-audit.test.ts"
+    "test": "node --experimental-strip-types test/rbac-security.test.ts && node --experimental-strip-types test/import-resilience-audit.test.ts && node --experimental-strip-types test/account-revocation-disable.test.ts"
   },
   "dependencies": {
     "@hmc/database": "workspace:*",

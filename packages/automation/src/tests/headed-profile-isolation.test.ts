@@ -17,8 +17,17 @@ async function runHeadedAndProfileIsolationTests() {
   try {
     server = await startFixtureServer(testPort);
 
-    // 1. Test Headed Chromium Launch for Client A
-    console.log('[TEST 1] Launching Headed Chromium for Client A (Hospital Alpha)...');
+    // 1. Test Path Traversal Defense & Sanitization
+    console.log('[TEST 1] Testing Path Traversal Defense & Profile Sanitization...');
+    const maliciousPath = BrowserProfileManager.getProfilePath('../../etc/passwd', '../root');
+    if (!maliciousPath.includes('.hmc-console/profiles')) {
+      throw new Error('Path traversal sanitization failed! Path escaped profile directory.');
+    }
+    console.log(`✓ Path traversal attempted inputs safely sanitized to: ${maliciousPath}`);
+    console.log('✓ TEST 1 PASSED: Path traversal injection prevented.');
+
+    // 2. Test Headed Chromium Launch for Client A
+    console.log('\n[TEST 2] Launching Headed Chromium for Client A (Hospital Alpha)...');
     const contextA = await BrowserProfileManager.launchPersistentContext({
       clientId: 'HOSP_ALPHA',
       userId: 'OPERATOR_1',
@@ -64,10 +73,10 @@ async function runHeadedAndProfileIsolationTests() {
 
     const loginRes = await WorkflowExecutor.executeWorkflow(pageA, loginWorkflow, {});
     if (!loginRes.success) throw new Error('Client A headed login failed');
-    console.log('✓ TEST 1 PASSED: Headed Chromium logged in successfully and arrived on dashboard.');
+    console.log('✓ TEST 2 PASSED: Headed Chromium logged in successfully and arrived on dashboard.');
 
-    // 2. Test Client B Isolation (Hospital Beta)
-    console.log('\n[TEST 2] Testing Client B Session Isolation (Hospital Beta)...');
+    // 3. Test Client B Isolation (Hospital Beta)
+    console.log('\n[TEST 3] Testing Client B Session Isolation (Hospital Beta)...');
     const contextB = await BrowserProfileManager.launchPersistentContext({
       clientId: 'HOSP_BETA',
       userId: 'OPERATOR_1',
@@ -97,7 +106,7 @@ async function runHeadedAndProfileIsolationTests() {
     if (leakedCookies.length > 0) {
       throw new Error('Client A session cookies leaked to Client B!');
     }
-    console.log('✓ TEST 2 PASSED: Strict session and cookie isolation verified between Client A and Client B.');
+    console.log('✓ TEST 3 PASSED: Strict session and cookie isolation verified between Client A and Client B.');
 
     await contextA.close();
     await contextB.close();

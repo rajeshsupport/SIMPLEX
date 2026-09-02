@@ -1,6 +1,6 @@
 import { PermissionCode } from '../constants/permissions.js';
 
-export type UserStatus = 'ACTIVE' | 'INACTIVE' | 'LOCKED';
+export type UserStatus = 'ACTIVE' | 'INACTIVE' | 'LOCKED' | 'DISABLED';
 
 export interface UserSummary {
   id: string;
@@ -8,6 +8,9 @@ export interface UserSummary {
   email: string;
   fullName: string;
   status: UserStatus;
+  isDisabled?: boolean;
+  disabledAt?: string | null;
+  disabledReason?: string | null;
   failedAttempts: number;
   lockoutUntil?: string | null;
   lastLoginAt?: string | null;

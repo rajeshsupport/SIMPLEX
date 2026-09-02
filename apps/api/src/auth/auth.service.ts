@@ -55,6 +55,12 @@ export class AuthService {
       relations: ['roles', 'roles.permissions'],
     });
 
+    // Explicit disable check
+    if (user && (user.isDisabled || user.status === 'DISABLED')) {
+      await this.recordLoginHistory(user.id, 'FAILED_CREDENTIALS', 'Account is disabled', ipAddress, userAgent);
+      throw new UnauthorizedException('Account has been explicitly disabled. Contact security administrator.');
+    }
+
     // Check account lockout
     if (user && user.lockoutUntil && new Date() < new Date(user.lockoutUntil)) {
       await this.recordLoginHistory(user.id, 'LOCKED_OUT', 'Account locked out', ipAddress, userAgent);
@@ -69,7 +75,7 @@ export class AuthService {
     // Verify user exists and status is ACTIVE
     if (!user || user.status !== 'ACTIVE') {
       if (user) {
-        await this.recordLoginHistory(user.id, 'FAILED_CREDENTIALS', 'User inactive', ipAddress, userAgent);
+        await this.recordLoginHistory(user.id, 'FAILED_CREDENTIALS', 'User inactive or locked', ipAddress, userAgent);
       }
       throw new UnauthorizedException('Invalid username or password');
     }
@@ -185,8 +191,8 @@ export class AuthService {
         relations: ['roles', 'roles.permissions'],
       });
 
-      if (!user || user.status !== 'ACTIVE' || !user.refreshTokenHash) {
-        throw new UnauthorizedException('Invalid or revoked refresh token');
+      if (!user || user.isDisabled || user.status !== 'ACTIVE' || !user.refreshTokenHash) {
+        throw new UnauthorizedException('Invalid, disabled, or revoked refresh token');
       }
 
       const isValid = await argon2.verify(user.refreshTokenHash, dto.refreshToken);
@@ -248,7 +254,7 @@ export class AuthService {
 
   async changePassword(userId: string, dto: ChangePasswordRequestDto): Promise<void> {
     const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) throw new BadRequestException('User not found');
+    if (!user || user.isDisabled) throw new BadRequestException('User not found or disabled');
 
     const isCurrentValid = await argon2.verify(user.passwordHash, dto.currentPassword);
     if (!isCurrentValid) {
@@ -281,6 +287,7 @@ export class AuthService {
     user.lockoutUntil = null;
     user.refreshTokenHash = null;
     user.updatedBy = adminUsername;
+    // If account was disabled, adminResetPassword does NOT automatically re-enable without explicit intent
     await this.userRepo.save(user);
   }
 

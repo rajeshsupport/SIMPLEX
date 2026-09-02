@@ -27,8 +27,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       relations: ['roles', 'roles.permissions'],
     });
 
-    if (!user || user.status !== 'ACTIVE') {
-      throw new UnauthorizedException('User account inactive or deleted');
+    if (!user || user.isDisabled || user.status !== 'ACTIVE') {
+      throw new UnauthorizedException('User account disabled, locked, or deleted');
     }
 
     const roles = user.roles.map((r) => r.name);
