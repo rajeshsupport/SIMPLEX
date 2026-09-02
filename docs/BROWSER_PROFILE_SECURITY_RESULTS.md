@@ -1,55 +1,42 @@
-# Browser Profile Security & Isolation Audit Results
+# Browser Profile Security, Isolation & Path Audit Results
 
 ## Overview
-The Electron Desktop Agent manages Chromium persistent contexts for executing interactive and background workflows across multiple hospital clients. This document details the security architecture and validation results for local browser profiles.
+The Electron Desktop Agent manages Chromium persistent contexts for executing interactive workflows across multiple hospital clients. This document details the security architecture, path traversal defenses, symlink protections, POSIX/Windows ACL enforcement, and strengthened session isolation results.
 
 ---
 
 ## 1. Security Architecture & Threat Mitigations
 
-| Threat | Mitigation Mechanism | Verification Method |
-|---|---|---|
-| **Path Traversal Attacks** | Client and user IDs are sanitized (`[^a-zA-Z0-9_-] -> _`). Path containment check enforces that `profilePath.startsWith(BASE_PROFILE_DIR)`. | Automated test with `../../etc/passwd` injection attempts |
-| **Symlink Escape Attacks** | `fs.realpathSync(profilePath)` verifies that symlinks cannot point outside the base directory. | Code-level realpath validation |
-| **Cross-User Local Snooping** | Directory created with `0700` POSIX mode (read/write/execute restricted to owner only). | Automated test checking `(mode & 0o777) === 0o700` |
-| **Windows ACL Protection** | For Windows targets, profiles reside in `%USERPROFILE%\.hmc-console\profiles`, inheriting user-exclusive discretionary ACLs (`NT AUTHORITY\SYSTEM` and current user only). | Documented platform architecture |
-| **Cross-Client Session Leaks** | Profiles are physically partitioned by `client_${clientId}/user_${userId}`. Client A cookies cannot be loaded by Client B. | Automated Playwright multi-client test |
-| **Sensitive Artifact Leakage** | All profile directories, cookies, videos, screenshots, and logs are excluded from Git in `.gitignore`. | `.gitignore` rule verification |
+| Threat Vector | Mitigation Implementation | Audit Test | Result |
+|---|---|---|---|
+| **Path Traversal (`../`)** | Explicit regex `^[a-zA-Z0-9_-]+$` + canonical resolved path containment check `profilePath.startsWith(BASE_PROFILE_DIR)`. | `profile-security.test.ts` (Test 1) | **PASS (Security Violation)** |
+| **Absolute Paths (`/etc/shadow`)** | Slashes rejected; canonical path check prevents escaping profile directory root. | `profile-security.test.ts` (Test 2) | **PASS (Security Violation)** |
+| **Null-Byte Injection (`\x00`)** | Rejects control characters (`[\x00-\x1F\x7F]`) before path resolution. | `profile-security.test.ts` (Test 3) | **PASS (Security Violation)** |
+| **URL-Encoded Traversal (`%2e%2e%2f`)** | Rejects URL-encoded percent sequences (`%[0-9a-fA-F]{2}`). | `profile-security.test.ts` (Test 4) | **PASS (Security Violation)** |
+| **Unicode Slash Variants (`\u2215`, `\uFF0F`)** | Rejects division slashes and fullwidth slash characters. | `profile-security.test.ts` (Test 5) | **PASS (Security Violation)** |
+| **Backslash Injections (`\`)** | Backslashes strictly rejected in all client/user identifiers. | `profile-security.test.ts` (Test 6) | **PASS (Security Violation)** |
+| **Symlink Escape** | `fs.realpathSync(profilePath)` verifies canonical resolution target remains within `BASE_PROFILE_DIR`. | `profile-security.test.ts` (Test 7) | **PASS (Contained)** |
+| **Cross-User Snooping (POSIX)** | Directory created and enforced with `0700` mode (owner read/write/execute only). | `profile-security.test.ts` (Test 8) | **PASS (0700 Verified)** |
+| **Windows ACL Protection** | Windows desktop target: `%USERPROFILE%\.hmc-console\profiles` inherits user-exclusive discretionary ACLs (`NT AUTHORITY\SYSTEM` and active user only). | `profile-security.test.ts` (Test 9) | **BLOCKED_WINDOWS_ACL_TEST (macOS Runtime)** |
 
 ---
 
-## 2. Automated Test Execution Evidence
+## 2. Strengthened Cross-Client Session Isolation Evidence
 
 Test Suite: `packages/automation/src/tests/headed-profile-isolation.test.ts`  
 Execution Status: **PASSED (Exit Code: 0)**
 
-```
-================================================================
-     HEADED PLAYWRIGHT & CLIENT SESSION ISOLATION AUDIT         
-================================================================
-
-[FIXTURE] Local Mock HMC Server running on http://localhost:4002
-[TEST 1] Testing Path Traversal Defense & Profile Sanitization...
-✓ Path traversal attempted inputs safely sanitized to: /Users/sharmila/.hmc-console/profiles/client_______etc_passwd/user____root
-✓ TEST 1 PASSED: Path traversal injection prevented.
-
-[TEST 2] Launching Headed Chromium for Client A (Hospital Alpha)...
-✓ Client A profile path: /Users/sharmila/.hmc-console/profiles/client_HOSP_ALPHA/user_OPERATOR_1
-✓ Directory permissions verified: 0700 (Owner read/write/execute only)
-✓ TEST 2 PASSED: Headed Chromium logged in successfully and arrived on dashboard.
-
-[TEST 3] Testing Client B Session Isolation (Hospital Beta)...
-✓ Client B profile path: /Users/sharmila/.hmc-console/profiles/client_HOSP_BETA/user_OPERATOR_1
-- Client A cookies count: 0
-- Client B cookies count: 0
-✓ TEST 3 PASSED: Strict session and cookie isolation verified between Client A and Client B.
-
-✓ Headed and Profile Isolation Audit Passed Successfully.
-```
-
----
-
-## 3. Storage Retention & Secure Deletion
-
-- **Profile Deletion API**: `BrowserProfileManager.deleteProfile(clientId, userId)` allows administrators or operators to purge cached profiles on demand.
-- **Retention Policies**: Configured in database entity `RetentionPolicy` (`AUDIT_LOGS`: 365 days, `AUTOMATION_RUNS`: 90 days, `SCREENSHOTS`: 30 days).
+### Non-Zero Marker Verification Protocol:
+1. **Client A (`HOSP_ALPHA`) Profile**:
+   - Injected persistent cookie: `client_a_cookie_marker=marker_alpha_val`
+   - Injected `localStorage`: `client_a_ls_marker=marker_alpha_ls_val`
+   - Injected `sessionStorage`: `client_a_ss_marker=marker_alpha_ss_val`
+2. **Client B (`HOSP_BETA`) Profile**:
+   - Injected persistent cookie: `client_b_cookie_marker=marker_beta_val`
+   - Injected `localStorage`: `client_b_ls_marker=marker_beta_ls_val`
+   - Injected `sessionStorage`: `client_b_ss_marker=marker_beta_ss_val`
+3. **Context Restart & Cross-Profile Reading Audit**:
+   - Both Chromium browser contexts were closed and restarted from their respective on-disk persistent user data directories.
+   - Client A persistent store: Retrieved `client_a_cookie_marker` and `client_a_ls_marker`. Cross-read for Client B markers returned **0 matches / null**.
+   - Client B persistent store: Retrieved `client_b_cookie_marker` and `client_b_ls_marker`. Cross-read for Client A markers returned **0 matches / null**.
+   - **Conclusion**: 100% strict cookie and web-storage isolation confirmed between Client A and Client B.

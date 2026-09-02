@@ -1,11 +1,11 @@
-# Secure Administrator Bootstrap Test Results
+# Secure Administrator Bootstrap & Plaintext Leak Test Results
 
 ## Overview
-This document records the security and robustness tests executed for the interactive bootstrap utility `pnpm admin:bootstrap` implemented in `packages/database/src/scripts/admin-bootstrap.ts`.
+This document records the security, robustness, and output leak tests executed for the interactive bootstrap utility `pnpm admin:bootstrap` implemented in `packages/database/src/scripts/admin-bootstrap.ts`.
 
 ---
 
-## 1. Compliance Matrix
+## 1. Compliance & Security Evaluation Matrix
 
 | Requirement | Evaluation Criterion | Implementation Details | Test Result |
 |---|---|---|---|
@@ -23,34 +23,15 @@ This document records the security and robustness tests executed for the interac
 
 ---
 
-## 2. Automated Test Execution Evidence
+## 2. Deep Output & Plaintext Leak Audit
 
-Test Suite: `packages/database/src/tests/admin-bootstrap.test.ts`  
+Test Suite: `packages/database/src/tests/bootstrap-leak-audit.test.ts`  
 Execution Status: **PASSED (Exit Code: 0)**
 
-```
-================================================================
-       SECURE ADMINISTRATOR BOOTSTRAP SECURITY AUDIT            
-================================================================
-
-[TEST 1] Testing Password Complexity Policy Validation...
-✓ TEST 1 PASSED: Password complexity policy strictly enforced across all rules.
-
-[TEST 2] Testing Transactional Bootstrap Execution...
-Hashing credential with Argon2id (memoryCost=64MB, timeCost=3, parallelism=4)...
-[SUCCESS] Super Admin account "test_admin_74611" has been successfully created.
-[AUDIT] Bootstrap event recorded in audit_logs with correlation ID: eb512efe-a2a6-47af-87cf-f1efb4b01668
-✓ TEST 2 PASSED: Successfully bootstrapped administrator with verified Argon2id hash.
-
-[TEST 3] Testing Reset Flow with Argon2id Re-Hashing...
-Hashing credential with Argon2id (memoryCost=64MB, timeCost=3, parallelism=4)...
-[SUCCESS] Super Admin account "test_admin_74611" password has been securely reset.
-[AUDIT] Reset event recorded in audit_logs with correlation ID: da600e14-5d95-447f-88c7-446dc406b7a2
-✓ TEST 3 PASSED: Reset flow updated password hash and logged event with correlation ID.
-
-[TEST 4] Testing Safe Failure on Weak Password in Non-interactive Mode...
-[POLICY REJECTED] Password must be at least 10 characters long. Please try again.
-✓ TEST 4 PASSED: Weak password in programmatic call threw policy error.
-
-All Secure Administrator Bootstrap Tests Passed Successfully!
-```
+During execution with a controlled test secret:
+- **Captured stdout & stderr**: 0 plaintext matches
+- **Process execution arguments**: 0 plaintext matches
+- **Database user record**: Stored strictly as verified Argon2id hash (`$argon2id$v=19$m=65536,t=3,p=4$...`); 0 plaintext matches
+- **Audit log records (`detailsJson`)**: 0 plaintext matches
+- **Temporary files in OS temp directory**: 0 plaintext matches
+- **Verification Conclusion**: **ZERO Plaintext Leaks Detected across all channels.**

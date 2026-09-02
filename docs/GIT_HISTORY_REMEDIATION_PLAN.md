@@ -1,83 +1,98 @@
-# Git History Remediation Plan
+# Git History Remediation Plan & Pre-Rewrite Readiness
 
 > [!IMPORTANT]
-> **Status: PENDING USER AUTHORIZATION**  
-> Because this local repository has not been pushed to any remote server (`git status` shows unpushed local repository), history rewriting has **not** been executed automatically. This document outlines the safe procedure for cleaning historical commit `e8a4d17` before the first push.
+> **Status: AWAITING_EXPLICIT_USER_AUTHORIZATION_FOR_HISTORY_REWRITE**  
+> Because this local repository has not been pushed to any remote server (`git status` shows an unpushed local repository on `main`), history rewriting has **not** been executed. This document establishes the exact pre-rewrite readiness and safe procedure for eliminating historical commit `e8a4d17` once authorized.
 
 ---
 
-## 1. Scope of Historical Exposure
+## 1. Current Repository Snapshot & Pre-Rewrite State
 
-- **Affected Commit**: `e8a4d17` (*"feat: complete HMC Central Operations Console production-grade delivery"*)
-- **Affected Files**:
-  - `packages/database/src/seeds/seed.ts`
-  - `apps/web/src/pages/LoginPage.tsx`
-  - `docs/local-installation.md`
-  - `docs/uat-checklist.md`
-- **Active Working Tree**: Clean (all current source files and build artifacts contain zero occurrences of the compromised credential).
+| Parameter | Current Value | Verification Output |
+|---|---|---|
+| **Current Active Branch** | `main` | `git branch --show-current` -> `main` |
+| **Current HEAD Commit** | `98dd52a` | `git rev-parse HEAD` -> `98dd52a` |
+| **Working Tree Status** | Clean (All changes tracked and verified) | `git status --short` -> clean |
+| **Local Branches** | `main` | `git branch` -> `* main` |
+| **Git Tags** | 0 tags | `git tag` -> (empty) |
+| **Configured Remotes** | 0 remotes (Unpushed local repository) | `git remote -v` -> (empty) |
+| **Historically Exposed Commit** | `e8a4d17` | `git log -p -G"Admin@HMC2026"` |
+| **Files Affected in `e8a4d17`** | `seed.ts`, `LoginPage.tsx`, `local-installation.md`, `uat-checklist.md` | Confirmed isolated to 4 files |
 
 ---
 
-## 2. Pre-Rewrite Backup Procedure
+## 2. Step-by-Step Backup & Verification Procedure
 
-Before executing any history rewriting, create an immutable local backup branch and archive:
+Before initiating any history rewrite:
 
 ```bash
-# 1. Create a safety backup branch
-git branch pre-remediation-backup-$(date +%Y%m%d%H%M%S)
+# 1. Create an immutable safety branch
+git branch pre-rewrite-safety-checkpoint-$(date +%Y%m%d%H%M%S)
 
-# 2. Create a clean bundle archive outside the repository
+# 2. Create a complete Git bundle archive outside the repository
 git bundle create ../hmc-console-pre-rewrite-backup.bundle --all
+
+# 3. Verify bundle integrity
+git bundle verify ../hmc-console-pre-rewrite-backup.bundle
 ```
 
 ---
 
-## 3. Recommended History Sanitization Command
+## 3. Recommended History Sanitization Command (`git-filter-repo`)
 
-Use `git-filter-repo` (the modern, official Git replacement for `git filter-branch`):
+`git-filter-repo` is the official Python-based tool recommended by the Git core team:
 
 ```bash
-# 1. Install git-filter-repo (if not present)
-# brew install git-filter-repo OR pip install git-filter-repo
+# 1. Create a replacement file specifying the exact secret pattern to redact
+echo "regex:(?i)compromised_secret_string==>[CONFIGURED_VIA_ADMIN_BOOTSTRAP]" > /tmp/replace-secrets.txt
 
-# 2. Create a replacement file (replace-secrets.txt)
-# Replace the compromised string with a generic placeholder [CONFIGURED_VIA_ADMIN_BOOTSTRAP]
-echo "regex:(?i)compromised_secret_pattern==>[CONFIGURED_VIA_ADMIN_BOOTSTRAP]" > /tmp/replace-secrets.txt
-
-# 3. Execute git-filter-repo
+# 2. Run git-filter-repo across all commits
 git-filter-repo --replace-text /tmp/replace-secrets.txt --force
 
-# 4. Remove temporary replacement map
+# 3. Clean up the temporary replacement definition
 rm /tmp/replace-secrets.txt
 ```
 
 ---
 
-## 4. Post-Rewrite Verification & Integrity Checklist
+## 4. Post-Rewrite Verification & Integrity Audit
 
-After history rewriting is executed:
+Immediately following the rewrite:
 
-1. **Full History Scan**:
+1. **Grep and Git Log Verification**:
    ```bash
-   git log -p -S "compromised_pattern" --all
-   # Expected output: 0 commits found
+   git log -p --all -G"compromised_pattern"
+   # Must return ZERO commits
    ```
-2. **Scanner Verification**: Run `gitleaks detect --source . --verbose`.
-3. **Commit Hash Reconciliation**: Note that historical commit hashes (including `e8a4d17` and `121925f`) will be rewritten.
-4. **Rebuild & Re-test**:
+2. **Commit Hash Reconciliation**:
+   - `e8a4d17` will be replaced by a clean sanitized commit hash.
+   - Subsequent commits (`121925f`, `98dd52a`) will receive new parent commit hashes.
+   - Record the old-to-new commit mapping table from `.git/filter-repo/commit-map`.
+3. **Full Build & Test Verification**:
    ```bash
    pnpm build && pnpm test
    ```
 
 ---
 
-## 5. First-Push Checklist
+## 5. Rollback Procedure (In Case of Any Disruption)
 
-- [ ] History rewritten and verified clean across all commits, tags, and branches.
-- [ ] No remote tracking branches existed prior to cleanup.
-- [ ] Remote repository initialized with empty default branch.
-- [ ] Push executed with standard push:
-  ```bash
-  git push -u origin main
-  ```
-- [ ] Mandatory external rotation: If the compromised password was ever used or tested in any shared or external environment, that external credential must be rotated immediately regardless of Git cleanup.
+If history rewriting encounters an error or produces unexpected tree states:
+
+```bash
+# 1. Restore repository from verified bundle
+cd ..
+rm -rf SIMPLEX
+git clone ../hmc-console-pre-rewrite-backup.bundle SIMPLEX
+cd SIMPLEX
+```
+
+---
+
+## 6. Execution Gate
+
+```
+================================================================================
+AWAITING_EXPLICIT_USER_AUTHORIZATION_FOR_HISTORY_REWRITE
+================================================================================
+```
