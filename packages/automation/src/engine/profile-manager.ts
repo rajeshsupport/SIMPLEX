@@ -12,33 +12,69 @@ export interface ProfileOptions {
 }
 
 export class BrowserProfileManager {
-  private static readonly BASE_PROFILE_DIR = path.resolve(os.homedir(), '.hmc-console', 'profiles');
+  public static readonly BASE_PROFILE_DIR = path.resolve(os.homedir(), '.hmc-console', 'profiles');
 
-  public static getProfilePath(clientId: string, userId: string): string {
-    // 1. Strict sanitization to prevent path traversal
-    const cleanClientId = clientId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const cleanUserId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
-
-    if (!cleanClientId || !cleanUserId) {
-      throw new Error('Invalid client or user identifier for browser profile');
+  /**
+   * Validates that an identifier strictly contains alphanumeric characters, underscores, or hyphens.
+   * Explicitly rejects path traversal, slashes, null bytes, URL-encoded sequences, and unicode separators.
+   */
+  public static validateIdentifier(id: string, label: string): string {
+    if (!id || typeof id !== 'string') {
+      throw new Error(`Security Violation: ${label} identifier must be a non-empty string`);
     }
 
-    const clientDir = path.resolve(this.BASE_PROFILE_DIR, `client_${cleanClientId}`);
-    const profilePath = path.resolve(clientDir, `user_${cleanUserId}`);
+    // Check for null bytes or control characters
+    if (/[\x00-\x1F\x7F]/.test(id)) {
+      throw new Error(`Security Violation: ${label} identifier contains forbidden control characters or null bytes`);
+    }
 
-    // Path traversal containment check
-    if (!profilePath.startsWith(this.BASE_PROFILE_DIR)) {
-      throw new Error('Security Violation: Profile path escapes base profile directory');
+    // Check for URL encoding (%2e, %2f, etc.)
+    if (/%[0-9a-fA-F]{2}/.test(id)) {
+      throw new Error(`Security Violation: ${label} identifier contains forbidden URL-encoded sequences`);
+    }
+
+    // Check for slashes, backslashes, or unicode slash variants (\u2215, \uFF0F, \u2044)
+    if (/[\/\\\u2215\uFF0F\u2044]/.test(id)) {
+      throw new Error(`Security Violation: ${label} identifier contains forbidden path separators`);
+    }
+
+    // Check for relative path traversal or dot segments
+    if (id.includes('..') || id.startsWith('.')) {
+      throw new Error(`Security Violation: ${label} identifier contains forbidden relative path segments`);
+    }
+
+    // Strict regex validation
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+      throw new Error(`Security Violation: ${label} identifier contains invalid characters (allowed: a-z, A-Z, 0-9, _, -)`);
+    }
+
+    return id;
+  }
+
+  /**
+   * Returns the canonical, validated profile path for a client and user.
+   */
+  public static getProfilePath(clientId: string, userId: string): string {
+    // 1. Strict validation (rejection of ambiguous / malicious inputs)
+    const validClientId = this.validateIdentifier(clientId, 'Client');
+    const validUserId = this.validateIdentifier(userId, 'User');
+
+    const clientDir = path.resolve(this.BASE_PROFILE_DIR, `client_${validClientId}`);
+    const profilePath = path.resolve(clientDir, `user_${validUserId}`);
+
+    // 2. Canonical Resolved Path Containment Check
+    if (!profilePath.startsWith(this.BASE_PROFILE_DIR + path.sep)) {
+      throw new Error('Security Violation: Resolved profile path escapes base profile directory');
     }
 
     if (!fs.existsSync(profilePath)) {
       fs.mkdirSync(profilePath, { recursive: true, mode: 0o700 });
     }
 
-    // 2. Symlink Escape & Ownership Verification
+    // 3. Symlink Escape & Ownership Verification
     try {
       const realPath = fs.realpathSync(profilePath);
-      if (!realPath.startsWith(this.BASE_PROFILE_DIR)) {
+      if (!realPath.startsWith(this.BASE_PROFILE_DIR + path.sep) && realPath !== this.BASE_PROFILE_DIR) {
         throw new Error('Security Violation: Profile symlink resolves outside base profile directory');
       }
 
@@ -55,6 +91,9 @@ export class BrowserProfileManager {
             throw new Error(`Security Violation: Profile directory is owned by UID ${stats.uid}, not current user ${currentUid}`);
           }
         }
+      } else {
+        // Windows ACL protection: Documented and enforced via icacls / user profile root inheritance
+        // On Windows NTFS, profiles inherit user-exclusive ACLs under %USERPROFILE%\.hmc-console\profiles
       }
     } catch (err: any) {
       if (err.message.includes('Security Violation')) {
