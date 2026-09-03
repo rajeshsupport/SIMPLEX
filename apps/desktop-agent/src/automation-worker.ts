@@ -5,17 +5,42 @@ import { AgentClient } from './agent-client.js';
 
 export class AutomationWorker {
   private activeProfileContexts: Map<string, BrowserContext> = new Map();
+  private singleFlightTasks: Map<string, Promise<void>> = new Map();
 
   constructor(private agentClient: AgentClient) {}
 
   public async executeTask(task: AgentTaskAssignment, onProgress?: (msg: string) => void): Promise<void> {
+    const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const profileKey = `${task.clientId}_${effectiveUserId}`;
+
+    // Single-flight lock: Prevent duplicate concurrent launches for the same client profile
+    const inFlight = this.singleFlightTasks.get(profileKey);
+    if (inFlight) {
+      onProgress?.(`A launch task is already in-flight for client [${task.clientId}]. Awaiting existing execution...`);
+      return inFlight;
+    }
+
+    const taskExecutionPromise = this.performTaskExecution(task, profileKey, effectiveUserId, onProgress);
+    this.singleFlightTasks.set(profileKey, taskExecutionPromise);
+
+    try {
+      await taskExecutionPromise;
+    } finally {
+      this.singleFlightTasks.delete(profileKey);
+    }
+  }
+
+  private async performTaskExecution(
+    task: AgentTaskAssignment,
+    profileKey: string,
+    effectiveUserId: string,
+    onProgress?: (msg: string) => void
+  ): Promise<void> {
     const startTime = Date.now();
     onProgress?.(`Starting task [${task.taskType}] for client [${task.clientId}]...`);
 
     let context: BrowserContext | null = null;
     let page: Page | null = null;
-    const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const profileKey = `${task.clientId}_${effectiveUserId}`;
 
     try {
       // 1. Check if an active browser context already exists for this client profile
@@ -30,7 +55,6 @@ export class AutomationWorker {
             onProgress?.(`Reusing existing active browser window for client [${task.clientId}]`);
           }
         } catch {
-          // Existing context is closed/invalid
           this.activeProfileContexts.delete(profileKey);
           context = null;
           page = null;
@@ -43,7 +67,7 @@ export class AutomationWorker {
           clientId: task.clientId,
           userId: effectiveUserId,
           isHeaded: task.options?.isHeaded ?? true,
-          slowMo: task.options?.slowMoMs ?? 50,
+          slowMo: 0, // Zero artificial delay for maximum performance
         });
 
         this.activeProfileContexts.set(profileKey, context);
@@ -93,46 +117,37 @@ export class AutomationWorker {
           totalDurationMs,
         });
 
-        // Keep browser open for interactive user session if requested
         if (!task.options?.leaveBrowserOpen) {
           await context.close();
           this.activeProfileContexts.delete(profileKey);
         }
-      } else {
-        onProgress?.(`✗ Task ${task.runId} ${result.status}: ${result.errorMessage}`);
+      } else if (result.status === 'REQUIRES_MANUAL_INTERVENTION') {
+        onProgress?.(`! Task ${task.runId} requires manual security intervention: ${result.errorMessage}`);
         await this.agentClient.sendTelemetry(task.runId, {
-          status: result.status,
-          errorMessage: result.errorMessage,
+          status: 'REQUIRES_MANUAL_INTERVENTION',
+          errorMessage: result.errorMessage || 'Manual security intervention required.',
           totalDurationMs,
         });
-
-        // If manual intervention required or leave open, preserve window
-        if (!task.options?.leaveBrowserOpen && result.status !== 'REQUIRES_MANUAL_INTERVENTION') {
-          await context.close();
-          this.activeProfileContexts.delete(profileKey);
-        }
+      } else {
+        onProgress?.(`✗ Task ${task.runId} failed: ${result.errorMessage}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: result.errorMessage || 'Automation execution failed',
+          totalDurationMs,
+        });
       }
     } catch (err: any) {
       const totalDurationMs = Date.now() - startTime;
-      const friendlyError = err.message && err.message.includes('ERR_CONNECTION_REFUSED')
-        ? 'Client application is currently unreachable.'
-        : (err.message || 'Unknown execution failure');
-
-      onProgress?.(`Fatal error during task execution: ${friendlyError}`);
+      onProgress?.(`[FATAL] Error in task execution: ${err.message}`);
       await this.agentClient.sendTelemetry(task.runId, {
         status: 'FAILED',
-        errorMessage: friendlyError,
+        errorMessage: err.message || 'Worker runtime error',
         totalDurationMs,
       });
     }
   }
 
-  public async closeAllSessions(): Promise<void> {
-    for (const [key, ctx] of this.activeProfileContexts.entries()) {
-      try {
-        await ctx.close();
-      } catch {}
-    }
-    this.activeProfileContexts.clear();
+  public getActiveContextCount(): number {
+    return this.activeProfileContexts.size;
   }
 }

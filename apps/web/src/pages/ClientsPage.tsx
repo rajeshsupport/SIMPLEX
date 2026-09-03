@@ -19,10 +19,14 @@ import { Modal } from '../components/Modal.js';
 import { ClientWithCredentialInfo, ClientEnvironment, PERMISSIONS } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
 
-interface StepStatusItem {
+interface LaunchToast {
   id: string;
-  label: string;
-  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+  clientId: string;
+  clientCode: string;
+  clientName?: string;
+  status: 'LAUNCHING' | 'SUCCESS' | 'REQUIRES_INTERVENTION' | 'ERROR';
+  message: string;
+  client: ClientWithCredentialInfo;
 }
 
 export const ClientsPage: React.FC = () => {
@@ -35,7 +39,6 @@ export const ClientsPage: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isCredModalOpen, setIsCredModalOpen] = useState(false);
-  const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
   const [selectedClient, setSelectedClient] = useState<ClientWithCredentialInfo | null>(null);
 
   // Form states
@@ -57,16 +60,14 @@ export const ClientsPage: React.FC = () => {
     password: '',
   });
 
-  // Launch Status states
-  const [launchRunId, setLaunchRunId] = useState<string | null>(null);
-  const [launchStatus, setLaunchStatus] = useState<'IDLE' | 'STARTING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'REQUIRES_MANUAL_INTERVENTION'>('IDLE');
-  const [launchErrorMessage, setLaunchErrorMessage] = useState<string | null>(null);
-  const [activeStepText, setActiveStepText] = useState<string>('Starting isolated browser…');
+  // Fast non-blocking launch states
+  const [toast, setToast] = useState<LaunchToast | null>(null);
+  const [launchingClientIds, setLaunchingClientIds] = useState<Record<string, boolean>>({});
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [launchingClientId, setLaunchingClientId] = useState<string | null>(null);
 
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const toastDismissTimerRef = useRef<NodeJS.Timeout | null>(null);
   const { hasPermission } = useAuth();
 
   const loadClients = async () => {
@@ -85,6 +86,7 @@ export const ClientsPage: React.FC = () => {
     loadClients();
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
+      if (toastDismissTimerRef.current) clearTimeout(toastDismissTimerRef.current);
     };
   }, []);
 
@@ -109,7 +111,7 @@ export const ClientsPage: React.FC = () => {
       });
       await loadClients();
     } catch (err: any) {
-      alert(`Error creating client: ${err.message}`);
+      setActionMessage(`Error creating client: ${err.message}`);
     }
   };
 
@@ -124,7 +126,7 @@ export const ClientsPage: React.FC = () => {
       setIsEditModalOpen(false);
       await loadClients();
     } catch (err: any) {
-      alert(`Error updating client: ${err.message}`);
+      setActionMessage(`Error updating client: ${err.message}`);
     }
   };
 
@@ -143,7 +145,7 @@ export const ClientsPage: React.FC = () => {
       setCredForm({ credentialName: 'Default HMC Operator', username: '', password: '' });
       await loadClients();
     } catch (err: any) {
-      alert(`Error saving credentials: ${err.message}`);
+      setActionMessage(`Error saving credentials: ${err.message}`);
     }
   };
 
@@ -168,48 +170,27 @@ export const ClientsPage: React.FC = () => {
     }
   };
 
-  const startPollingRun = (runId: string) => {
+  const handleOpenAndLogin = async (client: ClientWithCredentialInfo) => {
+    if (launchingClientIds[client.id]) return; // Single-flight per client
+
+    const displayName = client.clientName || client.clientCode;
+
+    // Immediate button response (<30ms)
+    setLaunchingClientIds((prev) => ({ ...prev, [client.id]: true }));
+
+    if (toastDismissTimerRef.current) clearTimeout(toastDismissTimerRef.current);
     if (pollingRef.current) clearInterval(pollingRef.current);
 
-    pollingRef.current = setInterval(async () => {
-      try {
-        const run = await ApiClient.request<any>(`/agents/runs/${runId}`);
-        if (!run) return;
-
-        setLaunchStatus(run.status);
-
-        if (run.steps && run.steps.length > 0) {
-          const latestStep = run.steps[run.steps.length - 1];
-          setActiveStepText(latestStep.stepName || 'Processing step…');
-        }
-
-        if (run.status === 'COMPLETED') {
-          setActiveStepText('Login successful — browser ready.');
-          setLaunchErrorMessage(null);
-          if (pollingRef.current) clearInterval(pollingRef.current);
-        } else if (run.status === 'FAILED') {
-          setLaunchErrorMessage(run.errorMessage || 'Client login failed.');
-          if (pollingRef.current) clearInterval(pollingRef.current);
-        } else if (run.status === 'REQUIRES_MANUAL_INTERVENTION') {
-          setActiveStepText('Manual security verification is required in the opened browser window.');
-          setLaunchErrorMessage(null);
-          if (pollingRef.current) clearInterval(pollingRef.current);
-        }
-      } catch (err: any) {
-        console.warn('Polling error:', err);
-      }
-    }, 600);
-  };
-
-  const handleOpenAndLogin = async (client: ClientWithCredentialInfo) => {
-    if (launchingClientId) return; // Prevent double click
-
-    setSelectedClient(client);
-    setLaunchingClientId(client.id);
-    setIsStatusModalOpen(true);
-    setLaunchStatus('STARTING');
-    setLaunchErrorMessage(null);
-    setActiveStepText('Starting isolated browser…');
+    // Immediate non-blocking toast (<30ms)
+    setToast({
+      id: client.id,
+      clientId: client.id,
+      clientCode: client.clientCode,
+      clientName: client.clientName,
+      status: 'LAUNCHING',
+      message: `Opening ${displayName}…`,
+      client,
+    });
 
     try {
       const res = await ApiClient.request<{ id: string; status: string }>('/agents/dispatch-open-and-login', {
@@ -217,31 +198,72 @@ export const ClientsPage: React.FC = () => {
         body: JSON.stringify({ clientId: client.id }),
       });
 
-      setLaunchRunId(res.id);
-      setLaunchStatus('RUNNING');
-      setActiveStepText('Opening client URL…');
-      startPollingRun(res.id);
-    } catch (err: any) {
-      setLaunchStatus('FAILED');
-      const msg = err.message && err.message.includes('agent')
-        ? 'Desktop browser agent is not running. Start the agent and try again.'
-        : err.message || 'Failed to dispatch launch';
-      setLaunchErrorMessage(msg);
-    } finally {
-      setLaunchingClientId(null);
-    }
-  };
+      // Poll run status non-blockingly (250ms intervals)
+      pollingRef.current = setInterval(async () => {
+        try {
+          const run = await ApiClient.request<any>(`/agents/runs/${res.id}`);
+          if (!run) return;
 
-  const handleCancelLaunch = async () => {
-    if (launchRunId) {
-      try {
-        await ApiClient.request(`/agents/runs/${launchRunId}/cancel`, { method: 'POST' });
-      } catch {}
+          if (run.status === 'COMPLETED') {
+            if (pollingRef.current) clearInterval(pollingRef.current);
+            setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+            setToast({
+              id: client.id,
+              clientId: client.id,
+              clientCode: client.clientCode,
+              clientName: client.clientName,
+              status: 'SUCCESS',
+              message: `${displayName} opened successfully.`,
+              client,
+            });
+            toastDismissTimerRef.current = setTimeout(() => {
+              setToast((curr) => (curr?.id === client.id && curr?.status === 'SUCCESS' ? null : curr));
+            }, 2000);
+          } else if (run.status === 'REQUIRES_MANUAL_INTERVENTION') {
+            if (pollingRef.current) clearInterval(pollingRef.current);
+            setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+            setToast({
+              id: client.id,
+              clientId: client.id,
+              clientCode: client.clientCode,
+              clientName: client.clientName,
+              status: 'REQUIRES_INTERVENTION',
+              message: 'Manual security verification is required in the opened browser window.',
+              client,
+            });
+          } else if (run.status === 'FAILED') {
+            if (pollingRef.current) clearInterval(pollingRef.current);
+            setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+            setToast({
+              id: client.id,
+              clientId: client.id,
+              clientCode: client.clientCode,
+              clientName: client.clientName,
+              status: 'ERROR',
+              message: run.errorMessage || `Failed to open ${displayName}.`,
+              client,
+            });
+          }
+        } catch {
+          // Keep polling quietly
+        }
+      }, 250);
+    } catch (err: any) {
+      setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+      const msg =
+        err.message && err.message.includes('Desktop browser agent is not running')
+          ? 'Desktop browser agent is not running.'
+          : err.message || `Failed to open ${displayName}.`;
+      setToast({
+        id: client.id,
+        clientId: client.id,
+        clientCode: client.clientCode,
+        clientName: client.clientName,
+        status: 'ERROR',
+        message: msg,
+        client,
+      });
     }
-    if (pollingRef.current) clearInterval(pollingRef.current);
-    setIsStatusModalOpen(false);
-    setLaunchStatus('IDLE');
-    setLaunchRunId(null);
   };
 
   const filteredClients = clients.filter((c) => {
@@ -249,6 +271,7 @@ export const ClientsPage: React.FC = () => {
       c.clientCode.toLowerCase().includes(search.toLowerCase()) ||
       c.clientName.toLowerCase().includes(search.toLowerCase()) ||
       c.baseUrl.toLowerCase().includes(search.toLowerCase());
+
     const matchesEnv = selectedEnv === 'ALL' || c.environment === selectedEnv;
     return matchesSearch && matchesEnv;
   });
@@ -258,49 +281,51 @@ export const ClientsPage: React.FC = () => {
       {/* Header & Controls */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-white tracking-tight">HMC Client Configurations</h2>
-          <p className="text-xs text-slate-400">Database-driven client application profiles and credential vault</p>
+          <h1 className="text-2xl font-bold text-white tracking-tight">Client Application Instances</h1>
+          <p className="text-sm text-slate-400 mt-1">
+            Registered hospital management central application endpoints and managed sessions
+          </p>
         </div>
 
         {hasPermission(PERMISSIONS.CLIENT_CREATE) && (
           <button
             onClick={() => setIsCreateModalOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-sm font-semibold shadow-lg shadow-sky-900/30 transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-sm font-medium shadow-lg shadow-sky-950/50 transition-all self-start"
           >
             <Plus className="w-4 h-4" />
-            Add New Client
+            Register Client Instance
           </button>
         )}
       </div>
 
       {actionMessage && (
-        <div className="p-3.5 bg-sky-950/80 border border-sky-800 text-sky-200 text-xs rounded-lg animate-in fade-in">
+        <div className="p-3 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-300">
           {actionMessage}
         </div>
       )}
 
-      {/* Filter Bar */}
-      <div className="flex flex-col sm:flex-row items-center gap-3 bg-surface p-3.5 rounded-xl border border-surface-border">
-        <div className="relative flex-1 w-full">
-          <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+      {/* Filter and Search Bar */}
+      <div className="flex flex-col sm:flex-row gap-4 bg-slate-900 p-4 rounded-xl border border-slate-800">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
           <input
             type="text"
-            placeholder="Search by client code, name, or base URL..."
+            placeholder="Search by client code, hospital name, or base URL..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-1.5 bg-slate-900 border border-slate-700/80 rounded-lg text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500"
+            className="w-full pl-9 pr-4 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-sky-500"
           />
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
-          {['ALL', 'Production', 'Staging', 'UAT', 'Test', 'Development', 'Local'].map((env) => (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+          {['ALL', 'Development', 'Test', 'Staging', 'Local', 'Production'].map((env) => (
             <button
               key={env}
               onClick={() => setSelectedEnv(env)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
                 selectedEnv === env
-                  ? 'bg-sky-600 text-white'
-                  : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                  ? 'bg-sky-600/20 border border-sky-500 text-sky-400'
+                  : 'bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200'
               }`}
             >
               {env}
@@ -309,84 +334,68 @@ export const ClientsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Clients Table */}
-      <div className="bg-surface border border-surface-border rounded-xl overflow-hidden shadow-sm">
-        <table className="w-full text-left border-collapse text-xs">
-          <thead>
-            <tr className="bg-slate-900/80 border-b border-surface-border text-slate-400 uppercase tracking-wider font-semibold">
-              <th className="py-3 px-4">Client Code & Name</th>
-              <th className="py-3 px-4">Environment</th>
-              <th className="py-3 px-4">Base URL & Routes</th>
-              <th className="py-3 px-4">Credentials Status</th>
-              <th className="py-3 px-4">Connection</th>
-              <th className="py-3 px-4 text-right">Actions</th>
+      {/* Client List Table */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+        <table className="w-full text-left text-sm text-slate-300">
+          <thead className="bg-slate-950 text-slate-400 text-xs uppercase font-semibold border-b border-slate-800">
+            <tr>
+              <th className="px-6 py-3.5">Client Code</th>
+              <th className="px-6 py-3.5">Name / Endpoint</th>
+              <th className="px-6 py-3.5">Environment</th>
+              <th className="px-6 py-3.5">Credentials Status</th>
+              <th className="px-6 py-3.5 text-right">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-surface-border">
+          <tbody className="divide-y divide-slate-800">
             {loading ? (
               <tr>
-                <td colSpan={6} className="py-8 text-center text-slate-500">Loading clients...</td>
+                <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
+                  <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-sky-500" />
+                  Loading client endpoints...
+                </td>
               </tr>
             ) : filteredClients.length === 0 ? (
               <tr>
-                <td colSpan={6} className="py-8 text-center text-slate-500">No matching clients found.</td>
+                <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
+                  No registered clients found matching criteria.
+                </td>
               </tr>
             ) : (
               filteredClients.map((client) => {
                 const isProd = client.environment === 'Production';
-                const isLaunching = launchingClientId === client.id;
+                const isLaunchingThisClient = Boolean(launchingClientIds[client.id]);
 
                 return (
-                  <tr key={client.id} className={`hover:bg-slate-900/40 transition-colors ${isProd ? 'bg-red-950/10' : ''}`}>
-                    <td className="py-3.5 px-4">
-                      <div className="font-mono font-bold text-sky-400 text-sm">{client.clientCode}</div>
-                      <div className="text-slate-300 font-medium">{client.clientName}</div>
+                  <tr key={client.id} className="hover:bg-slate-850/50 transition-colors">
+                    <td className="px-6 py-4 font-mono font-medium text-white">{client.clientCode}</td>
+                    <td className="px-6 py-4">
+                      <div className="font-medium text-slate-200">{client.clientName}</div>
+                      <div className="text-xs text-slate-500 font-mono mt-0.5">{client.baseUrl}</div>
                     </td>
-
-                    <td className="py-3.5 px-4">
+                    <td className="px-6 py-4">
                       <EnvironmentBadge environment={client.environment} />
                     </td>
-
-                    <td className="py-3.5 px-4 font-mono text-[11px] text-slate-400">
-                      <div>{client.baseUrl}</div>
-                      <div className="text-slate-500">{client.loginRoute}</div>
-                    </td>
-
-                    <td className="py-3.5 px-4">
-                      {client.hasCredentials && client.credentialSummary ? (
-                        <div className="flex items-center gap-1.5 text-emerald-400">
+                    <td className="px-6 py-4">
+                      {client.hasCredentials ? (
+                        <div className="flex items-center gap-1.5 text-emerald-400 text-xs">
                           <CheckCircle className="w-3.5 h-3.5" />
-                          <span className="font-mono">{client.credentialSummary.usernameMasked}</span>
+                          <span>Configured {client.credentialSummary?.usernameMasked ? `(${client.credentialSummary.usernameMasked})` : ''}</span>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-1.5 text-amber-400">
-                          <XCircle className="w-3.5 h-3.5" />
-                          <span>Not Configured</span>
+                        <div className="flex items-center gap-1.5 text-amber-400 text-xs">
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                          <span>No Credentials</span>
                         </div>
                       )}
                     </td>
-
-                    <td className="py-3.5 px-4">
-                      <span
-                        className={`inline-block w-2.5 h-2.5 rounded-full ${
-                          client.connectionStatus === 'CONNECTED'
-                            ? 'bg-emerald-500'
-                            : client.connectionStatus === 'ERROR'
-                            ? 'bg-red-500'
-                            : 'bg-slate-600'
-                        }`}
-                        title={client.connectionStatus}
-                      />
-                    </td>
-
-                    <td className="py-3.5 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        {/* Connection Test */}
+                    <td className="px-6 py-4 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        {/* Test Connection Button */}
                         <button
                           onClick={() => handleTestConnection(client)}
                           disabled={testingId === client.id}
-                          title="Test Connection"
-                          className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors"
+                          title="Test endpoint connectivity"
+                          className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-50"
                         >
                           <RefreshCw className={`w-4 h-4 ${testingId === client.id ? 'animate-spin' : ''}`} />
                         </button>
@@ -434,7 +443,7 @@ export const ClientsPage: React.FC = () => {
                         {hasPermission(PERMISSIONS.CLIENT_OPEN) && (
                           <button
                             onClick={() => handleOpenAndLogin(client)}
-                            disabled={isLaunching || !client.hasCredentials}
+                            disabled={isLaunchingThisClient || !client.hasCredentials}
                             title={!client.hasCredentials ? 'Configure credentials first' : 'Launch auto-login browser session'}
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold shadow transition-all disabled:opacity-50 ${
                               isProd
@@ -442,7 +451,7 @@ export const ClientsPage: React.FC = () => {
                                 : 'bg-sky-600 hover:bg-sky-500 text-white shadow-sky-950/50'
                             }`}
                           >
-                            {isLaunching ? (
+                            {isLaunchingThisClient ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Play className="w-3.5 h-3.5 fill-current" />
@@ -460,312 +469,248 @@ export const ClientsPage: React.FC = () => {
         </table>
       </div>
 
-      {/* Launch Live Status Modal */}
-      <Modal
-        isOpen={isStatusModalOpen}
-        onClose={() => {
-          if (launchStatus === 'STARTING' || launchStatus === 'RUNNING') {
-            handleCancelLaunch();
-          } else {
-            setIsStatusModalOpen(false);
-          }
-        }}
-        title={`Opening Client: ${selectedClient?.clientName || selectedClient?.clientCode}`}
-      >
-        <div className="space-y-4 py-2">
-          {/* Progress Banner */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
-            <div className="flex items-center gap-3">
-              {launchStatus === 'STARTING' || launchStatus === 'RUNNING' ? (
-                <div className="w-8 h-8 rounded-full bg-sky-900/60 border border-sky-500 flex items-center justify-center">
-                  <Loader2 className="w-4 h-4 text-sky-400 animate-spin" />
-                </div>
-              ) : launchStatus === 'COMPLETED' ? (
-                <div className="w-8 h-8 rounded-full bg-emerald-950 border border-emerald-500 flex items-center justify-center">
-                  <CheckCircle className="w-5 h-5 text-emerald-400" />
-                </div>
-              ) : launchStatus === 'REQUIRES_MANUAL_INTERVENTION' ? (
-                <div className="w-8 h-8 rounded-full bg-amber-950 border border-amber-500 flex items-center justify-center">
-                  <AlertTriangle className="w-5 h-5 text-amber-400" />
-                </div>
-              ) : (
-                <div className="w-8 h-8 rounded-full bg-red-950 border border-red-500 flex items-center justify-center">
-                  <XCircle className="w-5 h-5 text-red-400" />
-                </div>
-              )}
+      {/* Non-Blocking Floating Status Toast */}
+      {toast && (
+        <div
+          data-testid="launch-toast"
+          className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border transition-all animate-in fade-in slide-in-from-bottom-3 duration-200 ${
+            toast.status === 'LAUNCHING'
+              ? 'bg-slate-900/95 border-sky-500/60 text-sky-200 shadow-sky-950/40 backdrop-blur-md'
+              : toast.status === 'SUCCESS'
+              ? 'bg-slate-900/95 border-emerald-500/60 text-emerald-200 shadow-emerald-950/40 backdrop-blur-md'
+              : toast.status === 'REQUIRES_INTERVENTION'
+              ? 'bg-slate-900/95 border-amber-500/60 text-amber-200 shadow-amber-950/40 backdrop-blur-md'
+              : 'bg-slate-900/95 border-red-500/60 text-red-200 shadow-red-950/40 backdrop-blur-md'
+          }`}
+        >
+          {toast.status === 'LAUNCHING' && (
+            <Loader2 className="w-4 h-4 text-sky-400 animate-spin shrink-0" />
+          )}
+          {toast.status === 'SUCCESS' && (
+            <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          {toast.status === 'REQUIRES_INTERVENTION' && (
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+          )}
+          {toast.status === 'ERROR' && (
+            <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+          )}
 
-              <div>
-                <div className="text-sm font-semibold text-white">{activeStepText}</div>
-                <div className="text-xs text-slate-400 font-mono mt-0.5">
-                  Profile: ~/.hmc-console/profiles/client_{selectedClient?.clientCode || 'default'}
-                </div>
-              </div>
-            </div>
+          <div className="text-xs font-medium pr-1">{toast.message}</div>
 
-            {/* Steps Checklist */}
-            <div className="border-t border-slate-800 pt-3 space-y-2">
-              {[
-                { label: 'Opening client application…', stepIdx: 1 },
-                { label: 'Loading saved credentials securely…', stepIdx: 2 },
-                { label: 'Entering username…', stepIdx: 3 },
-                { label: 'Entering password securely…', stepIdx: 4 },
-                { label: 'Submitting login…', stepIdx: 5 },
-                { label: 'Verifying authenticated session…', stepIdx: 6 },
-                { label: 'Login successful — browser ready.', stepIdx: 7 },
-              ].map((s) => {
-                const isCurrent = activeStepText.toLowerCase().includes(s.label.toLowerCase().slice(0, 10));
-                const isDone = launchStatus === 'COMPLETED';
+          {toast.status === 'ERROR' && (
+            <button
+              onClick={() => handleOpenAndLogin(toast.client)}
+              className="ml-2 px-2.5 py-1 bg-red-800/80 hover:bg-red-700 text-white rounded-lg text-xs font-semibold transition-colors"
+            >
+              Retry
+            </button>
+          )}
 
-                return (
-                  <div key={s.stepIdx} className="flex items-center gap-2.5 text-xs">
-                    {isDone ? (
-                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    ) : isCurrent && (launchStatus === 'RUNNING' || launchStatus === 'STARTING') ? (
-                      <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin shrink-0" />
-                    ) : (
-                      <div className="w-3.5 h-3.5 rounded-full border border-slate-700 shrink-0" />
-                    )}
-                    <span className={isDone ? 'text-emerald-300 font-medium' : isCurrent ? 'text-sky-300 font-semibold' : 'text-slate-500'}>
-                      {s.label}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Error or Warning Display */}
-            {launchErrorMessage && (
-              <div className="p-3 bg-red-950/60 border border-red-800 rounded-lg text-red-300 text-xs flex items-start gap-2">
-                <XCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                <div>{launchErrorMessage}</div>
-              </div>
-            )}
-
-            {launchStatus === 'REQUIRES_MANUAL_INTERVENTION' && (
-              <div className="p-3 bg-amber-950/60 border border-amber-800 rounded-lg text-amber-300 text-xs flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div>
-                  <strong>Security Checkpoint:</strong> Manual security verification is required in the opened browser window. Complete verification in the window to continue.
-                </div>
-              </div>
-            )}
-
-            {launchStatus === 'COMPLETED' && (
-              <div className="p-3 bg-emerald-950/60 border border-emerald-800 rounded-lg text-emerald-300 text-xs flex items-start gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  Browser is open and authenticated. You can now use the separate browser window to perform clinical operations.
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Modal Action Buttons */}
-          <div className="flex justify-end gap-3 pt-2">
-            {launchStatus === 'STARTING' || launchStatus === 'RUNNING' ? (
-              <button
-                onClick={handleCancelLaunch}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
-              >
-                Cancel Launch
-              </button>
-            ) : launchStatus === 'FAILED' ? (
-              <>
-                <button
-                  onClick={() => setIsStatusModalOpen(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
-                >
-                  Close
-                </button>
-                {selectedClient && (
-                  <button
-                    onClick={() => handleOpenAndLogin(selectedClient)}
-                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold"
-                  >
-                    Retry Launch
-                  </button>
-                )}
-              </>
-            ) : (
-              <button
-                onClick={() => setIsStatusModalOpen(false)}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold"
-              >
-                Close Status (Keep Browser Open)
-              </button>
-            )}
-          </div>
+          {(toast.status === 'ERROR' || toast.status === 'REQUIRES_INTERVENTION') && (
+            <button
+              onClick={() => setToast(null)}
+              className="text-slate-400 hover:text-white text-xs font-bold p-1 rounded transition-colors"
+              title="Dismiss"
+            >
+              ✕
+            </button>
+          )}
         </div>
-      </Modal>
+      )}
 
-      {/* Create / Edit Client Modal */}
-      <Modal
-        isOpen={isCreateModalOpen || isEditModalOpen}
-        onClose={() => {
-          setIsCreateModalOpen(false);
-          setIsEditModalOpen(false);
-        }}
-        title={isCreateModalOpen ? 'Create New HMC Client' : `Edit Client: ${selectedClient?.clientCode}`}
-      >
-        <form onSubmit={isCreateModalOpen ? handleCreateClient : handleUpdateClient} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Client Code</label>
-              <input
-                type="text"
-                required
-                value={clientForm.clientCode}
-                onChange={(e) => setClientForm({ ...clientForm, clientCode: e.target.value.toUpperCase() })}
-                placeholder="e.g. HMC_NORTH"
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Environment</label>
-              <select
-                value={clientForm.environment}
-                onChange={(e) => setClientForm({ ...clientForm, environment: e.target.value as ClientEnvironment })}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
-              >
-                <option value="Development">Development</option>
-                <option value="Local">Local</option>
-                <option value="Test">Test</option>
-                <option value="UAT">UAT</option>
-                <option value="Staging">Staging</option>
-                <option value="Production">Production (Live)</option>
-              </select>
-            </div>
-          </div>
-
+      {/* Modal: Register Client */}
+      <Modal isOpen={isCreateModalOpen} onClose={() => setIsCreateModalOpen(false)} title="Register Client Instance">
+        <form onSubmit={handleCreateClient} className="space-y-4">
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Client Name</label>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Client Code (Unique ID)</label>
             <input
               type="text"
               required
-              value={clientForm.clientName}
-              onChange={(e) => setClientForm({ ...clientForm, clientName: e.target.value })}
-              placeholder="e.g. North Regional Hospital Center"
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
+              placeholder="e.g. CLINIC-ALPHA"
+              value={clientForm.clientCode}
+              onChange={(e) => setClientForm({ ...clientForm, clientCode: e.target.value.toUpperCase() })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Base URL</label>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Client / Hospital Name</label>
             <input
-              type="url"
+              type="text"
               required
-              value={clientForm.baseUrl}
-              onChange={(e) => setClientForm({ ...clientForm, baseUrl: e.target.value })}
-              placeholder="http://localhost:4000 or https://client-portal.example.com"
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white"
+              placeholder="e.g. Alpha Hospital & Research Center"
+              value={clientForm.clientName}
+              onChange={(e) => setClientForm({ ...clientForm, clientName: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500"
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Login Route</label>
-              <input
-                type="text"
-                value={clientForm.loginRoute}
-                onChange={(e) => setClientForm({ ...clientForm, loginRoute: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Users Route</label>
-              <input
-                type="text"
-                value={clientForm.usersRoute}
-                onChange={(e) => setClientForm({ ...clientForm, usersRoute: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Services Route</label>
-              <input
-                type="text"
-                value={clientForm.servicesRoute}
-                onChange={(e) => setClientForm({ ...clientForm, servicesRoute: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white"
-              />
-            </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Base URL</label>
+            <input
+              type="url"
+              required
+              placeholder="https://alpha.hospital.local"
+              value={clientForm.baseUrl}
+              onChange={(e) => setClientForm({ ...clientForm, baseUrl: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500 font-mono"
+            />
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-surface-border">
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Environment Classification</label>
+            <select
+              value={clientForm.environment}
+              onChange={(e) => setClientForm({ ...clientForm, environment: e.target.value as ClientEnvironment })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500"
+            >
+              <option value="Development">Development (Local dev environment)</option>
+              <option value="Local">Local (Local machine deployment)</option>
+              <option value="Test">Test (Automated QA environment)</option>
+              <option value="Staging">Staging (Pre-production staging)</option>
+              <option value="Production">Production (Live Clinical Systems - RESTRICTED)</option>
+            </select>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
             <button
               type="button"
-              onClick={() => {
-                setIsCreateModalOpen(false);
-                setIsEditModalOpen(false);
-              }}
-              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs hover:bg-slate-700"
+              onClick={() => setIsCreateModalOpen(false)}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
             >
               Cancel
             </button>
-            <button type="submit" className="px-4 py-2 bg-sky-600 text-white rounded-lg text-xs font-semibold hover:bg-sky-500">
-              Save Client Configuration
+            <button
+              type="submit"
+              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-medium shadow-lg shadow-sky-950/50"
+            >
+              Register Endpoint
             </button>
           </div>
         </form>
       </Modal>
 
-      {/* Credentials Modal */}
-      <Modal
-        isOpen={isCredModalOpen}
-        onClose={() => setIsCredModalOpen(false)}
-        title={`Encrypted Credentials: ${selectedClient?.clientCode}`}
-      >
-        <form onSubmit={handleSaveCredentials} className="space-y-4">
-          <div className="p-3 bg-amber-950/40 border border-amber-800/80 rounded-lg text-amber-300 text-xs">
-            Credentials will be stored using AES-256-GCM envelope encryption. Plaintext is never exposed in logs or API responses.
+      {/* Modal: Edit Client */}
+      <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Edit Client Configuration">
+        <form onSubmit={handleUpdateClient} className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Client Code</label>
+            <input
+              type="text"
+              disabled
+              value={clientForm.clientCode}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-500 cursor-not-allowed font-mono"
+            />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Credential Name / Label</label>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Client / Hospital Name</label>
             <input
               type="text"
               required
-              value={credForm.credentialName}
-              onChange={(e) => setCredForm({ ...credForm, credentialName: e.target.value })}
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
+              value={clientForm.clientName}
+              onChange={(e) => setClientForm({ ...clientForm, clientName: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Operator Username / Login</label>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Base URL</label>
             <input
-              type="text"
+              type="url"
               required
-              value={credForm.username}
-              onChange={(e) => setCredForm({ ...credForm, username: e.target.value })}
-              placeholder="e.g. hmc_operator"
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
+              value={clientForm.baseUrl}
+              onChange={(e) => setClientForm({ ...clientForm, baseUrl: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500 font-mono"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Operator Password</label>
-            <input
-              type="password"
-              required
-              value={credForm.password}
-              onChange={(e) => setCredForm({ ...credForm, password: e.target.value })}
-              placeholder="••••••••••••"
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
-            />
+            <label className="block text-xs font-medium text-slate-400 mb-1">Environment Classification</label>
+            <select
+              value={clientForm.environment}
+              onChange={(e) => setClientForm({ ...clientForm, environment: e.target.value as ClientEnvironment })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500"
+            >
+              <option value="Development">Development (Local dev environment)</option>
+              <option value="Local">Local (Local machine deployment)</option>
+              <option value="Test">Test (Automated QA environment)</option>
+              <option value="Staging">Staging (Pre-production staging)</option>
+              <option value="Production">Production (Live Clinical Systems - RESTRICTED)</option>
+            </select>
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-surface-border">
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
             <button
               type="button"
-              onClick={() => setIsCredModalOpen(false)}
-              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs hover:bg-slate-700"
+              onClick={() => setIsEditModalOpen(false)}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
             >
               Cancel
             </button>
-            <button type="submit" className="px-4 py-2 bg-amber-600 text-white rounded-lg text-xs font-semibold hover:bg-amber-500">
-              Encrypt & Store Credentials
+            <button
+              type="submit"
+              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-medium"
+            >
+              Save Configuration
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Modal: Manage Encrypted Credentials */}
+      <Modal
+        isOpen={isCredModalOpen}
+        onClose={() => setIsCredModalOpen(false)}
+        title={`Encrypted Credential Vault: ${selectedClient?.clientCode}`}
+      >
+        <form onSubmit={handleSaveCredentials} className="space-y-4">
+          <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+            <div className="text-xs text-slate-400 mb-1">Security Architecture Notice</div>
+            <div className="text-xs text-slate-500">
+              Credentials are encrypted client-side via AES-256-GCM Envelope Encryption before storage in MSSQL.
+              Only authorized Automation Agents can decrypt them for browser session initialization.
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Username</label>
+            <input
+              type="text"
+              required
+              placeholder="Operator / Admin Username"
+              value={credForm.username}
+              onChange={(e) => setCredForm({ ...credForm, username: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Password</label>
+            <input
+              type="password"
+              required
+              placeholder="Operator Password"
+              value={credForm.password}
+              onChange={(e) => setCredForm({ ...credForm, password: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500 font-mono"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => setIsCredModalOpen(false)}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-medium shadow-lg shadow-amber-950/50"
+            >
+              Encrypt & Store Credential
             </button>
           </div>
         </form>

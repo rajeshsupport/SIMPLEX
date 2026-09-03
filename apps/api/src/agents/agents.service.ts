@@ -201,9 +201,12 @@ export class AgentsService {
     // Check available online desktop agents
     const allAgents = await this.getAllAgents();
     const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('Desktop browser agent is not running.');
+    }
 
     let targetAgentId = agentId;
-    if (!targetAgentId && onlineAgents.length > 0) {
+    if (!targetAgentId) {
       targetAgentId = onlineAgents[0].id;
     }
 

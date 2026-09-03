@@ -73,7 +73,7 @@ export function createFixtureApp(): express.Express {
   // Login POST handler
   app.post('/hmc/login', (req: Request, res: Response) => {
     const { username, password } = req.body;
-    if (username === 'invalid_user') {
+    if (username === 'invalid_user' || username === 'bad_user' || password === 'WrongPassword!' || password === 'WrongPassword123!') {
       return res.redirect('/hmc/login?error=' + encodeURIComponent('Invalid credentials'));
     }
     // Accept standard test operator login

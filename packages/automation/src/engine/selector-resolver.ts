@@ -1,4 +1,4 @@
-import { Page, Frame, Locator, FrameLocator } from 'playwright';
+import { Page, Frame, Locator } from 'playwright';
 import { ElementSelectorConfig, SelectorStrategy } from '@hmc/shared';
 
 export interface ResolvedLocatorResult {
@@ -115,6 +115,7 @@ export class SelectorResolver {
   /**
    * Resolves a visible locator across the main page and any iframe frames,
    * checking configured selectors first, followed by safe fallbacks.
+   * Completely event-driven without arbitrary sleep loops.
    */
   public static async findVisibleLocator(
     page: Page,
@@ -145,10 +146,10 @@ export class SelectorResolver {
       }
     }
 
-    const startTime = Date.now();
+    if (candidateSelectors.length === 0) return null;
 
-    while (Date.now() - startTime < timeoutMs) {
-      // Gather target frames (main page + all child iframes)
+    // Gather target frames (main page + all child iframes)
+    const getFrames = async (): Promise<Array<Page | Frame>> => {
       const frames: Array<Page | Frame> = [];
       if (frameSelector) {
         const frameElement = await page.$(frameSelector);
@@ -162,23 +163,48 @@ export class SelectorResolver {
           }
         }
       }
+      return frames;
+    };
 
-      for (const frame of frames) {
-        for (const selector of candidateSelectors) {
-          try {
-            const locator = frame.locator(selector).first();
-            const isVis = await locator.isVisible({ timeout: 50 });
-            if (isVis) {
-              return { locator, frame, matchedSelector: selector };
-            }
-          } catch {
-            // Continue scanning
+    const frames = await getFrames();
+
+    // Fast-path: Check if any candidate is already visible (0ms delay)
+    for (const frame of frames) {
+      for (const selector of candidateSelectors) {
+        try {
+          const loc = frame.locator(selector).first();
+          if (await loc.isVisible({ timeout: 0 }).catch(() => false)) {
+            return { locator: loc, frame, matchedSelector: selector };
           }
-        }
+        } catch {}
       }
-
-      await page.waitForTimeout(150);
     }
+
+    // Event-driven wait: Wait for the first visible element across candidates
+    const startTime = Date.now();
+    const waitPromises: Array<Promise<ResolvedLocatorResult | null>> = [];
+
+    for (const frame of frames) {
+      for (const selector of candidateSelectors) {
+        const p = (async (): Promise<ResolvedLocatorResult | null> => {
+          try {
+            const loc = frame.locator(selector).first();
+            const remaining = Math.max(100, timeoutMs - (Date.now() - startTime));
+            await loc.waitFor({ state: 'visible', timeout: remaining });
+            return { locator: loc, frame, matchedSelector: selector };
+          } catch {
+            return null;
+          }
+        })();
+        waitPromises.push(p);
+      }
+    }
+
+    try {
+      const results = await Promise.all(waitPromises);
+      const matched = results.find((r) => r !== null);
+      if (matched) return matched;
+    } catch {}
 
     return null;
   }
@@ -217,7 +243,7 @@ export class SelectorResolver {
       if (!actualVal || actualVal.length === 0) {
         // Fallback: sequential typing if direct fill was bypassed by keypress handlers
         await locator.focus();
-        await locator.pressSequentially(value, { delay: 10 });
+        await locator.pressSequentially(value, { delay: 5 });
         await locator.dispatchEvent('input');
         await locator.dispatchEvent('change');
         await locator.dispatchEvent('blur');
@@ -239,8 +265,8 @@ export class SelectorResolver {
   ): Promise<void> {
     if (submitLocator) {
       try {
-        await submitLocator.scrollIntoViewIfNeeded({ timeout: 1000 }).catch(() => {});
-        await submitLocator.click({ delay: 50 });
+        await submitLocator.scrollIntoViewIfNeeded({ timeout: 500 }).catch(() => {});
+        await submitLocator.click();
         return;
       } catch {}
     }
