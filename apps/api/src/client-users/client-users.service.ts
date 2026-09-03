@@ -55,31 +55,26 @@ export class ClientUsersService {
     resolvedUsersUrl: string;
     resolvedAddUsersUrl: string;
   } {
-    let origin = (client.baseUrl || '').replace(/\/+$/, '');
+    const base = (client.baseUrl || '').replace(/\/+$/, '');
+    let origin = base;
     try {
-      if (origin.startsWith('http')) {
-        origin = new URL(client.baseUrl).origin;
+      if (base.startsWith('http')) {
+        origin = new URL(base).origin;
       }
     } catch {}
 
-    const appPath = (client.applicationPath || '').replace(/^\/+|\/+$/g, '');
-    const usersRoute = (client.usersRoute || '/MasterV9.4/users').replace(/^\/+/, '');
-    const loginRoute = (client.loginRoute || '/login').replace(/^\/+/, '');
-
-    // Application Version vs Selector Version consistency check
-    if (client.applicationVersion && client.applicationVersion.toLowerCase().startsWith('masterv')) {
-      const configuredVersion = client.applicationVersion.toLowerCase();
-      if (usersRoute.toLowerCase().includes('masterv') && !usersRoute.toLowerCase().includes(configuredVersion)) {
-        throw new BadRequestException({
-          code: 'CLIENT_USER_ROUTE_VERSION_MISMATCH',
-          message: `Application version '${client.applicationVersion}' does not match configured users route '${client.usersRoute}'.`,
-        });
+    const buildUrl = (route?: string, fallback: string = '/'): string => {
+      const target = (route && route.trim()) ? route.trim() : fallback;
+      if (target.startsWith('http://') || target.startsWith('https://')) {
+        return target;
       }
-    }
+      const cleanRoute = target.startsWith('/') ? target : `/${target}`;
+      return `${base}${cleanRoute}`;
+    };
 
-    const resolvedLoginUrl = loginRoute.startsWith('http') ? loginRoute : `${origin}/${loginRoute}`;
-    const resolvedUsersUrl = usersRoute.startsWith('http') ? usersRoute : `${origin}/${usersRoute}`;
-    const resolvedAddUsersUrl = `${origin}/${appPath ? appPath + '/' : ''}addUsers`;
+    const resolvedLoginUrl = buildUrl(client.loginRoute, '/login');
+    const resolvedUsersUrl = buildUrl(client.usersRoute, '/users');
+    const resolvedAddUsersUrl = buildUrl(undefined, '/addUsers');
 
     return {
       origin,
@@ -154,6 +149,77 @@ export class ClientUsersService {
   }
 
   /**
+   * Helper to accurately compute run elapsed ms regardless of database timezone serialization.
+   */
+  private getRunElapsedMs(run: AutomationRun): number {
+    if (run.parametersJson) {
+      try {
+        const parsed = JSON.parse(run.parametersJson);
+        if (parsed.createdEpochMs && typeof parsed.createdEpochMs === 'number') {
+          return Math.max(0, Date.now() - parsed.createdEpochMs);
+        }
+      } catch {}
+    }
+    const diff = Date.now() - new Date(run.createdAt).getTime();
+    return Math.max(0, diff);
+  }
+
+  /**
+   * Safely marks stale non-terminal sync runs as TIMED_OUT.
+   */
+  public async cleanupStaleSyncJobs(clientId?: string): Promise<void> {
+    const nonTerminalStatuses = [
+      'QUEUED',
+      'CLAIMED',
+      'AUTHENTICATING',
+      'NAVIGATING',
+      'EXTRACTING',
+      'PERSISTING',
+      'PENDING',
+      'RUNNING',
+    ];
+
+    const query: any = {
+      runType: In(['SYNC_CLIENT_USERS_HEADLESS', 'SYNC_CLIENT_USERS']),
+      status: In(nonTerminalStatuses),
+    };
+    if (clientId) query.clientId = clientId;
+
+    const staleRuns = await this.runRepo.find({
+      where: query,
+      relations: ['desktopAgent'],
+    });
+
+    const now = Date.now();
+    for (const run of staleRuns) {
+      const elapsedMs = this.getRunElapsedMs(run);
+      const isClaimTimeout = run.status === 'QUEUED' && elapsedMs >= 3000;
+      const isTotalTimeout = elapsedMs >= 30000;
+      const isAgentOffline =
+        run.desktopAgent &&
+        (!run.desktopAgent.lastHeartbeatAt ||
+          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 5000);
+
+      if (isTotalTimeout) {
+        run.status = 'TIMED_OUT';
+        run.errorMessage = 'Sync timed out after 30 seconds. Previous cached data is still available.';
+        run.completedAt = new Date();
+        await this.runRepo.save(run);
+      } else if (isClaimTimeout) {
+        run.status = 'TIMED_OUT';
+        run.errorMessage = 'Sync job was not claimed by automation agent within 3 seconds.';
+        run.completedAt = new Date();
+        await this.runRepo.save(run);
+      } else if (isAgentOffline) {
+        run.status = 'FAILED';
+        run.errorMessage = 'Sync failed: Automation agent is offline.';
+        run.completedAt = new Date();
+        await this.runRepo.save(run);
+      }
+    }
+  }
+
+  /**
    * Initiates a background headless user sync job and returns the job ID immediately.
    * Prevents duplicate in-flight sync jobs for the same client.
    */
@@ -165,6 +231,9 @@ export class ClientUsersService {
       throw new ForbiddenException('Not authorized for this client');
     }
 
+    // Clean up stale jobs before evaluating active status
+    await this.cleanupStaleSyncJobs(clientId);
+
     // Version & URL validation
     const routes = this.resolveClientUserRoutes(client);
 
@@ -173,24 +242,28 @@ export class ClientUsersService {
       where: {
         clientId,
         runType: 'SYNC_CLIENT_USERS_HEADLESS',
-        status: In(['PENDING', 'RUNNING']),
+        status: In(['QUEUED', 'CLAIMED', 'AUTHENTICATING', 'NAVIGATING', 'EXTRACTING', 'PERSISTING', 'PENDING', 'RUNNING']),
       },
       order: { createdAt: 'DESC' },
     });
 
     if (existingActive) {
-      return {
-        jobId: existingActive.id,
-        status: existingActive.status,
-        message: 'A background user sync is already in progress for this client.',
-      };
+      const elapsed = this.getRunElapsedMs(existingActive);
+      if (elapsed < 30000) {
+        return {
+          jobId: existingActive.id,
+          status: existingActive.status,
+          message: 'Connecting to automation agent…',
+        };
+      }
     }
 
-    const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE');
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE');
     if (onlineAgents.length === 0) {
       throw new BadRequestException({
         code: 'DESKTOP_AGENT_OFFLINE',
-        message: 'Desktop browser automation agent is offline.',
+        message: 'Sync failed: Automation agent is offline.',
       });
     }
 
@@ -213,13 +286,15 @@ export class ClientUsersService {
     }
 
     const correlationId = crypto.randomUUID();
+    const now = new Date();
 
     const run = this.runRepo.create({
       clientId: client.id,
       desktopAgentId: onlineAgents[0].id,
       triggeredByUserId: user.sub,
       runType: 'SYNC_CLIENT_USERS_HEADLESS',
-      status: 'PENDING',
+      status: 'QUEUED',
+      createdAt: now,
       parametersJson: JSON.stringify({
         taskType: 'SYNC_CLIENT_USERS_HEADLESS',
         userId: user.sub,
@@ -227,6 +302,7 @@ export class ClientUsersService {
         loginRoute: routes.resolvedLoginUrl,
         targetRoute: routes.resolvedUsersUrl,
         credentials,
+        createdEpochMs: Date.now(),
       }),
     });
 
@@ -247,20 +323,51 @@ export class ClientUsersService {
 
     return {
       jobId: savedRun.id,
-      status: 'ACCEPTED',
-      message: 'Background user synchronization job initiated.',
+      status: 'QUEUED',
+      message: 'Connecting to automation agent…',
     };
   }
 
   /**
-   * Checks the status of a running sync job and persists scraped snapshots when complete.
+   * Checks the status of a running sync job, enforces bounded timeouts, and persists snapshots.
    */
   async getSyncJobStatus(jobId: string, user: JwtPayload): Promise<any> {
-    const run = await this.runRepo.findOne({ where: { id: jobId } });
+    const run = await this.runRepo.findOne({
+      where: { id: jobId },
+      relations: ['desktopAgent'],
+    });
     if (!run) throw new NotFoundException(`Sync job ${jobId} not found`);
 
     if (!user.isSuperAdmin && !user.allowedClientIds.includes(run.clientId)) {
       throw new ForbiddenException('Not authorized to view this sync job');
+    }
+
+    const now = Date.now();
+    const elapsedMs = this.getRunElapsedMs(run);
+    const isTerminal = ['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status);
+
+    // Enforce bounded execution timeouts
+    if (!isTerminal) {
+      if (elapsedMs >= 30000) {
+        run.status = 'TIMED_OUT';
+        run.errorMessage = 'Sync timed out after 30 seconds. Previous cached data is still available.';
+        run.completedAt = new Date();
+        await this.runRepo.save(run);
+      } else if (run.status === 'QUEUED' && elapsedMs >= 3000) {
+        run.status = 'TIMED_OUT';
+        run.errorMessage = 'Sync job was not claimed by automation agent within 3 seconds.';
+        run.completedAt = new Date();
+        await this.runRepo.save(run);
+      } else if (
+        run.desktopAgent &&
+        (!run.desktopAgent.lastHeartbeatAt ||
+          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 5000)
+      ) {
+        run.status = 'FAILED';
+        run.errorMessage = 'Sync failed: Automation agent is offline.';
+        run.completedAt = new Date();
+        await this.runRepo.save(run);
+      }
     }
 
     let resultData: any = null;
@@ -271,19 +378,72 @@ export class ClientUsersService {
     }
 
     // When run completes successfully, persist scraped users into snapshot DB
-    if (run.status === 'COMPLETED' && resultData && resultData.users) {
+    if ((run.status === 'SUCCEEDED' || run.status === 'COMPLETED') && resultData && resultData.users) {
       await this.persistScrapedUsers(run.clientId, resultData.users);
+    }
+
+    const normalizedStatus =
+      run.status === 'COMPLETED' ? 'SUCCEEDED' : run.status;
+
+    return {
+      jobId: run.id,
+      status: normalizedStatus,
+      stage: resultData?.stage || normalizedStatus,
+      progressMessage:
+        resultData?.message ||
+        run.errorMessage ||
+        (normalizedStatus === 'QUEUED' ? 'Connecting to automation agent…' : normalizedStatus),
+      errorMessage: run.errorMessage || resultData?.errorMessage,
+      errorCode:
+        resultData?.errorCode ||
+        (normalizedStatus === 'TIMED_OUT'
+          ? 'SYNC_TIMEOUT'
+          : normalizedStatus === 'FAILED'
+          ? 'CLIENT_USER_SYNC_FAILED'
+          : undefined),
+      totalScraped: resultData?.totalScraped || resultData?.count || 0,
+      elapsedSeconds: Math.floor(elapsedMs / 1000),
+      streamedUsers: resultData?.streamedUsers || [],
+      liveStatus:
+        resultData?.liveStatus ||
+        (['SUCCEEDED', 'COMPLETED'].includes(normalizedStatus) ? 'LIVE' : 'CACHED'),
+    };
+  }
+
+  /**
+   * Explicitly cancels an in-flight sync job upon user request.
+   */
+  async cancelSyncJob(jobId: string, user: JwtPayload): Promise<{ jobId: string; status: string; message: string }> {
+    const run = await this.runRepo.findOne({ where: { id: jobId } });
+    if (!run) throw new NotFoundException(`Sync job ${jobId} not found`);
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(run.clientId)) {
+      throw new ForbiddenException('Not authorized to cancel this sync job');
+    }
+
+    if (!['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+      run.status = 'CANCELLED';
+      run.errorMessage = 'Sync cancelled by user.';
+      run.completedAt = new Date();
+      await this.runRepo.save(run);
+
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USERS_SYNC_CANCELLED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT',
+          entityId: run.clientId,
+          result: 'SUCCESS',
+          detailsJson: JSON.stringify({ runId: run.id }),
+        })
+      );
     }
 
     return {
       jobId: run.id,
-      status: run.status,
-      progressMessage: resultData?.message || run.status,
-      errorMessage: run.errorMessage || resultData?.errorMessage,
-      errorCode: resultData?.errorCode || (run.status === 'FAILED' ? 'CLIENT_USER_SYNC_FAILED' : undefined),
-      totalScraped: resultData?.totalScraped || resultData?.count || 0,
-      streamedUsers: resultData?.streamedUsers || [],
-      liveStatus: resultData?.liveStatus || (run.status === 'COMPLETED' ? 'LIVE' : 'CACHED'),
+      status: 'CANCELLED',
+      message: 'Sync cancelled by user.',
     };
   }
 

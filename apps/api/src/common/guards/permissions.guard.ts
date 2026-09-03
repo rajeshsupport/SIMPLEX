@@ -23,7 +23,12 @@ export class PermissionsGuard implements CanActivate {
     }
 
     // Super Admin role automatically satisfies every permission
-    if (user.isSuperAdmin || user.roles?.includes(SYSTEM_ROLES.SUPER_ADMIN)) {
+    if (
+      user.isSuperAdmin ||
+      user.roles?.includes(SYSTEM_ROLES.SUPER_ADMIN) ||
+      user.roles?.includes('Super Admin') ||
+      user.roles?.some((r: string) => r.toUpperCase().replace(/\s+/g, '_') === 'SUPER_ADMIN')
+    ) {
       return true;
     }
 

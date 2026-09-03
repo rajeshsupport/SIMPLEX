@@ -31,7 +31,21 @@ export interface ScrapedClientUser {
 }
 
 export interface SyncProgressUpdate {
-  stage: 'CONNECTING' | 'AUTHENTICATING' | 'LOADING_PAGE' | 'SYNCHRONIZING' | 'COMPLETED';
+  stage:
+    | 'QUEUED'
+    | 'CLAIMED'
+    | 'AUTHENTICATING'
+    | 'NAVIGATING'
+    | 'EXTRACTING'
+    | 'PERSISTING'
+    | 'SUCCEEDED'
+    | 'COMPLETED'
+    | 'FAILED'
+    | 'CANCELLED'
+    | 'TIMED_OUT'
+    | 'CONNECTING'
+    | 'LOADING_PAGE'
+    | 'SYNCHRONIZING';
   message: string;
   currentPage: number;
   totalPages?: number;
@@ -80,8 +94,8 @@ export class UserManagementExecutor {
     const { usersUrl, loginUrl, credentials, onProgress } = options;
 
     onProgress?.({
-      stage: 'CONNECTING',
-      message: 'Connecting securely to client portal…',
+      stage: 'NAVIGATING',
+      message: 'Opening client user directory…',
       currentPage: 1,
       count: 0,
     });
@@ -110,7 +124,7 @@ export class UserManagementExecutor {
     if (isLoginPage) {
       onProgress?.({
         stage: 'AUTHENTICATING',
-        message: 'Authenticating in background…',
+        message: 'Authenticating securely…',
         currentPage: 1,
         count: 0,
       });
@@ -127,10 +141,10 @@ export class UserManagementExecutor {
         };
       }
 
-      // Perform headless background login using SelectorResolver
-      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 6000);
-      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 6000);
-      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 6000);
+      // Perform headless background login using SelectorResolver (10s timeout)
+      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 10000);
+      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 10000);
+      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 10000);
 
       if (!userLoc || !passLoc || !submitLoc) {
         return {
@@ -148,13 +162,18 @@ export class UserManagementExecutor {
       await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
       await submitLoc.locator.click();
 
-      // Wait for login navigation / loginCheck
-      await page.waitForTimeout(3000);
-      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      // Wait for navigation after authentication without long fixed sleeps
+      await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
 
-      // Navigate to target users route after authentication
-      await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(2000);
+      onProgress?.({
+        stage: 'NAVIGATING',
+        message: 'Opening client user directory…',
+        currentPage: 1,
+        count: 0,
+      });
+
+      // Navigate to target users route after authentication (15s timeout)
+      await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     }
 
     // Check for Access Denied or Client Error Page
@@ -181,9 +200,9 @@ export class UserManagementExecutor {
       };
     }
 
-    // Wait for the user table or explicit empty state
+    // Wait for the user table or explicit empty state (10s render timeout)
     const tableLocator = page.locator('table, [data-testid="users-table"], #usersTable, .user-grid, table tbody tr, table tr').first();
-    const hasTable = await tableLocator.waitFor({ state: 'visible', timeout: 6000 }).then(() => true).catch(() => false);
+    const hasTable = await tableLocator.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
 
     const isExplicitEmpty = await page.evaluate(() => {
       const text = document.body ? document.body.innerText.toLowerCase() : '';
@@ -207,17 +226,18 @@ export class UserManagementExecutor {
     }
 
     const scrapedUsersMap = new Map<string, ScrapedClientUser>();
+    const seenPageSignatures = new Set<string>();
     let currentPage = 1;
     const maxPages = 30; // Guard against infinite pagination
 
-    onProgress?.({
-      stage: 'LOADING_PAGE',
-      message: 'Loading users page 1…',
-      currentPage: 1,
-      count: 0,
-    });
-
     while (currentPage <= maxPages) {
+      onProgress?.({
+        stage: 'EXTRACTING',
+        message: `Reading users page ${currentPage}…`,
+        currentPage,
+        count: scrapedUsersMap.size,
+      });
+
       // Scrape current page rows with header awareness
       const pageRowsData = await page.evaluate(() => {
         // Detect column indices from headers
@@ -258,6 +278,16 @@ export class UserManagementExecutor {
           return { cells, hasSig, hasStmp, hasProf, colFullName, colUsername, colMobile, colEmail, colNationality, colRole, colProfileRole, colStatus, hasActiveIcon, hasInactiveIcon };
         });
       });
+
+      // Signature of current page to prevent repeated page loop
+      const pageSignature = pageRowsData.map(r => r.cells.slice(0, 3).join('|')).join('::');
+      if (pageSignature && seenPageSignatures.has(pageSignature)) {
+        // Page repeated / pagination cycle detected -> break safely
+        break;
+      }
+      if (pageSignature) {
+        seenPageSignatures.add(pageSignature);
+      }
 
       const pageUsers: ScrapedClientUser[] = [];
 
@@ -320,16 +350,7 @@ export class UserManagementExecutor {
         pageUsers.push(scrapedUser);
       }
 
-      // Stream progress
-      onProgress?.({
-        stage: 'SYNCHRONIZING',
-        message: `Synchronizing page ${currentPage}… (${scrapedUsersMap.size} users found)`,
-        currentPage,
-        count: scrapedUsersMap.size,
-        streamedUsers: pageUsers,
-      });
-
-      // Look for Next page control
+      // Look for Next page control with 5s page timeout
       const nextButton = page.locator(
         'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i]'
       ).first();
@@ -339,8 +360,10 @@ export class UserManagementExecutor {
         const isDisabled = await nextButton.getAttribute('disabled');
         const isAriaDisabled = await nextButton.getAttribute('aria-disabled');
         if (!isDisabled && isAriaDisabled !== 'true') {
+          const prevUrl = page.url();
           await nextButton.click().catch(() => {});
-          await page.waitForTimeout(200);
+          // Wait for DOM content or row change with 5s timeout
+          await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
           currentPage++;
           continue;
         }
@@ -351,7 +374,7 @@ export class UserManagementExecutor {
     const allUsers = Array.from(scrapedUsersMap.values());
 
     onProgress?.({
-      stage: 'COMPLETED',
+      stage: 'SUCCEEDED',
       message: `${allUsers.length} users synchronized successfully.`,
       currentPage,
       count: allUsers.length,

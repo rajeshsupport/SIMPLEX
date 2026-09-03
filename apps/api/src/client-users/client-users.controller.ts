@@ -22,6 +22,7 @@ import { ClientAccessGuard } from '../common/guards/client-access.guard.js';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator.js';
 import { RequireClientAccess } from '../common/decorators/require-client.decorator.js';
 import { CurrentUser } from '../common/decorators/user.decorator.js';
+import { SkipThrottle } from '@nestjs/throttler';
 import {
   PERMISSIONS,
   JwtPayload,
@@ -31,6 +32,7 @@ import {
   ExcelUserImportRow,
 } from '@hmc/shared';
 
+@SkipThrottle()
 @Controller('client-users')
 @UseGuards(JwtAuthGuard, PermissionsGuard, ClientAccessGuard)
 export class ClientUsersController {
@@ -81,6 +83,16 @@ export class ClientUsersController {
     @CurrentUser() user: JwtPayload
   ) {
     return this.clientUsersService.getSyncJobStatus(jobId, user);
+  }
+
+  @Post('sync-job/:jobId/cancel')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @HttpCode(HttpStatus.OK)
+  async cancelSyncJob(
+    @Param('jobId') jobId: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.cancelSyncJob(jobId, user);
   }
 
   @Post()

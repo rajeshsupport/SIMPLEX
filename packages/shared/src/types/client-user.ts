@@ -1,5 +1,26 @@
 export type ClientUserStatus = 'ACTIVE' | 'INACTIVE';
 
+export type SyncJobState =
+  | 'QUEUED'
+  | 'CLAIMED'
+  | 'AUTHENTICATING'
+  | 'NAVIGATING'
+  | 'EXTRACTING'
+  | 'PERSISTING'
+  | 'SUCCEEDED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'TIMED_OUT';
+
+export interface SyncProgressUpdate {
+  stage: SyncJobState;
+  message: string;
+  currentPage: number;
+  totalPages?: number;
+  count: number;
+  streamedUsers?: any[];
+}
+
 export interface ClientUser {
   id: string;
   clientId: string;

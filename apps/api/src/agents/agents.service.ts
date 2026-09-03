@@ -6,7 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import * as crypto from 'crypto';
 import * as argon2 from 'argon2';
 import {
@@ -57,8 +57,8 @@ export class AgentsService {
 
     const now = Date.now();
     return agents.map((a) => {
-      // Mark as OFFLINE if heartbeat is older than 30s
-      const isStale = !a.lastHeartbeatAt || now - new Date(a.lastHeartbeatAt).getTime() > 30000;
+      // Mark as OFFLINE if heartbeat is older than 5s (5s lease expiry, 2s detection window)
+      const isStale = !a.lastHeartbeatAt || now - new Date(a.lastHeartbeatAt).getTime() > 5000;
       const status = isStale ? 'OFFLINE' : a.status;
 
       return {
@@ -154,25 +154,20 @@ export class AgentsService {
     }
     await this.agentRepo.save(agent);
 
-    // Check for pending automation run assigned to this agent or unassigned pending runs
+    // Check for pending/queued automation runs assigned to this agent or unassigned
     let pendingRun = await this.runRepo.findOne({
-      where: { desktopAgentId: agent.id, status: 'PENDING' },
+      where: [
+        { desktopAgentId: agent.id, status: In(['PENDING', 'QUEUED']) },
+        { status: In(['PENDING', 'QUEUED']) },
+      ],
       relations: ['client'],
       order: { createdAt: 'ASC' },
     });
 
-    if (!pendingRun) {
-      pendingRun = await this.runRepo.findOne({
-        where: { desktopAgentId: undefined, status: 'PENDING' },
-        relations: ['client'],
-        order: { createdAt: 'ASC' },
-      });
-    }
-
     if (pendingRun) {
       pendingRun.desktopAgentId = agent.id;
       const task = await this.buildTaskAssignment(pendingRun);
-      pendingRun.status = 'RUNNING';
+      pendingRun.status = 'CLAIMED';
       pendingRun.startedAt = new Date();
       await this.runRepo.save(pendingRun);
       return { acknowledged: true, pendingRun: task };
@@ -262,9 +257,9 @@ export class AgentsService {
     const run = await this.runRepo.findOne({ where: { id: runId } });
     if (!run) throw new NotFoundException(`Run ${runId} not found`);
 
-    if (run.status === 'PENDING' || run.status === 'RUNNING') {
-      run.status = 'FAILED';
-      run.errorMessage = 'Launch cancelled by user.';
+    if (!['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+      run.status = 'CANCELLED';
+      run.errorMessage = 'Sync cancelled by user.';
       run.completedAt = new Date();
       await this.runRepo.save(run);
     }
@@ -274,7 +269,7 @@ export class AgentsService {
   async updateRunTelemetry(
     runId: string,
     dto: {
-      status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'REQUIRES_MANUAL_INTERVENTION';
+      status: string;
       errorMessage?: string;
       step?: AutomationRunStepTelemetry;
       totalDurationMs?: number;
@@ -284,11 +279,16 @@ export class AgentsService {
     const run = await this.runRepo.findOne({ where: { id: runId } });
     if (!run) return;
 
-    if (dto.status) run.status = dto.status;
+    if (dto.resultData?.stage) {
+      run.status = dto.resultData.stage as any;
+    } else if (dto.status) {
+      run.status = (dto.status === 'COMPLETED' ? 'SUCCEEDED' : dto.status) as any;
+    }
+
     if (dto.errorMessage) run.errorMessage = dto.errorMessage;
     if (dto.totalDurationMs) run.totalDurationMs = dto.totalDurationMs;
     if (dto.resultData !== undefined) run.resultSummaryJson = JSON.stringify(dto.resultData);
-    if (dto.status === 'COMPLETED' || dto.status === 'FAILED' || dto.status === 'REQUIRES_MANUAL_INTERVENTION') {
+    if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REQUIRES_MANUAL_INTERVENTION'].includes(run.status)) {
       run.completedAt = new Date();
     }
     await this.runRepo.save(run);

@@ -3,6 +3,16 @@ import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, SyncPr
 import { AgentTaskAssignment, AutomationRunStepTelemetry } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
+function buildAbsoluteUrl(baseUrl: string, route?: string, fallbackRoute: string = '/'): string {
+  const target = (route && route.trim()) ? route.trim() : fallbackRoute;
+  if (target.startsWith('http://') || target.startsWith('https://')) {
+    return target;
+  }
+  const cleanBase = (baseUrl || '').replace(/\/+$/, '');
+  const cleanRoute = target.startsWith('/') ? target : `/${target}`;
+  return `${cleanBase}${cleanRoute}`;
+}
+
 export class AutomationWorker {
   private activeProfileContexts: Map<string, BrowserContext> = new Map();
   private singleFlightTasks: Map<string, Promise<void>> = new Map();
@@ -59,13 +69,8 @@ export class AutomationWorker {
 
         const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
 
-        const usersListUrl = task.targetRoute
-          ? (task.targetRoute.startsWith('http') ? task.targetRoute : `${task.clientBaseUrl}${task.targetRoute}`)
-          : `${task.clientBaseUrl}/MasterV9.4/users`;
-
-        const loginUrl = task.loginRoute
-          ? (task.loginRoute.startsWith('http') ? task.loginRoute : `${task.clientBaseUrl}${task.loginRoute}`)
-          : `${task.clientBaseUrl}/login`;
+        const usersListUrl = buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute, '/MasterV9.4/users');
+        const loginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
 
         onProgress?.(`[BACKGROUND SYNC] Executing user scrape on ${usersListUrl}...`);
 
@@ -191,12 +196,10 @@ export class AutomationWorker {
         page = context.pages()[0] || (await context.newPage());
       }
 
-      const usersListUrl = task.targetRoute
-        ? (task.targetRoute.startsWith('http') ? task.targetRoute : `${task.clientBaseUrl}${task.targetRoute}`)
-        : `${task.clientBaseUrl}/MasterV9.4/users`;
+      const usersListUrl = buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute, '/users');
 
       if (task.taskType === 'CREATE_CLIENT_USER') {
-        const addUsersUrl = `${task.clientBaseUrl}/MasterV9.4/addUsers`;
+        const addUsersUrl = buildAbsoluteUrl(task.clientBaseUrl, undefined, '/addUsers');
         onProgress?.(`Creating client user '${task.payload.username}' on ${addUsersUrl}...`);
         const createRes = await UserManagementExecutor.createUser(page, addUsersUrl, usersListUrl, task.payload as any);
         const totalDurationMs = Date.now() - startTime;
@@ -256,10 +259,12 @@ export class AutomationWorker {
       }
 
       // Default Interactive / Workflow Execution (Login, Service Creation, etc.)
+      const resolvedLoginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
+
       const variables: Record<string, any> = {
-        loginUrl: `${task.clientBaseUrl}${task.loginRoute}`,
-        servicesUrl: `${task.clientBaseUrl}/hmc/services`,
-        usersUrl: `${task.clientBaseUrl}/hmc/users`,
+        loginUrl: resolvedLoginUrl,
+        servicesUrl: buildAbsoluteUrl(task.clientBaseUrl, undefined, '/services'),
+        usersUrl: buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute, '/users'),
         username: task.credentials?.username || '',
         password: task.credentials?.password || '',
         ...task.payload,

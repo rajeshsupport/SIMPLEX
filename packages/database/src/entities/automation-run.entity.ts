@@ -44,8 +44,22 @@ export class AutomationRun {
     | 'BULK_IMPORT';
 
   @Index()
-  @Column({ type: 'nvarchar', length: 50, default: 'PENDING' })
-  status!: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'REQUIRES_MANUAL_INTERVENTION';
+  @Column({ type: 'nvarchar', length: 50, default: 'QUEUED' })
+  status!:
+    | 'QUEUED'
+    | 'CLAIMED'
+    | 'AUTHENTICATING'
+    | 'NAVIGATING'
+    | 'EXTRACTING'
+    | 'PERSISTING'
+    | 'SUCCEEDED'
+    | 'COMPLETED'
+    | 'FAILED'
+    | 'CANCELLED'
+    | 'TIMED_OUT'
+    | 'PENDING'
+    | 'RUNNING'
+    | 'REQUIRES_MANUAL_INTERVENTION';
 
   @Column({ type: 'datetime2', nullable: true })
   startedAt?: Date | null;

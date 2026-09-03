@@ -183,57 +183,124 @@ export const UsersPage: React.FC = () => {
   }, [selectedClientId, search, statusFilter, roleFilter, page]);
 
   const [syncProgressMessage, setSyncProgressMessage] = useState<string | null>(null);
+  const [syncTerminalState, setSyncTerminalState] = useState<'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | null>(null);
+  const [syncElapsedSeconds, setSyncElapsedSeconds] = useState<number>(0);
+  const [activeSyncJobId, setActiveSyncJobId] = useState<string | null>(null);
   const [directoryStatus, setDirectoryStatus] = useState<'LIVE' | 'CACHED'>('CACHED');
+  const syncTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleCancelSync = async () => {
+    if (!activeSyncJobId) {
+      setSyncing(false);
+      setSyncProgressMessage('Sync cancelled by user.');
+      setActionMessage({ type: 'error', text: 'Sync cancelled by user.' });
+      if (syncTimerRef.current) clearInterval(syncTimerRef.current);
+      return;
+    }
+    try {
+      await ApiClient.request(`/client-users/sync-job/${activeSyncJobId}/cancel`, {
+        method: 'POST',
+      });
+      setSyncProgressMessage('Sync cancelled by user.');
+      setActionMessage({ type: 'error', text: 'Sync cancelled by user.' });
+      setSyncTerminalState('CANCELLED');
+    } catch (err: any) {
+      console.error('Cancel sync failed', err);
+    } finally {
+      setSyncing(false);
+      if (syncTimerRef.current) clearInterval(syncTimerRef.current);
+    }
+  };
 
   // Sync Users
   const handleSyncUsers = async () => {
     if (!selectedClientId || syncing) return;
-    try {
-      setSyncing(true);
-      setSyncProgressMessage('Connecting securely…');
-      setActionMessage({ type: 'info', text: 'Connecting securely to client portal…' });
+    setSyncing(true);
+    setSyncElapsedSeconds(0);
+    setSyncTerminalState(null);
+    setSyncProgressMessage('Connecting to automation agent…');
+    setActionMessage(null);
 
+    if (syncTimerRef.current) clearInterval(syncTimerRef.current);
+    syncTimerRef.current = setInterval(() => {
+      setSyncElapsedSeconds((prev) => prev + 1);
+    }, 1000);
+
+    let jobId: string | null = null;
+    try {
       const syncJob = await ApiClient.request<{ jobId: string; status: string; message: string }>('/client-users/sync-job', {
         method: 'POST',
         body: JSON.stringify({ clientId: selectedClientId }),
       });
 
-      let isComplete = false;
-      let attempts = 0;
+      jobId = syncJob.jobId;
+      setActiveSyncJobId(jobId);
 
-      while (!isComplete && attempts < 60) {
-        attempts++;
-        await new Promise((r) => setTimeout(r, 350));
+      const startTime = Date.now();
+      let isComplete = false;
+
+      while (!isComplete) {
+        const elapsedTotal = Date.now() - startTime;
+        if (elapsedTotal >= 30000) {
+          setSyncProgressMessage('Sync timed out after 30 seconds. Previous cached data is still available.');
+          setActionMessage({
+            type: 'error',
+            text: 'Sync timed out after 30 seconds. Previous cached data is still available.',
+          });
+          setSyncTerminalState('TIMED_OUT');
+          break;
+        }
+
+        await new Promise((r) => setTimeout(r, 250));
 
         try {
           const statusRes = await ApiClient.request<{
             status: string;
+            stage?: string;
             progressMessage?: string;
             errorMessage?: string;
             errorCode?: string;
             totalScraped?: number;
             liveStatus?: 'LIVE' | 'CACHED';
             streamedUsers?: any[];
-          }>(`/client-users/sync-status/${syncJob.jobId}`);
+          }>(`/client-users/sync-status/${jobId}`);
 
           if (statusRes.progressMessage) {
             setSyncProgressMessage(statusRes.progressMessage);
           }
 
-          if (statusRes.status === 'COMPLETED') {
+          if (['SUCCEEDED', 'COMPLETED'].includes(statusRes.status)) {
             isComplete = true;
             setDirectoryStatus('LIVE');
-            setSyncProgressMessage(`${statusRes.totalScraped || 0} users synchronized successfully.`);
+            setSyncTerminalState('SUCCEEDED');
+            const successMsg = `${statusRes.totalScraped || 0} users synchronized successfully.`;
+            setSyncProgressMessage(successMsg);
             setActionMessage({
               type: 'success',
-              text: `✓ ${statusRes.totalScraped || 0} users synchronized successfully from client.`,
+              text: `✓ ${successMsg}`,
             });
             await loadUsers();
             break;
+          } else if (statusRes.status === 'CANCELLED') {
+            isComplete = true;
+            setSyncTerminalState('CANCELLED');
+            setSyncProgressMessage('Sync cancelled by user.');
+            setActionMessage({ type: 'error', text: 'Sync cancelled by user.' });
+            break;
+          } else if (statusRes.status === 'TIMED_OUT') {
+            isComplete = true;
+            setSyncTerminalState('TIMED_OUT');
+            const timeoutMsg = 'Sync timed out after 30 seconds. Previous cached data is still available.';
+            setSyncProgressMessage(timeoutMsg);
+            setActionMessage({ type: 'error', text: timeoutMsg });
+            break;
           } else if (statusRes.status === 'FAILED') {
             isComplete = true;
+            setSyncTerminalState('FAILED');
             let friendlyError = statusRes.errorMessage || 'Background user sync failed.';
-            if (statusRes.errorCode === 'CLIENT_BACKGROUND_LOGIN_FAILED') {
+            if (statusRes.errorCode === 'DESKTOP_AGENT_OFFLINE') {
+              friendlyError = 'Automation agent is offline.';
+            } else if (statusRes.errorCode === 'CLIENT_BACKGROUND_LOGIN_FAILED') {
               friendlyError = 'Background authentication failed on client portal. Check saved credentials.';
             } else if (statusRes.errorCode === 'CLIENT_USER_ROUTE_VERSION_MISMATCH') {
               friendlyError = 'Application version does not match configured users route.';
@@ -241,30 +308,34 @@ export const UsersPage: React.FC = () => {
               friendlyError = 'User directory table could not be identified on client portal.';
             } else if (statusRes.errorCode === 'CLIENT_USER_ACCESS_DENIED') {
               friendlyError = 'Client portal returned Access Denied for configured users route.';
-            } else if (statusRes.errorCode === 'DESKTOP_AGENT_OFFLINE') {
-              friendlyError = 'Desktop browser automation agent is offline.';
             }
-            setSyncProgressMessage(`Sync failed: ${friendlyError}`);
-            setActionMessage({ type: 'error', text: `Sync failed: ${friendlyError}` });
+            const failMsg = `Sync failed: ${friendlyError}`;
+            setSyncProgressMessage(failMsg);
+            setActionMessage({ type: 'error', text: failMsg });
             break;
           }
-        } catch {}
+        } catch (err: any) {
+          if (err?.status === 404) {
+            isComplete = true;
+            setSyncTerminalState('FAILED');
+            setSyncProgressMessage('Sync failed: Sync job not found.');
+            setActionMessage({ type: 'error', text: 'Sync failed: Sync job not found.' });
+            break;
+          }
+        }
       }
     } catch (err: any) {
+      setSyncTerminalState('FAILED');
       let friendlyError = err.message || 'Sync failed';
-      if (err.response?.code === 'CLIENT_BACKGROUND_LOGIN_FAILED') {
-        friendlyError = 'Background authentication failed on client portal.';
-      } else if (err.response?.code === 'CLIENT_USER_ROUTE_VERSION_MISMATCH') {
-        friendlyError = 'Application version does not match configured users route.';
+      if (err.response?.code === 'DESKTOP_AGENT_OFFLINE' || err.message?.includes('offline')) {
+        friendlyError = 'Automation agent is offline.';
       }
-      setSyncProgressMessage(`Sync failed: ${friendlyError}`);
-      setActionMessage({ type: 'error', text: `Sync failed: ${friendlyError}` });
+      const failMsg = `Sync failed: ${friendlyError}`;
+      setSyncProgressMessage(failMsg);
+      setActionMessage({ type: 'error', text: failMsg });
     } finally {
       setSyncing(false);
-      setTimeout(() => {
-        setSyncProgressMessage(null);
-        setActionMessage(null);
-      }, 6000);
+      if (syncTimerRef.current) clearInterval(syncTimerRef.current);
     }
   };
 
@@ -518,16 +589,41 @@ export const UsersPage: React.FC = () => {
         </div>
       )}
 
-      {syncProgressMessage && (
-        <div className="flex items-center gap-2.5 p-3 rounded-lg border bg-sky-950/40 border-sky-800/80 text-sky-300 text-xs font-semibold shadow-sm animate-pulse">
-          <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+      {syncing && (
+        <div className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-sky-950/50 border-sky-800 text-sky-300 text-xs font-semibold shadow-md">
+          <div className="flex items-center gap-2.5">
+            <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+            <span>{syncProgressMessage || 'Connecting to automation agent…'}</span>
+            <span className="text-slate-400 font-mono text-[11px]">({syncElapsedSeconds}s)</span>
+          </div>
+          <button
+            onClick={handleCancelSync}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-300 rounded text-xs font-medium transition-colors shadow-sm"
+          >
+            <XCircle className="w-3.5 h-3.5" />
+            Cancel Sync
+          </button>
+        </div>
+      )}
+
+      {!syncing && syncProgressMessage && !actionMessage && (
+        <div className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-slate-900 border-slate-800 text-slate-300 text-xs font-medium">
           <span>{syncProgressMessage}</span>
+          {(syncTerminalState === 'FAILED' || syncTerminalState === 'TIMED_OUT') && (
+            <button
+              onClick={handleSyncUsers}
+              className="flex items-center gap-1 px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded text-xs font-semibold transition-colors shadow-sm"
+            >
+              <RefreshCw className="w-3 h-3" />
+              Retry Sync
+            </button>
+          )}
         </div>
       )}
 
       {actionMessage && (
         <div
-          className={`p-3 rounded-lg border text-xs font-medium ${
+          className={`flex items-center justify-between p-3 rounded-lg border text-xs font-medium ${
             actionMessage.type === 'success'
               ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
               : actionMessage.type === 'error'
@@ -535,7 +631,16 @@ export const UsersPage: React.FC = () => {
               : 'bg-sky-950/60 border-sky-800 text-sky-300'
           }`}
         >
-          {actionMessage.text}
+          <span>{actionMessage.text}</span>
+          {(syncTerminalState === 'FAILED' || syncTerminalState === 'TIMED_OUT') && (
+            <button
+              onClick={handleSyncUsers}
+              className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white rounded text-xs font-semibold transition-colors"
+            >
+              <RefreshCw className="w-3 h-3" />
+              Retry Sync
+            </button>
+          )}
         </div>
       )}
 

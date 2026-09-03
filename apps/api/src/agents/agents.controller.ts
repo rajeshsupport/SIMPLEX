@@ -8,6 +8,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { AgentsService } from './agents.service.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../common/guards/permissions.guard.js';
@@ -19,6 +20,7 @@ import {
   AutomationRunStepTelemetry,
 } from '@hmc/shared';
 
+@SkipThrottle()
 @Controller('agents')
 export class AgentsController {
   constructor(private agentsService: AgentsService) {}

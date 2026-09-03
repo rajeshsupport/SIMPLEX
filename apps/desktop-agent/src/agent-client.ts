@@ -11,6 +11,8 @@ export class AgentClient {
   private agentName: string;
   private token?: string;
   private isPaired: boolean = false;
+  private lastUserId?: string;
+  private lastSharedSecret?: string;
 
   constructor(apiBaseUrl?: string, agentName?: string) {
     this.apiBaseUrl = (apiBaseUrl || process.env.API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
@@ -18,6 +20,8 @@ export class AgentClient {
   }
 
   public async pair(userId: string, sharedSecret: string): Promise<boolean> {
+    this.lastUserId = userId;
+    this.lastSharedSecret = sharedSecret;
     try {
       const res = await fetch(`${this.apiBaseUrl}/api/v1/agents/pair`, {
         method: 'POST',
@@ -48,7 +52,12 @@ export class AgentClient {
   }
 
   public async sendHeartbeat(status: 'ONLINE' | 'OFFLINE' | 'BUSY' = 'ONLINE'): Promise<AgentTaskAssignment | null> {
-    if (!this.agentId) return null;
+    if (!this.agentId) {
+      if (this.lastUserId && this.lastSharedSecret) {
+        await this.pair(this.lastUserId, this.lastSharedSecret);
+      }
+      if (!this.agentId) return null;
+    }
 
     try {
       const payload: AgentHeartbeatPayload = {
@@ -70,9 +79,11 @@ export class AgentClient {
       if (res.ok) {
         const data: any = await res.json();
         return data.pendingRun || null;
+      } else if (res.status === 401 && this.lastUserId && this.lastSharedSecret) {
+        await this.pair(this.lastUserId, this.lastSharedSecret);
       }
     } catch (err) {
-      console.warn('[AGENT_CLIENT] Heartbeat ping failed:', err);
+      // quiet retry
     }
     return null;
   }

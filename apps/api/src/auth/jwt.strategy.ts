@@ -27,15 +27,20 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       relations: ['roles', 'roles.permissions'],
     });
 
-    if (!user || user.isDisabled || user.status !== 'ACTIVE') {
+    if (!user || user.isDisabled || (user.status && user.status !== 'ACTIVE')) {
       throw new UnauthorizedException('User account disabled, locked, or deleted');
     }
 
-    const roles = user.roles.map((r) => r.name);
-    const isSuperAdmin = roles.includes(SYSTEM_ROLES.SUPER_ADMIN);
+    const roles = (user.roles || []).map((r) => r.name);
+    const isSuperAdmin = roles.some(
+      (r) =>
+        r === SYSTEM_ROLES.SUPER_ADMIN ||
+        r.toUpperCase().replace(/\s+/g, '_') === 'SUPER_ADMIN' ||
+        r === 'Super Admin'
+    );
 
     const permissionsSet = new Set<string>();
-    user.roles.forEach((r) => {
+    (user.roles || []).forEach((r) => {
       r.permissions?.forEach((p) => permissionsSet.add(p.code));
     });
 
