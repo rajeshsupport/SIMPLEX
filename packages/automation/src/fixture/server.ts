@@ -66,6 +66,32 @@ export function createFixtureApp(): express.Express {
       status: 'ACTIVE',
       barcodeNumber: 'BC-0003',
     },
+    {
+      username: 'abdul.p',
+      firstName: 'Abdul',
+      lastName: 'Pathan',
+      fullName: 'Abdul Qadeer Pathan',
+      email: 'abdul.p@hospital.example.com',
+      mobileNumber: '0504445566',
+      nationality: 'India',
+      role: 'Physician',
+      profileRole: 'General Practitioner',
+      status: 'ACTIVE',
+      barcodeNumber: 'BC-0004',
+    },
+    {
+      username: 'synthetic.test.user',
+      firstName: 'Synthetic',
+      lastName: 'User',
+      fullName: 'Synthetic Test User',
+      email: 'synthetic.user@hospital.example.com',
+      mobileNumber: '0509998877',
+      nationality: 'Saudi Arabia',
+      role: 'Admin',
+      profileRole: 'System Administrator',
+      status: 'ACTIVE',
+      barcodeNumber: 'BC-0005',
+    },
   ];
 
   // 1. Login Page
@@ -224,7 +250,8 @@ export function createFixtureApp(): express.Express {
         </div>
         <div class="content" data-testid="hmc-users-screen">
           <div class="actions">
-            <h1>User Management</h1>
+            <h1>User Details</h1>
+            <input type="search" id="userSearch" data-testid="input-user-search" placeholder="Search by username or name..." oninput="filterTable()" onchange="filterTable()" onkeyup="filterTable()" style="padding: 0.5rem 1rem; border-radius: 0.375rem; background: #0f172a; border: 1px solid #334155; color: white;" />
             <a href="/MasterV9.4/addUsers" id="btnAddUser" class="btn-primary" data-testid="btn-add-user">+ Add User</a>
           </div>
 
@@ -245,8 +272,8 @@ export function createFixtureApp(): express.Express {
                   (u, idx) => `
                 <tr data-testid="user-row-${u.username}">
                   <td>${idx + 1}</td>
-                  <td>${u.username}</td>
                   <td>${u.fullName}</td>
+                  <td>${u.username}</td>
                   <td>${u.mobileNumber}</td>
                   <td class="status-cell">
                     <a href="javascript:void(0)" class="status-toggle ${u.status === 'ACTIVE' ? 'status-active' : 'status-inactive'}" title="${u.status === 'ACTIVE' ? 'Active' : 'Inactive'}" onclick="toggleStatus('${u.username}')" data-testid="btn-toggle-status">
@@ -270,6 +297,26 @@ export function createFixtureApp(): express.Express {
         </div>
 
         <script>
+          function filterTable() {
+            var input = document.getElementById('userSearch');
+            var filter = input.value.toLowerCase().trim();
+            var table = document.getElementById('usersTable');
+            var tr = table.getElementsByTagName('tr');
+            for (var i = 1; i < tr.length; i++) {
+              var tdUsername = tr[i].getElementsByTagName('td')[2];
+              var tdFullName = tr[i].getElementsByTagName('td')[1];
+              if (tdUsername || tdFullName) {
+                var uVal = tdUsername ? (tdUsername.textContent || tdUsername.innerText).toLowerCase().trim() : '';
+                var fVal = tdFullName ? (tdFullName.textContent || tdFullName.innerText).toLowerCase().trim() : '';
+                if (!filter || uVal === filter || uVal.indexOf(filter) > -1 || fVal.indexOf(filter) > -1) {
+                  tr[i].style.display = '';
+                } else {
+                  tr[i].style.display = 'none';
+                }
+              }
+            }
+          }
+
           function toggleStatus(username) {
             fetch('/MasterV9.4/api/users/' + username + '/toggle-status', { method: 'POST' })
               .then(() => location.reload());

@@ -144,7 +144,172 @@ export class AutomationWorker {
     }
 
     // =========================================================================
-    // 2. INTERACTIVE & DIRECT CLIENT APPLICATION WORKFLOWS (HEADED)
+    // 2. REMOTE CLIENT MUTATION WORKFLOWS (ISOLATED HEADLESS CONTEXT)
+    // =========================================================================
+    const isMutationTask = [
+      'CREATE_CLIENT_USER',
+      'CREATE_USER',
+      'EDIT_CLIENT_USER',
+      'EDIT_AND_UPDATE_CLIENT',
+      'SET_CLIENT_USER_STATUS',
+      'CHANGE_CLIENT_USER_STATUS',
+      'RESET_CLIENT_USER_PASSWORD',
+    ].includes(task.taskType);
+
+    if (isMutationTask) {
+      let mutationContext: BrowserContext | null = null;
+      try {
+        onProgress?.(`Launching isolated headless browser for task [${task.taskType}]...`);
+        mutationContext = await BrowserProfileManager.launchPersistentContext({
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          isHeaded: false, // Strict headless isolation for all remote mutations
+          namespace: 'sync',
+          slowMo: 0,
+        });
+
+        const mutationPage = mutationContext.pages()[0] || (await mutationContext.newPage());
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const usersListUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.targetRoute,
+          fallbackRoute: '/users',
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+
+        if (task.taskType === 'CREATE_CLIENT_USER' || task.taskType === 'CREATE_USER') {
+          const payloadData = task.payload?.payload || task.payload;
+          const addUsersUrl = resolveClientRoute({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            route: task.payload?.addUsersRoute,
+            fallbackRoute: '/addUsers',
+          });
+          const username = payloadData?.username || task.payload?.username || 'user';
+          onProgress?.(`Creating client user '${username}' on ${addUsersUrl}...`);
+          const createRes = await UserManagementExecutor.createUser(mutationPage, {
+            addUsersUrl,
+            usersListUrl,
+            dto: payloadData as any,
+            loginUrl,
+            credentials: task.credentials,
+          });
+          const totalDurationMs = Date.now() - startTime;
+          if (createRes.success) {
+            onProgress?.(`✓ Created client user ${createRes.username}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: createRes,
+            });
+          } else {
+            onProgress?.(`✗ Failed to create user: ${createRes.message || createRes.errorMessage}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: createRes.message || createRes.errorMessage || 'User creation failed on client portal.',
+              totalDurationMs,
+              resultData: createRes,
+            });
+          }
+          return;
+        }
+
+        if (task.taskType === 'EDIT_CLIENT_USER' || task.taskType === 'EDIT_AND_UPDATE_CLIENT') {
+          onProgress?.(`Updating client user '${task.payload.username}' on remote client...`);
+          const editRes = await UserManagementExecutor.editUser(mutationPage, {
+            usersListUrl,
+            username: task.payload.username,
+            dto: task.payload as any,
+            loginUrl,
+            credentials: task.credentials,
+          });
+          const totalDurationMs = Date.now() - startTime;
+          if (editRes.success) {
+            onProgress?.(`✓ Updated and verified user '${editRes.username}' on client.`);
+            await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: editRes });
+          } else {
+            onProgress?.(`✗ Failed to update user: ${editRes.message || editRes.errorMessage}`);
+            await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: editRes.message || editRes.errorMessage, totalDurationMs, resultData: editRes });
+          }
+          return;
+        }
+
+        if (task.taskType === 'SET_CLIENT_USER_STATUS' || task.taskType === 'CHANGE_CLIENT_USER_STATUS') {
+          const targetStatus = task.payload.status || task.payload.targetStatus;
+          onProgress?.(`Updating status for '${task.payload.username}' to ${targetStatus} in Simplex client...`);
+          const statusRes = await UserManagementExecutor.setUserStatus(mutationPage, {
+            usersListUrl,
+            username: task.payload.username,
+            targetStatus,
+            loginUrl,
+            credentials: task.credentials,
+          });
+          const totalDurationMs = Date.now() - startTime;
+          if (statusRes.success) {
+            onProgress?.(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
+            await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: statusRes });
+          } else {
+            onProgress?.(`✗ Remote status verification failed: ${statusRes.errorMessage || statusRes.message}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: statusRes.errorMessage || statusRes.message || 'Remote status verification failed',
+              totalDurationMs,
+              resultData: statusRes,
+            });
+          }
+          return;
+        }
+
+        if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
+          onProgress?.(`Resetting password for '${task.payload.username}' in Simplex client...`);
+          const resetRes = await UserManagementExecutor.resetUserPassword(mutationPage, {
+            usersListUrl,
+            username: task.payload.username,
+            loginUrl,
+            credentials: task.credentials,
+          });
+          const totalDurationMs = Date.now() - startTime;
+          if (resetRes.success) {
+            onProgress?.(`✓ Password reset completed for '${resetRes.username}'.`);
+            await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: resetRes });
+          } else {
+            onProgress?.(`✗ Password reset failed: ${resetRes.errorMessage || resetRes.message}`);
+            await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: resetRes.errorMessage || resetRes.message, totalDurationMs, resultData: resetRes });
+          }
+          return;
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        onProgress?.(`[MUTATION ERROR] ${err.message}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: err.message || 'Remote mutation failed',
+          totalDurationMs,
+          resultData: {
+            success: false,
+            errorCode: 'MUTATION_RUNTIME_ERROR',
+            errorMessage: err.message,
+          },
+        });
+      } finally {
+        if (mutationContext) {
+          try {
+            await mutationContext.close();
+            onProgress?.(`Isolated headless browser context closed.`);
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // =========================================================================
+    // 3. INTERACTIVE & DIRECT CLIENT APPLICATION WORKFLOWS (HEADED)
     // =========================================================================
     let context: BrowserContext | null = null;
     let page: Page | null = null;
@@ -198,122 +363,6 @@ export class AutomationWorker {
 
       if (!page) {
         page = context.pages()[0] || (await context.newPage());
-      }
-
-      const appPath = task.clientAppPath || task.payload?.applicationPath;
-      const usersListUrl = resolveClientRoute({
-        baseUrl: task.clientBaseUrl,
-        applicationPath: appPath,
-        route: task.targetRoute,
-        fallbackRoute: '/users',
-      });
-      const loginUrl = resolveClientRoute({
-        baseUrl: task.clientBaseUrl,
-        applicationPath: appPath,
-        route: task.loginRoute,
-        fallbackRoute: '/login',
-      });
-
-      if (task.taskType === 'CREATE_CLIENT_USER' || task.taskType === 'CREATE_USER') {
-        const payloadData = task.payload?.payload || task.payload;
-        const addUsersUrl = resolveClientRoute({
-          baseUrl: task.clientBaseUrl,
-          applicationPath: appPath,
-          route: task.payload?.addUsersRoute,
-          fallbackRoute: '/addUsers',
-        });
-        const username = payloadData?.username || task.payload?.username || 'user';
-        onProgress?.(`Creating client user '${username}' on ${addUsersUrl}...`);
-        const createRes = await UserManagementExecutor.createUser(page, {
-          addUsersUrl,
-          usersListUrl,
-          dto: payloadData as any,
-          loginUrl,
-          credentials: task.credentials,
-        });
-        const totalDurationMs = Date.now() - startTime;
-        if (createRes.success) {
-          onProgress?.(`✓ Created client user ${createRes.username}`);
-          await this.agentClient.sendTelemetry(task.runId, {
-            status: 'COMPLETED',
-            totalDurationMs,
-            resultData: createRes,
-          });
-        } else {
-          onProgress?.(`✗ Failed to create user: ${createRes.message || createRes.errorMessage}`);
-          await this.agentClient.sendTelemetry(task.runId, {
-            status: 'FAILED',
-            errorMessage: createRes.message || createRes.errorMessage || 'User creation failed on client portal.',
-            totalDurationMs,
-            resultData: createRes,
-          });
-        }
-        return;
-      }
-
-      if (task.taskType === 'EDIT_CLIENT_USER' || task.taskType === 'EDIT_AND_UPDATE_CLIENT') {
-        onProgress?.(`Updating client user '${task.payload.username}' on remote client...`);
-        const editRes = await UserManagementExecutor.editUser(page, {
-          usersListUrl,
-          username: task.payload.username,
-          dto: task.payload as any,
-          loginUrl,
-          credentials: task.credentials,
-        });
-        const totalDurationMs = Date.now() - startTime;
-        if (editRes.success) {
-          onProgress?.(`✓ Updated and verified user '${editRes.username}' on client.`);
-          await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: editRes });
-        } else {
-          onProgress?.(`✗ Failed to update user: ${editRes.message || editRes.errorMessage}`);
-          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: editRes.message || editRes.errorMessage, totalDurationMs, resultData: editRes });
-        }
-        return;
-      }
-
-      if (task.taskType === 'SET_CLIENT_USER_STATUS' || task.taskType === 'CHANGE_CLIENT_USER_STATUS') {
-        const targetStatus = task.payload.status || task.payload.targetStatus;
-        onProgress?.(`Updating status for '${task.payload.username}' to ${targetStatus} in Simplex client...`);
-        const statusRes = await UserManagementExecutor.setUserStatus(page, {
-          usersListUrl,
-          username: task.payload.username,
-          targetStatus,
-          loginUrl,
-          credentials: task.credentials,
-        });
-        const totalDurationMs = Date.now() - startTime;
-        if (statusRes.success) {
-          onProgress?.(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
-          await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: statusRes });
-        } else {
-          onProgress?.(`✗ Remote status verification failed: ${statusRes.errorMessage || statusRes.message}`);
-          await this.agentClient.sendTelemetry(task.runId, {
-            status: 'FAILED',
-            errorMessage: statusRes.errorMessage || statusRes.message || 'Remote status verification failed',
-            totalDurationMs,
-            resultData: statusRes,
-          });
-        }
-        return;
-      }
-
-      if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
-        onProgress?.(`Resetting password for '${task.payload.username}' in Simplex client...`);
-        const resetRes = await UserManagementExecutor.resetUserPassword(page, {
-          usersListUrl,
-          username: task.payload.username,
-          loginUrl,
-          credentials: task.credentials,
-        });
-        const totalDurationMs = Date.now() - startTime;
-        if (resetRes.success) {
-          onProgress?.(`✓ Password reset completed for '${resetRes.username}'.`);
-          await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: resetRes });
-        } else {
-          onProgress?.(`✗ Password reset failed: ${resetRes.errorMessage || resetRes.message}`);
-          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: resetRes.errorMessage || resetRes.message, totalDurationMs, resultData: resetRes });
-        }
-        return;
       }
 
       // Default Interactive / Workflow Execution (Login, Service Creation, etc.)

@@ -74,16 +74,26 @@ export interface ClientCreateFormMetadata {
   fieldMappings?: Record<string, string>;
 }
 
+export interface ClientUserSyncSummary {
+  remoteRowsRead: number;
+  remotePagesRead: number;
+  remoteDuplicatesRemoved: number;
+  remoteUniqueUsers: number;
+  centralRowsPersisted: number;
+  centralRowsDisplayed: number;
+  staleRowsExcluded: number;
+  crossClientRowsExcluded: number;
+  syncRunId?: string;
+  remoteUsersFetched?: number;
+  excludedStaleRecords?: number;
+  duplicateRemoteRecordsRemoved?: number;
+}
+
 export interface ClientUserListResponse {
   users: ClientUser[];
   totalCount: number;
   lastSyncedAt: string | null;
-  syncSummary?: {
-    remoteUsersFetched: number;
-    centralUsersDisplayed: number;
-    excludedStaleRecords: number;
-    duplicateRemoteRecordsRemoved: number;
-  };
+  syncSummary?: ClientUserSyncSummary;
   liveClientOptions?: {
     nationalities: string[] | FormDropdownOption[];
     roles: string[] | FormDropdownOption[];

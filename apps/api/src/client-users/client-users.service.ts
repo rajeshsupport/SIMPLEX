@@ -7,7 +7,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Like, In } from 'typeorm';
+import { Repository, Like, In, Not, IsNull } from 'typeorm';
 import * as crypto from 'crypto';
 import * as XLSX from 'xlsx';
 import {
@@ -21,6 +21,7 @@ import {
 import {
   ClientUser,
   ClientUserListResponse,
+  ClientUserSyncSummary,
   CreateClientUserDto,
   UpdateClientUserDto,
   ExcelUserImportPreviewResult,
@@ -156,9 +157,27 @@ export class ClientUsersService implements OnModuleInit {
     const limit = Math.min(100, Math.max(1, Number(query.limit) || 25));
     const skip = (page - 1) * limit;
 
+    // Find latest successful syncRunId for this client
+    const latestSyncRecord = await this.snapshotRepo
+      .createQueryBuilder('u')
+      .select('u.syncRunId', 'syncRunId')
+      .addSelect('u.lastSyncedAt', 'lastSyncedAt')
+      .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent AND u.syncRunId IS NOT NULL', {
+        clientId,
+        isPresent: true,
+      })
+      .orderBy('u.lastSyncedAt', 'DESC')
+      .getRawOne();
+
+    const latestSyncRunId = latestSyncRecord?.syncRunId;
+
     const qb = this.snapshotRepo
       .createQueryBuilder('u')
       .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent', { clientId, isPresent: true });
+
+    if (latestSyncRunId) {
+      qb.andWhere('u.syncRunId = :latestSyncRunId', { latestSyncRunId });
+    }
 
     if (query.status && query.status !== 'ALL') {
       qb.andWhere('u.status = :status', { status: query.status });
@@ -503,39 +522,51 @@ export class ClientUsersService implements OnModuleInit {
    */
   private async persistScrapedUsers(
     clientId: string,
-    scrapedUsers: any[]
-  ): Promise<{
-    remoteUsersFetched: number;
-    centralUsersDisplayed: number;
-    excludedStaleRecords: number;
-    duplicateRemoteRecordsRemoved: number;
-    syncRunId: string;
-  }> {
+    scrapedUsers: any[],
+    meta?: {
+      remoteRowsRead?: number;
+      remotePagesRead?: number;
+      remoteDuplicatesRemoved?: number;
+      remoteUniqueUsers?: number;
+    }
+  ): Promise<ClientUserSyncSummary> {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client || !scrapedUsers) {
       return {
-        remoteUsersFetched: 0,
-        centralUsersDisplayed: 0,
-        excludedStaleRecords: 0,
-        duplicateRemoteRecordsRemoved: 0,
+        remoteRowsRead: 0,
+        remotePagesRead: 0,
+        remoteDuplicatesRemoved: 0,
+        remoteUniqueUsers: 0,
+        centralRowsPersisted: 0,
+        centralRowsDisplayed: 0,
+        staleRowsExcluded: 0,
+        crossClientRowsExcluded: 0,
         syncRunId: '',
       };
     }
 
-    const rawCount = scrapedUsers.length;
-    // Deduplicate only within this client by normalized username
+    const rawRowsRead = meta?.remoteRowsRead ?? scrapedUsers.length;
+    const pagesRead = meta?.remotePagesRead ?? 1;
+
+    // Deduplicate only within this client by (clientId + remoteUserId) or (clientId + normalizedUsername)
     const deduplicatedMap = new Map<string, any>();
     for (const u of scrapedUsers) {
       if (u && u.username) {
-        deduplicatedMap.set(u.username.trim().toLowerCase(), u);
+        const key = u.remoteUserId
+          ? `${clientId}:${u.remoteUserId}`
+          : `${clientId}:${u.username.trim().toLowerCase()}`;
+        deduplicatedMap.set(key, u);
       }
     }
     const deduplicatedUsers = Array.from(deduplicatedMap.values());
-    const duplicatesRemoved = rawCount - deduplicatedUsers.length;
+    const duplicatesRemoved = rawRowsRead - deduplicatedUsers.length;
+    const remoteUniqueUsers = deduplicatedUsers.length;
+
     const syncRunId = crypto.randomUUID();
     const now = new Date();
     const activeUsernames = new Set<string>();
 
+    let centralRowsPersisted = 0;
     for (const su of deduplicatedUsers) {
       const normUsername = su.username.trim();
       activeUsernames.add(normUsername.toLowerCase());
@@ -587,36 +618,51 @@ export class ClientUsersService implements OnModuleInit {
         snapshot.lastSyncedAt = now;
       }
       await this.snapshotRepo.save(snapshot);
+      centralRowsPersisted++;
     }
 
     // Mark previous snapshots of this client that were NOT present remotely as isPresentRemotely = false
     const existingSnapshots = await this.snapshotRepo.find({ where: { clientId } });
-    let excludedStaleCount = 0;
+    let staleRowsExcluded = 0;
     for (const existing of existingSnapshots) {
       if (!activeUsernames.has(existing.username.toLowerCase())) {
         existing.isPresentRemotely = false;
         await this.snapshotRepo.save(existing);
-        excludedStaleCount++;
+        staleRowsExcluded++;
       }
     }
 
-    const currentRemotelyPresentCount = await this.snapshotRepo.count({
-      where: { clientId, isPresentRemotely: true },
+    // Count records belonging to OTHER clients to record crossClientRowsExcluded
+    const crossClientRowsExcluded = await this.snapshotRepo.count({
+      where: { clientId: Not(clientId), isPresentRemotely: true },
     });
 
-    if (currentRemotelyPresentCount !== deduplicatedUsers.length) {
+    const centralRowsDisplayed = await this.snapshotRepo.count({
+      where: { clientId, isPresentRemotely: true, syncRunId },
+    });
+
+    // Invariant verification: remoteUniqueUsers = centralRowsPersisted = centralRowsDisplayed
+    if (remoteUniqueUsers !== centralRowsPersisted || centralRowsPersisted !== centralRowsDisplayed) {
       throw new BadRequestException({
         code: 'CLIENT_USER_COUNT_MISMATCH',
-        message: `Synchronization count mismatch: Remote deduplicated count (${deduplicatedUsers.length}) does not match Central displayed count (${currentRemotelyPresentCount}).`,
+        message: `Synchronization count mismatch: remoteUniqueUsers (${remoteUniqueUsers}), centralRowsPersisted (${centralRowsPersisted}), centralRowsDisplayed (${centralRowsDisplayed}) do not match.`,
       });
     }
 
     return {
-      remoteUsersFetched: rawCount,
-      centralUsersDisplayed: currentRemotelyPresentCount,
-      excludedStaleRecords: excludedStaleCount,
-      duplicateRemoteRecordsRemoved: duplicatesRemoved,
+      remoteRowsRead: rawRowsRead,
+      remotePagesRead: pagesRead,
+      remoteDuplicatesRemoved: Math.max(0, duplicatesRemoved),
+      remoteUniqueUsers,
+      centralRowsPersisted,
+      centralRowsDisplayed,
+      staleRowsExcluded,
+      crossClientRowsExcluded,
       syncRunId,
+      // legacy compatibility
+      remoteUsersFetched: rawRowsRead,
+      excludedStaleRecords: staleRowsExcluded,
+      duplicateRemoteRecordsRemoved: Math.max(0, duplicatesRemoved),
     };
   }
 
@@ -646,14 +692,20 @@ export class ClientUsersService implements OnModuleInit {
       }
     }
 
-    let syncSummary: any = undefined;
+    let syncSummary: ClientUserSyncSummary | undefined = undefined;
     if (completedRun && completedRun.status === 'COMPLETED' && completedRun.resultSummaryJson) {
       try {
         const resultData = JSON.parse(completedRun.resultSummaryJson);
         if (resultData.users) {
-          syncSummary = await this.persistScrapedUsers(clientId, resultData.users);
+          syncSummary = await this.persistScrapedUsers(clientId, resultData.users, {
+            remoteRowsRead: resultData.remoteRowsRead,
+            remotePagesRead: resultData.remotePagesRead,
+            remoteDuplicatesRemoved: resultData.remoteDuplicatesRemoved,
+            remoteUniqueUsers: resultData.remoteUniqueUsers,
+          });
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (err instanceof BadRequestException) throw err;
         console.error('Error saving scraped snapshot users:', err);
       }
     } else if (completedRun && completedRun.status === 'FAILED') {

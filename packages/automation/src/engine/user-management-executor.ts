@@ -57,6 +57,10 @@ export interface SyncUsersResult {
   success: boolean;
   users: ScrapedClientUser[];
   totalScraped: number;
+  remoteRowsRead?: number;
+  remotePagesRead?: number;
+  remoteDuplicatesRemoved?: number;
+  remoteUniqueUsers?: number;
   liveStatus: 'LIVE' | 'CACHED';
   errorCode?: string;
   errorMessage?: string;
@@ -362,6 +366,7 @@ export class UserManagementExecutor {
     const scrapedUsersMap = new Map<string, ScrapedClientUser>();
     const seenPageSignatures = new Set<string>();
     let currentPage = 1;
+    let totalRowsRead = 0;
     const maxPages = 30; // Guard against infinite pagination
 
     while (currentPage <= maxPages) {
@@ -392,8 +397,8 @@ export class UserManagementExecutor {
 
         headers.forEach((h, idx) => {
           if (h.includes('s.no') || h === 'sno' || h === '#' || h.includes('sl.no')) colSNo = idx;
-          else if (h === 'user name' || h.includes('username') || h.includes('login') || h.includes('user id') || h === 'user') colUsername = idx;
-          else if (h === 'name' || h.includes('full name') || h.includes('fullname')) colFullName = idx;
+          else if (h === 'user name' || h.includes('full name') || h.includes('fullname')) colFullName = idx;
+          else if (h === 'name' || h === 'username' || h.includes('login') || h.includes('user id') || h === 'user') colUsername = idx;
           else if (h.includes('mobile') || h.includes('phone') || h.includes('contact')) colMobile = idx;
           else if (h.includes('email') || h.includes('mail')) colEmail = idx;
           else if (h.includes('national') || h.includes('country')) colNationality = idx;
@@ -449,6 +454,8 @@ export class UserManagementExecutor {
         });
       }, structureEval.selector);
 
+      totalRowsRead += pageRowsData.length;
+
       // Signature of current page to prevent repeated page loop
       const pageSignature = pageRowsData.map(r => r.cells.slice(0, 3).join('|')).join('::');
       if (pageSignature && seenPageSignatures.has(pageSignature)) {
@@ -466,7 +473,7 @@ export class UserManagementExecutor {
         const texts = row.cells;
         if (texts.length < 2) continue;
 
-        // Use header mapped indices or fall back to positional indices
+        // Use header mapped indices: Name -> username, User Name -> fullName
         let fullName = (row.colFullName >= 0 ? texts[row.colFullName] : texts[1]) || '';
         let username = (row.colUsername >= 0 ? texts[row.colUsername] : texts[2]) || '';
         let mobileNumber = (row.colMobile >= 0 ? texts[row.colMobile] : texts[3]) || '';
@@ -541,6 +548,7 @@ export class UserManagementExecutor {
     }
 
     const allUsers = Array.from(scrapedUsersMap.values());
+    const remoteDuplicatesRemoved = Math.max(0, totalRowsRead - allUsers.length);
 
     // Do not classify success unless users fetched is greater than zero
     if (allUsers.length === 0) {
@@ -548,6 +556,10 @@ export class UserManagementExecutor {
         success: false,
         users: [],
         totalScraped: 0,
+        remoteRowsRead: totalRowsRead,
+        remotePagesRead: currentPage,
+        remoteDuplicatesRemoved,
+        remoteUniqueUsers: 0,
         liveStatus: 'CACHED',
         errorCode: 'USER_SCREEN_STRUCTURE_NOT_RECOGNIZED',
         errorMessage: `User directory screen structure could not be recognized. Screen heading: "${screenHeading}".`,
@@ -567,6 +579,10 @@ export class UserManagementExecutor {
       success: true,
       users: allUsers,
       totalScraped: allUsers.length,
+      remoteRowsRead: totalRowsRead,
+      remotePagesRead: currentPage,
+      remoteDuplicatesRemoved,
+      remoteUniqueUsers: allUsers.length,
       liveStatus: 'LIVE',
       options: this.getDefaultOptions(),
     };
@@ -718,7 +734,15 @@ export class UserManagementExecutor {
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
 
-    await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to client failed.',
+      };
+    }
     await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
     // 1. Locate fields
@@ -898,15 +922,14 @@ export class UserManagementExecutor {
 
     // 7. Verify User in Users List
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    const userRow = page.locator(`tr:has-text("${dto.username}")`).first();
-    const created = await userRow.isVisible().catch(() => false);
+    const verifyLookup = await this.findExactUserRow(page, dto.username, usersListUrl);
 
-    if (created) {
+    if (verifyLookup.success && verifyLookup.rowHandle) {
       return {
         success: true,
         username: dto.username,
         message: `User ${dto.username} created successfully on client.`,
-        status: 'ACTIVE',
+        status: verifyLookup.currentRemoteStatus || 'ACTIVE',
       };
     } else {
       return {
@@ -919,7 +942,49 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Evaluates the active/inactive status from a table status cell.
+   */
+  public static async evaluateCellStatus(cellHandle: any): Promise<ClientUserStatus> {
+    return await cellHandle.evaluate((el: HTMLElement) => {
+      const text = (el.innerText || el.textContent || '').toUpperCase();
+      const html = el.innerHTML.toUpperCase();
+      const hasCheck =
+        html.includes('FA-CHECK') ||
+        html.includes('GLYPHICON-OK') ||
+        html.includes('BADGE-ACTIVE') ||
+        html.includes('STATUS-ACTIVE') ||
+        html.includes('TEXT-GREEN') ||
+        html.includes('TEXT-EMERALD') ||
+        html.includes('✔') ||
+        html.includes('✓') ||
+        html.includes('COLOR: #10B981') ||
+        html.includes('COLOR: RGB(16, 185, 129)') ||
+        html.includes('TITLE="ACTIVE"');
+      const hasCross =
+        html.includes('FA-TIMES') ||
+        html.includes('FA-CLOSE') ||
+        html.includes('GLYPHICON-REMOVE') ||
+        html.includes('BADGE-INACTIVE') ||
+        html.includes('STATUS-INACTIVE') ||
+        html.includes('TEXT-RED') ||
+        html.includes('TEXT-DANGER') ||
+        html.includes('✖') ||
+        html.includes('✗') ||
+        html.includes('COLOR: #EF4444') ||
+        html.includes('COLOR: RGB(239, 68, 68)') ||
+        html.includes('TITLE="INACTIVE"');
+
+      if (hasCross && !hasCheck) return 'INACTIVE';
+      if (hasCheck && !hasCross) return 'ACTIVE';
+      if (text.includes('INACTIVE') || text.includes('DEACTIVE') || text.includes('DISABLED')) return 'INACTIVE';
+      if (text.includes('ACTIVE') || text.includes('ENABLED')) return 'ACTIVE';
+      return hasCheck ? 'ACTIVE' : hasCross ? 'INACTIVE' : 'ACTIVE';
+    });
+  }
+
+  /**
    * Helper to ensure the browser session is authenticated before performing user mutations.
+   * Returns CLIENT_AUTO_LOGIN_FAILED if authentication fails rather than obscuring with downstream errors.
    */
   public static async ensureAuthenticated(
     page: Page,
@@ -928,33 +993,334 @@ export class UserManagementExecutor {
       loginUrl?: string;
       credentials?: { username: string; password?: string };
     }
-  ): Promise<boolean> {
+  ): Promise<{ authenticated: boolean; errorCode?: string; errorMessage?: string }> {
     const { targetUrl, loginUrl, credentials } = options;
+
     try {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     } catch {
-      // Ignore initial navigation error
+      // If initial target navigation fails, try loginUrl if specified
+      if (loginUrl) {
+        try {
+          await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch (loginNavErr: any) {
+          return {
+            authenticated: false,
+            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+            errorMessage: `Failed to connect to client application: ${loginNavErr.message}`,
+          };
+        }
+      }
     }
 
     const currentUrl = page.url();
     const isLoginPage =
       currentUrl.includes('/login') ||
-      (await page.locator('#username, input[name="username"], #btnLogin, [data-testid="input-username"]').count()) > 0;
+      ((await page.locator('#btnLogin, [data-testid="btn-login"], button:has-text("Sign In")').count()) > 0 &&
+        (await page.locator('input[type="password"]').count()) > 0);
 
-    if (isLoginPage && credentials && credentials.username && credentials.password) {
-      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
-      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
-      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
+    if (!isLoginPage) {
+      return { authenticated: true };
+    }
 
-      if (userLoc && passLoc && submitLoc) {
-        await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
-        await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
-        await submitLoc.locator.click();
-        await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    // Login is required
+    if (!credentials || !credentials.username || !credentials.password) {
+      return {
+        authenticated: false,
+        errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: 'Client credentials are required for automatic authentication.',
+      };
+    }
+
+    const targetLoginUrl = loginUrl || targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login');
+    if (!currentUrl.includes('/login')) {
+      try {
+        await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch (err: any) {
+        return {
+          authenticated: false,
+          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+          errorMessage: `Failed to navigate to login route: ${err.message}`,
+        };
       }
     }
-    return true;
+
+    const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
+    const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
+    const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
+
+    if (!userLoc || !passLoc || !submitLoc) {
+      return {
+        authenticated: false,
+        errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: 'Login input controls or submit button not found on client login screen.',
+      };
+    }
+
+    await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
+    await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
+    await submitLoc.locator.click();
+
+    try {
+      await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+
+      // Check for error messages
+      const errorBanner = page.locator('.error, .alert-danger, [data-testid="error-message"], .text-danger:has-text("invalid"), .text-danger:has-text("incorrect")').first();
+      if (await errorBanner.isVisible().catch(() => false)) {
+        const errMsg = (await errorBanner.textContent().catch(() => '')) || 'Invalid credentials';
+        return {
+          authenticated: false,
+          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+          errorMessage: `Client authentication rejected: ${errMsg.trim()}`,
+        };
+      }
+
+      await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav', { timeout: 10000 });
+    } catch {
+      if (page.url().includes('/login') || ((await page.locator('#btnLogin, [data-testid="btn-login"]').count()) > 0 && (await page.locator('input[type="password"]').count()) > 0)) {
+        return {
+          authenticated: false,
+          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+          errorMessage: 'Client auto-login failed: authenticated dashboard header did not appear.',
+        };
+      }
+    }
+
+    const stillOnLogin = page.url().includes('/login') && (await page.locator('#username, input[name="username"]').count()) > 0;
+    if (stillOnLogin) {
+      return {
+        authenticated: false,
+        errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: 'Client auto-login failed: still on login page after credentials submission.',
+      };
+    }
+
+    return { authenticated: true };
+  }
+
+  /**
+   * Locates an exact user row on the Simplex Users screen by matching the "Name" column (login username).
+   * Simplex mapping:
+   * - "User Name" column -> Person's Full Name (e.g. "Abdul Qadeer Pathan")
+   * - "Name" column -> Login Username (e.g. "abdul.p")
+   * Performs Angular search triggering and falls back to full pagination traversal.
+   */
+  public static async findExactUserRow(
+    page: Page,
+    targetUsername: string,
+    usersListUrl: string
+  ): Promise<{
+    success: boolean;
+    rowHandle?: any;
+    rowIndex?: number;
+    statusColIdx?: number;
+    actionColIdx?: number;
+    usernameColIdx?: number;
+    fullNameColIdx?: number;
+    currentRemoteStatus?: ClientUserStatus;
+    errorCode?: string;
+    errorMessage?: string;
+  }> {
+    const normTarget = targetUsername.trim().toLowerCase();
+
+    // 1. Wait for users table or grid structure
+    const tableVisible = await page
+      .waitForSelector('table, [data-testid="users-table"], .grid-container, [data-testid="hmc-users-screen"]', {
+        timeout: 10000,
+      })
+      .catch(() => null);
+
+    if (!tableVisible) {
+      return {
+        success: false,
+        errorCode: 'CLIENT_USERS_SCREEN_FAILED',
+        errorMessage: 'Simplex users table did not load or render in time.',
+      };
+    }
+
+    // 2. Detect column headers
+    const headerTexts: string[] = await page.$$eval(
+      'table thead tr th, table tr:first-child th, table tr:first-child td, [role="columnheader"], .header-cell, th',
+      (ths) => ths.map((th) => (th.textContent || '').trim().toUpperCase())
+    );
+
+    let fullNameColIdx = -1;
+    let usernameColIdx = -1;
+    let mobileColIdx = -1;
+    let statusColIdx = -1;
+    let actionColIdx = -1;
+
+    headerTexts.forEach((h, idx) => {
+      if (h === 'USER NAME' || h.includes('FULL NAME') || h.includes('FULLNAME')) {
+        fullNameColIdx = idx;
+      } else if (h === 'NAME' || h === 'USERNAME' || h.includes('LOGIN') || h.includes('USER ID') || h === 'USER') {
+        usernameColIdx = idx;
+      } else if (h.includes('MOBILE') || h.includes('PHONE') || h.includes('CONTACT')) {
+        mobileColIdx = idx;
+      } else if (h.includes('STATUS') || h.includes('STATE')) {
+        statusColIdx = idx;
+      } else if (h.includes('ACTION') || h.includes('OPERATION')) {
+        actionColIdx = idx;
+      }
+    });
+
+    if (usernameColIdx === -1 && fullNameColIdx !== -1) usernameColIdx = fullNameColIdx;
+    if (usernameColIdx === -1) usernameColIdx = 2; // Default fallback to index 2 (S.NO(0), User Name(1), Name(2))
+    if (statusColIdx === -1) statusColIdx = headerTexts.length > 2 ? headerTexts.length - 2 : 4;
+    if (actionColIdx === -1) actionColIdx = headerTexts.length > 1 ? headerTexts.length - 1 : 5;
+
+    // Helper to inspect rows on current page
+    const inspectCurrentPageRows = async (): Promise<{
+      matches: { row: any; index: number; status: ClientUserStatus }[];
+    }> => {
+      const rows = await page.$$('table tbody tr');
+      const matches: { row: any; index: number; status: ClientUserStatus }[] = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const cells = await row.$$('td');
+        if (cells.length === 0) continue;
+
+        // Skip rows that are hidden (e.g. filtered by client-side search)
+        const isHidden = await row.evaluate((el) => {
+          const style = window.getComputedStyle(el);
+          return style.display === 'none' || style.visibility === 'hidden';
+        });
+        if (isHidden) continue;
+
+        const cellTexts = await Promise.all(cells.map((c) => c.textContent()));
+        const cellUsername = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
+
+        // Exact trimmed equality check on the Name (username) column
+        if (cellUsername === normTarget) {
+          let rowStatus: ClientUserStatus = 'ACTIVE';
+          if (statusColIdx >= 0 && statusColIdx < cells.length) {
+            rowStatus = await UserManagementExecutor.evaluateCellStatus(cells[statusColIdx]);
+          }
+          matches.push({ row, index: i, status: rowStatus });
+        }
+      }
+      return { matches };
+    };
+
+    // 3. Attempt Angular search input filtering
+    const searchInput = page
+      .locator('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[id*="search" i], #userSearch')
+      .first();
+
+    let searchExecuted = false;
+    if (await searchInput.isVisible().catch(() => false)) {
+      try {
+        await searchInput.fill(targetUsername.trim());
+        await searchInput.evaluate((el: HTMLInputElement, val: string) => {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+        }, targetUsername.trim());
+        await searchInput.press('Enter').catch(() => {});
+        await searchInput.press('Tab').catch(() => {});
+        await page.waitForTimeout(600);
+        searchExecuted = true;
+      } catch {
+        searchExecuted = false;
+      }
+    }
+
+    if (searchExecuted) {
+      const { matches } = await inspectCurrentPageRows();
+      if (matches.length === 1) {
+        return {
+          success: true,
+          rowHandle: matches[0].row,
+          rowIndex: matches[0].index,
+          statusColIdx,
+          actionColIdx,
+          usernameColIdx,
+          fullNameColIdx,
+          currentRemoteStatus: matches[0].status,
+        };
+      }
+      if (matches.length > 1) {
+        return {
+          success: false,
+          errorCode: 'AMBIGUOUS_REMOTE_USER',
+          errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
+        };
+      }
+    }
+
+    // 4. If search didn't filter or match, clear search input and traverse pagination
+    if (searchExecuted && (await searchInput.isVisible().catch(() => false))) {
+      await searchInput.evaluate((el: HTMLInputElement) => {
+        el.value = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+      });
+      await page.waitForTimeout(500);
+    }
+
+    const seenPageSignatures = new Set<string>();
+    let pageNum = 1;
+    const maxPages = 50;
+
+    while (pageNum <= maxPages) {
+      const rows = await page.$$('table tbody tr');
+      if (rows.length === 0) break;
+
+      const firstRowCells = await rows[0].$$('td');
+      const firstRowTexts = await Promise.all(firstRowCells.map((c) => c.textContent()));
+      const sig = `${pageNum}:${firstRowTexts.slice(0, 3).join('|')}`;
+      if (seenPageSignatures.has(sig)) break;
+      seenPageSignatures.add(sig);
+
+      const { matches } = await inspectCurrentPageRows();
+      if (matches.length === 1) {
+        return {
+          success: true,
+          rowHandle: matches[0].row,
+          rowIndex: matches[0].index,
+          statusColIdx,
+          actionColIdx,
+          usernameColIdx,
+          fullNameColIdx,
+          currentRemoteStatus: matches[0].status,
+        };
+      }
+      if (matches.length > 1) {
+        return {
+          success: false,
+          errorCode: 'AMBIGUOUS_REMOTE_USER',
+          errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
+        };
+      }
+
+      // Check next page control
+      const nextButton = page
+        .locator(
+          'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i], a[title*="next" i], .page-link:has-text("›")'
+        )
+        .first();
+
+      const hasNext = (await nextButton.count()) > 0 && (await nextButton.isVisible().catch(() => false));
+      if (!hasNext) break;
+
+      const isDisabled = await nextButton.getAttribute('disabled');
+      const isAriaDisabled = await nextButton.getAttribute('aria-disabled');
+      if (isDisabled !== null || isAriaDisabled === 'true') break;
+
+      await nextButton.click().catch(() => {});
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(500);
+      pageNum++;
+    }
+
+    return {
+      success: false,
+      errorCode: 'REMOTE_USER_NOT_FOUND',
+      errorMessage: `Target user '${targetUsername}' not found on client users list after searching all pages.`,
+    };
   }
 
   /**
@@ -976,28 +1342,38 @@ export class UserManagementExecutor {
   ): Promise<MutationResult> {
     const isObj = typeof arg1 === 'object';
     const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
-    const username = isObj ? arg1.username : (arg2 as string);
+    const username = (isObj ? arg1.username : (arg2 as string)).trim();
     const dto = isObj ? arg1.dto : (arg3 || (arg2 as UpdateClientUserDto));
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
 
-    await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
-
-    const row = page.locator(`tr:has-text("${username}")`).first();
-    const isRowVisible = await row.isVisible().catch(() => false);
-    if (!isRowVisible) {
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
+    if (!authRes.authenticated) {
       return {
         success: false,
         username,
-        errorCode: 'USER_NOT_FOUND',
-        errorMessage: `Target user '${username}' not found on client users list.`,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to client failed.',
       };
     }
 
-    const editBtn = row.locator('button.btn-edit, a[href*="edit" i], [data-testid="btn-edit-user"]').first();
-    const canEdit = await editBtn.isVisible().catch(() => false);
+    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-    if (canEdit) {
+    const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
+    if (!lookupRes.success || !lookupRes.rowHandle) {
+      return {
+        success: false,
+        username,
+        errorCode: lookupRes.errorCode || 'REMOTE_USER_NOT_FOUND',
+        errorMessage: lookupRes.errorMessage || `Target user '${username}' not found on client users list.`,
+      };
+    }
+
+    const editBtn = await lookupRes.rowHandle.$(
+      'button.btn-edit, a.btn-edit, a[href*="edit" i], [data-testid="btn-edit-user"], a[title*="edit" i], button[title*="edit" i]'
+    );
+
+    if (editBtn) {
       await editBtn.click();
     } else {
       await page.goto(`${usersListUrl}/edit/${username}`, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
@@ -1080,74 +1456,45 @@ export class UserManagementExecutor {
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
 
-    await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
-    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForSelector('table', { timeout: 10000 }).catch(() => {});
-
-    // Try using search input if present on the users screen
-    const searchInput = page.locator('input[type="search"], input[name="search"], input[placeholder*="search" i], #userSearch').first();
-    if (await searchInput.isVisible().catch(() => false)) {
-      await searchInput.fill(username);
-      await page.keyboard.press('Enter').catch(() => {});
-      await page.waitForTimeout(500);
-    }
-
-    // 1. Detect column positions from visible headers (S.NO, User Name, Name, Mobile No, Status, Action)
-    const headerTexts: string[] = await page.$$eval('table thead tr th', (ths) =>
-      ths.map((th) => (th.textContent || '').trim().toUpperCase())
-    );
-
-    let usernameColIdx = headerTexts.findIndex((h) => h.includes('USER NAME') || h === 'USERNAME' || h === 'USER');
-    let nameColIdx = headerTexts.findIndex((h) => h === 'NAME' || h.includes('FULL NAME'));
-    let statusColIdx = headerTexts.findIndex((h) => h === 'STATUS' || h.includes('STATUS'));
-
-    if (usernameColIdx === -1 && nameColIdx !== -1) usernameColIdx = nameColIdx;
-    if (usernameColIdx === -1) usernameColIdx = 2; // fallback
-    if (statusColIdx === -1) statusColIdx = headerTexts.length > 2 ? headerTexts.length - 2 : 8;
-
-    // 2. Locate matching rows
-    const rows = await page.$$('table tbody tr');
-    const matchingRowIndices: number[] = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const cells = await row.$$('td');
-      if (cells.length === 0) continue;
-
-      const cellTexts = await Promise.all(cells.map((c) => c.textContent()));
-      const uText = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
-      const nText = (nameColIdx !== -1 ? (cellTexts[nameColIdx] || '') : '').trim().toLowerCase();
-      const allText = cellTexts.map((t) => (t || '').trim().toLowerCase());
-
-      const normTarget = username.toLowerCase();
-      if (uText === normTarget || nText === normTarget || allText.includes(normTarget)) {
-        matchingRowIndices.push(i);
-      }
-    }
-
-    if (matchingRowIndices.length === 0) {
+    // 1. Ensure authenticated
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
+    if (!authRes.authenticated) {
       return {
         success: false,
         username,
-        errorCode: 'REMOTE_USER_NOT_FOUND',
-        errorMessage: `Target user '${username}' not found on client users list.`,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to client failed.',
       };
     }
 
-    if (matchingRowIndices.length > 1) {
+    // 2. Open users screen
+    try {
+      await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (navErr: any) {
       return {
         success: false,
         username,
-        errorCode: 'AMBIGUOUS_REMOTE_USER',
-        errorMessage: `Multiple matching user rows (${matchingRowIndices.length}) found for '${username}' on client users list.`,
+        errorCode: 'CLIENT_USERS_SCREEN_FAILED',
+        errorMessage: `Failed to open users screen: ${navErr.message}`,
       };
     }
 
-    const targetRowIndex = matchingRowIndices[0];
-    const targetRowHandle = rows[targetRowIndex];
-    const targetCells = await targetRowHandle.$$('td');
+    // 3. Locate exact user row
+    const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
+    if (!lookupRes.success || !lookupRes.rowHandle) {
+      return {
+        success: false,
+        username,
+        errorCode: lookupRes.errorCode || 'REMOTE_USER_NOT_FOUND',
+        errorMessage: lookupRes.errorMessage || `Target user '${username}' not found on client users list.`,
+      };
+    }
 
-    if (!targetCells[statusColIdx]) {
+    const { rowHandle, statusColIdx, currentRemoteStatus } = lookupRes;
+    const targetCells = await rowHandle.$$('td');
+    const statusCell = targetCells[statusColIdx!];
+
+    if (!statusCell) {
       return {
         success: false,
         username,
@@ -1156,47 +1503,7 @@ export class UserManagementExecutor {
       };
     }
 
-    const statusCell = targetCells[statusColIdx];
-
-    // Helper to evaluate status from cell
-    const evaluateCellStatus = async (cellHandle: any): Promise<ClientUserStatus> => {
-      return await cellHandle.evaluate((el: HTMLElement) => {
-        const text = (el.innerText || el.textContent || '').toUpperCase();
-        const html = el.innerHTML.toUpperCase();
-        const hasCheck =
-          html.includes('FA-CHECK') ||
-          html.includes('GLYPHICON-OK') ||
-          html.includes('BADGE-ACTIVE') ||
-          html.includes('STATUS-ACTIVE') ||
-          html.includes('TEXT-GREEN') ||
-          html.includes('TEXT-EMERALD') ||
-          html.includes('✔') ||
-          html.includes('✓') ||
-          html.includes('COLOR: #10B981') ||
-          html.includes('COLOR: RGB(16, 185, 129)') ||
-          html.includes('TITLE="ACTIVE"');
-        const hasCross =
-          html.includes('FA-TIMES') ||
-          html.includes('FA-CLOSE') ||
-          html.includes('GLYPHICON-REMOVE') ||
-          html.includes('BADGE-INACTIVE') ||
-          html.includes('STATUS-INACTIVE') ||
-          html.includes('TEXT-RED') ||
-          html.includes('✖') ||
-          html.includes('✗') ||
-          html.includes('COLOR: #EF4444') ||
-          html.includes('COLOR: RGB(239, 68, 68)') ||
-          html.includes('TITLE="INACTIVE"');
-
-        if (hasCross && !hasCheck) return 'INACTIVE';
-        if (hasCheck && !hasCross) return 'ACTIVE';
-        if (text.includes('INACTIVE')) return 'INACTIVE';
-        if (text.includes('ACTIVE')) return 'ACTIVE';
-        return hasCheck ? 'ACTIVE' : hasCross ? 'INACTIVE' : 'ACTIVE';
-      });
-    };
-
-    const initialStatus = await evaluateCellStatus(statusCell);
+    const initialStatus = currentRemoteStatus || (await this.evaluateCellStatus(statusCell));
 
     if (initialStatus === targetStatus) {
       return {
@@ -1207,7 +1514,6 @@ export class UserManagementExecutor {
       };
     }
 
-    // 3. Locate clickable control inside the Status cell
     // Verify control does NOT target Action column or Delete/Edit/View
     const isUnsafeAction = await statusCell.evaluate((el: HTMLElement) => {
       const html = el.innerHTML.toLowerCase();
@@ -1231,9 +1537,9 @@ export class UserManagementExecutor {
       };
     }
 
-    // Find the clickable status icon or its nearest clickable parent inside the status cell
+    // Find clickable status icon or toggle control
     const clickTarget = await statusCell.$(
-      'a, button, [role="button"], [ng-click], [onclick], .status-control, .status-icon, i, span.badge-active, span.badge-inactive, svg'
+      'a, button, [role="button"], [ng-click], [onclick], .status-control, .status-icon, .status-toggle, i, span.badge-active, span.badge-inactive, span, svg'
     );
 
     if (!clickTarget) {
@@ -1250,70 +1556,58 @@ export class UserManagementExecutor {
       await dialog.accept().catch(() => {});
     });
 
-    // Click actual status icon / control exactly once
+    // Click the status icon once
     await clickTarget.click({ timeout: 5000 }).catch(async () => {
       await statusCell.click({ timeout: 5000 });
     });
 
+    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(1000);
 
-    // 4. Reload and Re-read exact user row to verify remote status changed
-    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForSelector('table', { timeout: 10000 }).catch(() => {});
-
-    // Search again if needed
-    const reloadSearchInput = page.locator('input[type="search"], input[name="search"], input[placeholder*="search" i], #userSearch').first();
-    if (await reloadSearchInput.isVisible().catch(() => false)) {
-      await reloadSearchInput.fill(username);
-      await page.keyboard.press('Enter').catch(() => {});
-      await page.waitForTimeout(500);
-    }
-
-    const reloadedRows = await page.$$('table tbody tr');
-    let reloadedRowHandle: any = null;
-
-    for (const r of reloadedRows) {
-      const cells = await r.$$('td');
-      if (cells.length === 0) continue;
-      const cellTexts = await Promise.all(cells.map((c) => c.textContent()));
-      const uText = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
-      const nText = (nameColIdx !== -1 ? (cellTexts[nameColIdx] || '') : '').trim().toLowerCase();
-      const allText = cellTexts.map((t) => (t || '').trim().toLowerCase());
-      const normTarget = username.toLowerCase();
-      if (uText === normTarget || nText === normTarget || allText.includes(normTarget)) {
-        reloadedRowHandle = r;
-        break;
+    // 4. Re-read and verify that the icon changed
+    const verifyLookup = await this.findExactUserRow(page, username, usersListUrl);
+    if (!verifyLookup.success || !verifyLookup.rowHandle) {
+      // Reload and retry verification
+      await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+      const retryLookup = await this.findExactUserRow(page, username, usersListUrl);
+      if (!retryLookup.success || !retryLookup.rowHandle) {
+        return {
+          success: false,
+          username,
+          errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
+          errorMessage: `User '${username}' could not be re-located after status change.`,
+        };
       }
-    }
-
-    if (!reloadedRowHandle) {
+      if (retryLookup.currentRemoteStatus === targetStatus) {
+        return {
+          success: true,
+          username,
+          status: targetStatus,
+          message: `User '${username}' status verified as ${targetStatus} on remote client.`,
+        };
+      }
       return {
         success: false,
         username,
         errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-        errorMessage: `User '${username}' not found after status toggle reload.`,
+        errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Current status: ${retryLookup.currentRemoteStatus}.`,
       };
     }
 
-    const reloadedCells = await reloadedRowHandle.$$('td');
-    const reloadedStatusCell = reloadedCells[statusColIdx] || reloadedCells[reloadedCells.length - 2];
-    const verifiedStatus = await evaluateCellStatus(reloadedStatusCell);
-
-    if (verifiedStatus === targetStatus) {
+    if (verifyLookup.currentRemoteStatus === targetStatus) {
       return {
         success: true,
         username,
-        status: verifiedStatus,
-        message: `User '${username}' status verified as ${verifiedStatus} on remote client.`,
+        status: targetStatus,
+        message: `User '${username}' status verified as ${targetStatus} on remote client.`,
       };
     }
 
     return {
       success: false,
       username,
-      status: initialStatus,
       errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-      errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Expected ${targetStatus}, but remote status remained ${verifiedStatus}.`,
+      errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Expected ${targetStatus}, but found ${verifyLookup.currentRemoteStatus}.`,
     };
   }
 
@@ -1334,24 +1628,36 @@ export class UserManagementExecutor {
   ): Promise<MutationResult> {
     const isObj = typeof arg1 === 'object';
     const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
-    const username = isObj ? arg1.username : (arg2 as string);
+    const username = (isObj ? arg1.username : (arg2 as string)).trim();
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
 
-    await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
-
-    const row = page.locator(`tr:has-text("${username}")`).first();
-    const isRowVisible = await row.isVisible().catch(() => false);
-    if (!isRowVisible) {
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
+    if (!authRes.authenticated) {
       return {
         success: false,
         username,
-        errorCode: 'USER_NOT_FOUND',
-        errorMessage: `Target user '${username}' not found on client users list.`,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to client failed.',
       };
     }
 
-    const resetBtn = row.locator('button:has-text("Reset"), a:has-text("Reset"), button.btn-reset-password, a.btn-reset-password, [data-testid="btn-reset-password"]').first();
+    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+    const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
+    if (!lookupRes.success || !lookupRes.rowHandle) {
+      return {
+        success: false,
+        username,
+        errorCode: lookupRes.errorCode || 'REMOTE_USER_NOT_FOUND',
+        errorMessage: lookupRes.errorMessage || `Target user '${username}' not found on client users list.`,
+      };
+    }
+
+    const row = lookupRes.rowHandle;
+    const resetBtn = await row.$(
+      'button.btn-reset-password, a.btn-reset-password, [data-testid="btn-reset-password"], a[title*="Reset" i], button[title*="Reset" i], a:has-text("Reset"), button:has-text("Reset")'
+    );
     let tempPasswordCaptured: string | undefined = undefined;
 
     page.on('dialog', async (dialog) => {
@@ -1365,8 +1671,7 @@ export class UserManagementExecutor {
       await dialog.accept().catch(() => {});
     });
 
-    const isResetVisible = await resetBtn.isVisible().catch(() => false);
-    if (isResetVisible) {
+    if (resetBtn) {
       await resetBtn.click();
       for (let i = 0; i < 25; i++) {
         if (tempPasswordCaptured) break;
@@ -1374,9 +1679,8 @@ export class UserManagementExecutor {
       }
     } else {
       // Check for Simplex Edit User screen password reset link
-      const editLink = row.locator('a[href*="editUsers"], a[href*="editUser"], a[title*="Edit" i]').first();
-      const isEditVisible = await editLink.isVisible().catch(() => false);
-      if (isEditVisible) {
+      const editLink = await row.$('a[href*="editUsers"], a[href*="editUser"], a[title*="Edit" i], .btn-edit');
+      if (editLink) {
         const editHref = await editLink.getAttribute('href');
         if (editHref && !editHref.startsWith('javascript:') && editHref !== '#') {
           await page.goto(editHref.startsWith('http') ? editHref : new URL(editHref, usersListUrl).toString(), {
@@ -1387,7 +1691,7 @@ export class UserManagementExecutor {
           await editLink.click();
           await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
         }
-        const editResetBtn = page.locator('a:has-text("Password Reset"), button:has-text("Password Reset")').first();
+        const editResetBtn = page.locator('a:has-text("Password Reset"), button:has-text("Password Reset"), #btnResetPassword').first();
         if (await editResetBtn.isVisible().catch(() => false)) {
           await editResetBtn.click();
           await page.waitForTimeout(1500);

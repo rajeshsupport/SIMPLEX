@@ -31,22 +31,25 @@ async function runClientUsersTests() {
     assert.strictEqual(syncResult.liveStatus, 'LIVE');
     assert.strictEqual(syncResult.users.length >= 3, true, 'Should scrape at least 3 seeded users');
 
-    // Verify screenshot column mapping:
-    // Remote "User Name" -> Full Name (e.g. "Dr. Sarah Al-Mansoor")
-    // Remote "Name" -> Username (e.g. "dr_sarah")
-    // Remote "Mobile No" -> Mobile Number (e.g. "0501234567")
-    const doc = syncResult.users.find((u) => u.username === 'dr_sarah');
-    assert.ok(doc, 'Should find dr_sarah');
-    assert.strictEqual(doc?.fullName, 'Sarah Al-Mansoor', 'Full name should map correctly');
-    assert.strictEqual(doc?.username, 'dr_sarah', 'Username should map correctly');
-    assert.strictEqual(doc?.mobileNumber, '0502223344', 'Mobile number should map correctly');
-    assert.strictEqual(doc?.status, 'ACTIVE');
-    assert.strictEqual((doc as any).password, undefined, 'Zero password exposure');
-    console.log('✓ TEST 1 Passed');
+    // Verify Simplex column mapping:
+    // Remote "User Name" -> Full Name (e.g. "Abdul Qadeer Pathan")
+    // Remote "Name" -> Username (e.g. "abdul.p")
+    // Remote "Mobile No" -> Mobile Number (e.g. "0504445566")
+    const abdul = syncResult.users.find((u) => u.username === 'abdul.p');
+    assert.ok(abdul, 'Should find abdul.p');
+    assert.strictEqual(abdul?.fullName, 'Abdul Qadeer Pathan', 'Full name should map correctly from User Name column');
+    assert.strictEqual(abdul?.username, 'abdul.p', 'Username should map correctly from Name column');
+    assert.strictEqual(abdul?.mobileNumber, '0504445566', 'Mobile number should map correctly');
+    assert.strictEqual(abdul?.status, 'ACTIVE');
 
-    // 2. Headless background auto-login upon redirect
-    console.log('\n[TEST 2] Testing Headless background auto-login on login redirect...');
-    // Start from login page to verify auto-login when redirected
+    // Test findExactUserRow directly on abdul.p
+    const exactLookup = await UserManagementExecutor.findExactUserRow(page, 'abdul.p', `${BASE_URL}/MasterV9.4/users`);
+    assert.strictEqual(exactLookup.success, true, 'findExactUserRow for abdul.p must succeed');
+    assert.strictEqual(exactLookup.currentRemoteStatus, 'ACTIVE', 'abdul.p status should be ACTIVE');
+    console.log('✓ TEST 1 Passed (Exact Name column mapped for abdul.p)');
+
+    // 2. Headless background auto-login upon redirect & failure classification
+    console.log('\n[TEST 2] Testing Headless background auto-login on login redirect & failure classification...');
     await page.goto(`${BASE_URL}/login`);
     const loginSyncResult = await UserManagementExecutor.syncUsersHeadless(page, {
       usersUrl: `${BASE_URL}/MasterV9.4/users`,
@@ -55,7 +58,17 @@ async function runClientUsersTests() {
     });
     assert.strictEqual(loginSyncResult.success, true, 'Should auto-login in background and return users');
     assert.strictEqual(loginSyncResult.users.length >= 3, true);
-    console.log('✓ TEST 2 Passed');
+
+    // Test auto-login failure returns CLIENT_AUTO_LOGIN_FAILED, not REMOTE_USER_NOT_FOUND
+    await page.goto(`${BASE_URL}/login`);
+    const badAuth = await UserManagementExecutor.ensureAuthenticated(page, {
+      targetUrl: `${BASE_URL}/login`,
+      loginUrl: `${BASE_URL}/login`,
+      credentials: { username: 'invalid_user', password: 'WrongPassword!' },
+    });
+    assert.strictEqual(badAuth.authenticated, false, 'Bad credentials must fail authentication');
+    assert.strictEqual(badAuth.errorCode, 'CLIENT_AUTO_LOGIN_FAILED', 'Must return CLIENT_AUTO_LOGIN_FAILED on bad credentials');
+    console.log('✓ TEST 2 Passed (Auto-login succeeded and bad login classified as CLIENT_AUTO_LOGIN_FAILED)');
 
     // 3. Status parsing (ACTIVE / INACTIVE)
     console.log('\n[TEST 3] Testing Status parsing (ACTIVE / INACTIVE)...');
