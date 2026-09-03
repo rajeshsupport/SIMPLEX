@@ -278,8 +278,36 @@ async function runClientUsersTests() {
     assert.strictEqual(samplePayload.includes('secret'), false, 'Zero secret exposure in telemetry');
     console.log('✓ TEST 13 Passed');
 
+    // 14. Duplicate-Version URL Prevention Regression Test
+    console.log('\n[TEST 14] Testing Duplicate-Version URL Prevention Regression...');
+    const { resolveClientRoute } = await import('@hmc/shared');
+    const masterUsersUrl = resolveClientRoute({
+      baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+      applicationPath: '/MasterV9.4',
+      route: '/users',
+    });
+    assert.strictEqual(masterUsersUrl, 'https://staging.simplexworld.com/MasterV9.4/users', 'Must not duplicate version in users route');
+
+    const masterLoginUrl = resolveClientRoute({
+      baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+      applicationPath: '/MasterV9.4',
+      route: '/login',
+    });
+    assert.strictEqual(masterLoginUrl, 'https://staging.simplexworld.com/MasterV9.4/login', 'Must not duplicate version in login route');
+    console.log('✓ TEST 14 Passed');
+
+    // 15. Sync Failure Propagation & Zero-User Failure Classification
+    console.log('\n[TEST 15] Testing Failure Propagation on CLIENT_USER_TABLE_NOT_FOUND...');
+    const failSyncResult = await UserManagementExecutor.syncUsersHeadless(page, {
+      usersUrl: `${BASE_URL}/nonexistent/empty/route`,
+    });
+    assert.strictEqual(failSyncResult.success, false, 'Sync must fail when table not found');
+    assert.strictEqual(failSyncResult.totalScraped, 0, 'Zero users must be scraped on failure');
+    assert.strictEqual(failSyncResult.errorCode, 'CLIENT_USER_TABLE_NOT_FOUND', 'Error code must be preserved as CLIENT_USER_TABLE_NOT_FOUND');
+    console.log('✓ TEST 15 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (13/13)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (15/15)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});

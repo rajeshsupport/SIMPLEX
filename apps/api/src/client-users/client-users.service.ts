@@ -27,6 +27,7 @@ import {
   ExcelUserImportExecutionRowResult,
   ClientUserStatus,
   JwtPayload,
+  resolveClientRoute,
 } from '@hmc/shared';
 import { AgentsService } from '../agents/agents.service.js';
 
@@ -55,26 +56,33 @@ export class ClientUsersService {
     resolvedUsersUrl: string;
     resolvedAddUsersUrl: string;
   } {
-    const base = (client.baseUrl || '').replace(/\/+$/, '');
-    let origin = base;
+    let origin = client.baseUrl;
     try {
-      if (base.startsWith('http')) {
-        origin = new URL(base).origin;
+      if (client.baseUrl.startsWith('http')) {
+        origin = new URL(client.baseUrl).origin;
       }
     } catch {}
 
-    const buildUrl = (route?: string, fallback: string = '/'): string => {
-      const target = (route && route.trim()) ? route.trim() : fallback;
-      if (target.startsWith('http://') || target.startsWith('https://')) {
-        return target;
-      }
-      const cleanRoute = target.startsWith('/') ? target : `/${target}`;
-      return `${base}${cleanRoute}`;
-    };
+    const resolvedLoginUrl = resolveClientRoute({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+      route: client.loginRoute,
+      fallbackRoute: '/login',
+    });
 
-    const resolvedLoginUrl = buildUrl(client.loginRoute, '/login');
-    const resolvedUsersUrl = buildUrl(client.usersRoute, '/users');
-    const resolvedAddUsersUrl = buildUrl(undefined, '/addUsers');
+    const resolvedUsersUrl = resolveClientRoute({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+      route: client.usersRoute,
+      fallbackRoute: '/users',
+    });
+
+    const resolvedAddUsersUrl = resolveClientRoute({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+      route: '/addUsers',
+      fallbackRoute: '/addUsers',
+    });
 
     return {
       origin,

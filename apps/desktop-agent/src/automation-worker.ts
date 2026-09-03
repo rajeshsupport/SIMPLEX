@@ -1,16 +1,10 @@
 import { BrowserContext, Page } from 'playwright';
 import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
-import { AgentTaskAssignment, AutomationRunStepTelemetry } from '@hmc/shared';
+import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
 function buildAbsoluteUrl(baseUrl: string, route?: string, fallbackRoute: string = '/'): string {
-  const target = (route && route.trim()) ? route.trim() : fallbackRoute;
-  if (target.startsWith('http://') || target.startsWith('https://')) {
-    return target;
-  }
-  const cleanBase = (baseUrl || '').replace(/\/+$/, '');
-  const cleanRoute = target.startsWith('/') ? target : `/${target}`;
-  return `${cleanBase}${cleanRoute}`;
+  return resolveClientRoute({ baseUrl, route, fallbackRoute });
 }
 
 export class AutomationWorker {
@@ -69,8 +63,18 @@ export class AutomationWorker {
 
         const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
 
-        const usersListUrl = buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute, '/MasterV9.4/users');
-        const loginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
+        const usersListUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.payload?.applicationPath,
+          route: task.targetRoute,
+          fallbackRoute: '/users',
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.payload?.applicationPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
 
         onProgress?.(`[BACKGROUND SYNC] Executing user scrape on ${usersListUrl}...`);
 

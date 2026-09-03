@@ -201,8 +201,26 @@ export class UserManagementExecutor {
     }
 
     // Wait for the user table or explicit empty state (10s render timeout)
-    const tableLocator = page.locator('table, [data-testid="users-table"], #usersTable, .user-grid, table tbody tr, table tr').first();
-    const hasTable = await tableLocator.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+    // Check main page and all attached frames (iframes/framesets)
+    const allFrames = [page.mainFrame(), ...page.frames().filter((f) => f !== page.mainFrame())];
+    let targetFrame = page.mainFrame();
+    let hasTable = false;
+
+    for (const frame of allFrames) {
+      const tableLocator = frame.locator('table, [data-testid="users-table"], #usersTable, .user-grid, table tbody tr, table tr').first();
+      const frameHasTable = await tableLocator.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+      if (frameHasTable) {
+        targetFrame = frame;
+        hasTable = true;
+        break;
+      }
+      const anyRows = await frame.$$('tr').then((r) => r.length > 0).catch(() => false);
+      if (anyRows) {
+        targetFrame = frame;
+        hasTable = true;
+        break;
+      }
+    }
 
     const isExplicitEmpty = await page.evaluate(() => {
       const text = document.body ? document.body.innerText.toLowerCase() : '';
@@ -210,19 +228,15 @@ export class UserManagementExecutor {
     });
 
     if (!hasTable && !isExplicitEmpty) {
-      // If table is not directly found, check if there are any rows in document
-      const anyRows = await page.$$('tr').then(r => r.length > 0).catch(() => false);
-      if (!anyRows) {
-        return {
-          success: false,
-          users: [],
-          totalScraped: 0,
-          liveStatus: 'CACHED',
-          errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
-          errorMessage: 'User table could not be identified on client users route.',
-          options: this.getDefaultOptions(),
-        };
-      }
+      return {
+        success: false,
+        users: [],
+        totalScraped: 0,
+        liveStatus: 'CACHED',
+        errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
+        errorMessage: 'User table could not be identified on client users route.',
+        options: this.getDefaultOptions(),
+      };
     }
 
     const scrapedUsersMap = new Map<string, ScrapedClientUser>();
@@ -238,8 +252,8 @@ export class UserManagementExecutor {
         count: scrapedUsersMap.size,
       });
 
-      // Scrape current page rows with header awareness
-      const pageRowsData = await page.evaluate(() => {
+      // Scrape current page rows with header awareness from the target frame/page
+      const pageRowsData = await targetFrame.evaluate(() => {
         // Detect column indices from headers
         const headers = Array.from(document.querySelectorAll('table thead th, table tr:first-child th, table tr:first-child td')).map(h => (h.textContent || '').trim().toLowerCase());
         
@@ -351,7 +365,7 @@ export class UserManagementExecutor {
       }
 
       // Look for Next page control with 5s page timeout
-      const nextButton = page.locator(
+      const nextButton = targetFrame.locator(
         'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i]'
       ).first();
 
@@ -360,7 +374,6 @@ export class UserManagementExecutor {
         const isDisabled = await nextButton.getAttribute('disabled');
         const isAriaDisabled = await nextButton.getAttribute('aria-disabled');
         if (!isDisabled && isAriaDisabled !== 'true') {
-          const prevUrl = page.url();
           await nextButton.click().catch(() => {});
           // Wait for DOM content or row change with 5s timeout
           await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
@@ -372,6 +385,19 @@ export class UserManagementExecutor {
     }
 
     const allUsers = Array.from(scrapedUsersMap.values());
+
+    // Do not classify success unless users fetched is greater than zero
+    if (allUsers.length === 0) {
+      return {
+        success: false,
+        users: [],
+        totalScraped: 0,
+        liveStatus: 'CACHED',
+        errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
+        errorMessage: 'User table could not be identified or contained zero user records on client users route.',
+        options: this.getDefaultOptions(),
+      };
+    }
 
     onProgress?.({
       stage: 'SUCCEEDED',
