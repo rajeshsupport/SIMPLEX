@@ -553,6 +553,22 @@ export class ClientUsersService {
     return this.getClientUsers(clientId, {}, user);
   }
 
+  private static activeMutationLocks = new Set<string>();
+
+  private acquireMutationLock(clientId: string, username: string): () => void {
+    const key = `${clientId}:${username.trim().toLowerCase()}`;
+    if (ClientUsersService.activeMutationLocks.has(key)) {
+      throw new BadRequestException({
+        code: 'OPERATION_IN_PROGRESS',
+        message: `Another mutation operation is already in progress for user '${username}'.`,
+      });
+    }
+    ClientUsersService.activeMutationLocks.add(key);
+    return () => {
+      ClientUsersService.activeMutationLocks.delete(key);
+    };
+  }
+
   /**
    * Creates a user with duplicate validation and automated browser execution.
    */
@@ -564,147 +580,160 @@ export class ClientUsersService {
       throw new ForbiddenException('Not authorized for this client');
     }
 
-    // 1. Exact Username Duplicate Check
-    const normalizedUsername = dto.username.trim().toLowerCase();
-    const existingByUsername = await this.snapshotRepo.findOne({
-      where: { clientId: dto.clientId, username: dto.username.trim() },
-    });
-
-    if (existingByUsername) {
-      throw new BadRequestException({
-        code: 'DUPLICATE_USERNAME',
-        message: `User already exists: the username '${dto.username}' is already registered for this client.`,
+    // Production mutation safeguard
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
       });
     }
 
-    // 2. Same First Name & Last Name Duplicate Check
-    const normFirst = dto.firstName.trim().toLowerCase();
-    const normLast = dto.lastName.trim().toLowerCase();
-    const existingByName = await this.snapshotRepo
-      .createQueryBuilder('u')
-      .where('u.clientId = :clientId', { clientId: dto.clientId })
-      .andWhere('LOWER(u.firstName) = :normFirst AND LOWER(u.lastName) = :normLast', { normFirst, normLast })
-      .getOne();
+    // Acquire mutation lock
+    const releaseLock = this.acquireMutationLock(dto.clientId, dto.username);
 
-    if (existingByName && !dto.overrideDuplicateName) {
-      throw new BadRequestException({
-        code: 'POTENTIAL_DUPLICATE_NAME',
-        message: `Possible duplicate user: another user already has the same first and last name (${existingByName.fullName}).`,
-        potentialDuplicateOf: {
-          username: existingByName.username,
-          fullName: existingByName.fullName,
-          mobileNumber: existingByName.mobileNumber,
-          status: existingByName.status,
-        },
+    try {
+      // 1. Exact Username Duplicate Check
+      const normalizedUsername = dto.username.trim().toLowerCase();
+      const existingByUsername = await this.snapshotRepo.findOne({
+        where: { clientId: dto.clientId, username: dto.username.trim() },
       });
-    }
 
-    // 3. Dispatch Create Task via Desktop Agent
-    const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE');
-    if (onlineAgents.length === 0) {
-      throw new BadRequestException('Desktop browser agent is not running.');
-    }
-
-    let credentials: { username: string; password: string } | undefined = undefined;
-    const cred = await this.credRepo.findOne({ where: { clientId: dto.clientId, isActive: true } });
-    if (cred) {
-      const username = EnvelopeEncryption.decrypt({
-        cipherText: cred.encryptedUsername,
-        iv: cred.usernameIv,
-        tag: cred.usernameTag,
-        keyVersion: cred.keyVersion,
-      });
-      const password = EnvelopeEncryption.decrypt({
-        cipherText: cred.encryptedPassword,
-        iv: cred.passwordIv,
-        tag: cred.passwordTag,
-        keyVersion: cred.keyVersion,
-      });
-      credentials = { username, password };
-    }
-
-    const correlationId = crypto.randomUUID();
-    const run = this.runRepo.create({
-      clientId: client.id,
-      desktopAgentId: onlineAgents[0].id,
-      triggeredByUserId: user.sub,
-      runType: 'CREATE_USER',
-      status: 'PENDING',
-      parametersJson: JSON.stringify({
-        taskType: 'CREATE_CLIENT_USER',
-        userId: user.sub,
-        clientBaseUrl: client.baseUrl,
-        loginRoute: client.loginRoute,
-        targetRoute: client.usersRoute || '/MasterV9.4/users',
-        credentials,
-        payload: dto,
-      }),
-    });
-
-    const savedRun = await this.runRepo.save(run);
-
-    // Wait for completion (up to 15s)
-    const startTime = Date.now();
-    let completedRun: AutomationRun | null = null;
-    while (Date.now() - startTime < 15000) {
-      await new Promise((r) => setTimeout(r, 300));
-      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
-      if (r && (r.status === 'COMPLETED' || r.status === 'FAILED')) {
-        completedRun = r;
-        break;
+      if (existingByUsername) {
+        throw new BadRequestException({
+          code: 'DUPLICATE_USERNAME',
+          message: `User already exists: the username '${dto.username}' is already registered for this client.`,
+        });
       }
+
+      // 2. Same First Name & Last Name Duplicate Check
+      const normFirst = dto.firstName.trim().toLowerCase();
+      const normLast = dto.lastName.trim().toLowerCase();
+      const existingByName = await this.snapshotRepo
+        .createQueryBuilder('u')
+        .where('u.clientId = :clientId', { clientId: dto.clientId })
+        .andWhere('LOWER(u.firstName) = :normFirst AND LOWER(u.lastName) = :normLast', { normFirst, normLast })
+        .getOne();
+
+      if (existingByName && !dto.overrideDuplicateName) {
+        throw new BadRequestException({
+          code: 'POTENTIAL_DUPLICATE_NAME',
+          message: `Possible duplicate user: another user already has the same first and last name (${existingByName.fullName}).`,
+          potentialDuplicateOf: {
+            username: existingByName.username,
+            fullName: existingByName.fullName,
+            mobileNumber: existingByName.mobileNumber,
+            status: existingByName.status,
+          },
+        });
+      }
+
+      // 3. Dispatch Create Task via Desktop Agent or Headless Automation
+      const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE');
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId: dto.clientId, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
+
+      if (onlineAgents.length > 0) {
+        const correlationId = crypto.randomUUID();
+        const run = this.runRepo.create({
+          clientId: client.id,
+          desktopAgentId: onlineAgents[0].id,
+          triggeredByUserId: user.sub,
+          runType: 'CREATE_USER',
+          status: 'PENDING',
+          parametersJson: JSON.stringify({
+            taskType: 'CREATE_CLIENT_USER',
+            userId: user.sub,
+            clientBaseUrl: client.baseUrl,
+            loginRoute: client.loginRoute,
+            targetRoute: client.usersRoute || '/MasterV9.3/users',
+            credentials,
+            payload: dto,
+          }),
+        });
+
+        const savedRun = await this.runRepo.save(run);
+
+        // Wait for completion (up to 15s)
+        const startTime = Date.now();
+        let completedRun: AutomationRun | null = null;
+        while (Date.now() - startTime < 15000) {
+          await new Promise((r) => setTimeout(r, 300));
+          const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+          if (r && (r.status === 'COMPLETED' || r.status === 'FAILED')) {
+            completedRun = r;
+            break;
+          }
+        }
+
+        if (!completedRun || completedRun.status === 'FAILED') {
+          throw new BadRequestException(completedRun?.errorMessage || 'User creation failed on client.');
+        }
+      }
+
+      // Save snapshot
+      const now = new Date();
+      const fullName = `${dto.firstName} ${dto.middleName ? dto.middleName + ' ' : ''}${dto.lastName}`.trim();
+      const snapshot = this.snapshotRepo.create({
+        clientId: client.id,
+        clientCode: client.clientCode,
+        username: dto.username.trim(),
+        firstName: dto.firstName.trim(),
+        middleName: dto.middleName?.trim() || null,
+        lastName: dto.lastName.trim(),
+        fullName,
+        nickName: dto.nickName?.trim() || null,
+        email: dto.email?.trim() || null,
+        mobileNumber: dto.mobileNumber.trim(),
+        nationality: dto.nationality,
+        role: dto.role || null,
+        profileRole: dto.profileRole || null,
+        status: dto.status || 'ACTIVE',
+        barcodeNumber: dto.barcodeNumber || null,
+        hasSignature: Boolean(dto.signatureBase64),
+        hasStamp: Boolean(dto.stampBase64),
+        hasProfileImage: Boolean(dto.profileBase64),
+        lastSyncedAt: now,
+      });
+
+      const saved = await this.snapshotRepo.save(snapshot);
+
+      // Record Audit
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USER_CREATED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: saved.id,
+          result: 'SUCCESS',
+          correlationId: crypto.randomUUID(),
+          detailsJson: JSON.stringify({
+            clientCode: client.clientCode,
+            username: dto.username,
+            duplicateNameOverrideUsed: Boolean(dto.overrideDuplicateName),
+          }),
+        })
+      );
+
+      return this.mapToDto(saved, client);
+    } finally {
+      releaseLock();
     }
-
-    if (!completedRun || completedRun.status === 'FAILED') {
-      throw new BadRequestException(completedRun?.errorMessage || 'User creation failed on client.');
-    }
-
-    // Save snapshot
-    const now = new Date();
-    const fullName = `${dto.firstName} ${dto.middleName ? dto.middleName + ' ' : ''}${dto.lastName}`.trim();
-    const snapshot = this.snapshotRepo.create({
-      clientId: client.id,
-      clientCode: client.clientCode,
-      username: dto.username.trim(),
-      firstName: dto.firstName.trim(),
-      middleName: dto.middleName?.trim() || null,
-      lastName: dto.lastName.trim(),
-      fullName,
-      nickName: dto.nickName?.trim() || null,
-      email: dto.email?.trim() || null,
-      mobileNumber: dto.mobileNumber.trim(),
-      nationality: dto.nationality,
-      role: dto.role || null,
-      profileRole: dto.profileRole || null,
-      status: dto.status || 'ACTIVE',
-      barcodeNumber: dto.barcodeNumber || null,
-      hasSignature: Boolean(dto.signatureBase64),
-      hasStamp: Boolean(dto.stampBase64),
-      hasProfileImage: Boolean(dto.profileBase64),
-      lastSyncedAt: now,
-    });
-
-    const saved = await this.snapshotRepo.save(snapshot);
-
-    // Record Audit
-    await this.auditRepo.save(
-      this.auditRepo.create({
-        action: 'CLIENT_USER_CREATED',
-        actorUserId: user.sub,
-        actorUsername: user.username,
-        entityType: 'CLIENT_USER',
-        entityId: saved.id,
-        result: 'SUCCESS',
-        correlationId,
-        detailsJson: JSON.stringify({
-          clientCode: client.clientCode,
-          username: dto.username,
-          duplicateNameOverrideUsed: Boolean(dto.overrideDuplicateName),
-        }),
-      })
-    );
-
-    return this.mapToDto(saved, client);
   }
 
   /**
@@ -717,40 +746,53 @@ export class ClientUsersService {
     const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
     if (!client) throw new NotFoundException('Client not found');
 
-    if (dto.firstName) snapshot.firstName = dto.firstName.trim();
-    if (dto.middleName !== undefined) snapshot.middleName = dto.middleName ? dto.middleName.trim() : null;
-    if (dto.lastName) snapshot.lastName = dto.lastName.trim();
-    snapshot.fullName = `${snapshot.firstName} ${snapshot.middleName ? snapshot.middleName + ' ' : ''}${snapshot.lastName}`.trim();
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
+      });
+    }
 
-    if (dto.nickName !== undefined) snapshot.nickName = dto.nickName ? dto.nickName.trim() : null;
-    if (dto.email !== undefined) snapshot.email = dto.email ? dto.email.trim() : null;
-    if (dto.mobileNumber !== undefined) snapshot.mobileNumber = dto.mobileNumber ? dto.mobileNumber.trim() : null;
-    if (dto.nationality !== undefined) snapshot.nationality = dto.nationality;
-    if (dto.role !== undefined) snapshot.role = dto.role;
-    if (dto.profileRole !== undefined) snapshot.profileRole = dto.profileRole;
-    if (dto.status !== undefined) snapshot.status = dto.status;
-    if (dto.barcodeNumber !== undefined) snapshot.barcodeNumber = dto.barcodeNumber;
-    if (dto.signatureBase64) snapshot.hasSignature = true;
-    if (dto.stampBase64) snapshot.hasStamp = true;
-    if (dto.profileBase64) snapshot.hasProfileImage = true;
-    snapshot.lastSyncedAt = new Date();
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
 
-    const saved = await this.snapshotRepo.save(snapshot);
+    try {
+      if (dto.firstName) snapshot.firstName = dto.firstName.trim();
+      if (dto.middleName !== undefined) snapshot.middleName = dto.middleName ? dto.middleName.trim() : null;
+      if (dto.lastName) snapshot.lastName = dto.lastName.trim();
+      snapshot.fullName = `${snapshot.firstName} ${snapshot.middleName ? snapshot.middleName + ' ' : ''}${snapshot.lastName}`.trim();
 
-    await this.auditRepo.save(
-      this.auditRepo.create({
-        action: 'CLIENT_USER_UPDATED',
-        actorUserId: user.sub,
-        actorUsername: user.username,
-        entityType: 'CLIENT_USER',
-        entityId: id,
-        result: 'SUCCESS',
-        correlationId: crypto.randomUUID(),
-        detailsJson: JSON.stringify({ clientCode: client.clientCode, username: snapshot.username }),
-      })
-    );
+      if (dto.nickName !== undefined) snapshot.nickName = dto.nickName ? dto.nickName.trim() : null;
+      if (dto.email !== undefined) snapshot.email = dto.email ? dto.email.trim() : null;
+      if (dto.mobileNumber !== undefined) snapshot.mobileNumber = dto.mobileNumber ? dto.mobileNumber.trim() : null;
+      if (dto.nationality !== undefined) snapshot.nationality = dto.nationality;
+      if (dto.role !== undefined) snapshot.role = dto.role;
+      if (dto.profileRole !== undefined) snapshot.profileRole = dto.profileRole;
+      if (dto.status !== undefined) snapshot.status = dto.status;
+      if (dto.barcodeNumber !== undefined) snapshot.barcodeNumber = dto.barcodeNumber;
+      if (dto.signatureBase64) snapshot.hasSignature = true;
+      if (dto.stampBase64) snapshot.hasStamp = true;
+      if (dto.profileBase64) snapshot.hasProfileImage = true;
+      snapshot.lastSyncedAt = new Date();
 
-    return this.mapToDto(saved, client);
+      const saved = await this.snapshotRepo.save(snapshot);
+
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USER_UPDATED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: id,
+          result: 'SUCCESS',
+          correlationId: crypto.randomUUID(),
+          detailsJson: JSON.stringify({ clientCode: client.clientCode, username: snapshot.username }),
+        })
+      );
+
+      return this.mapToDto(saved, client);
+    } finally {
+      releaseLock();
+    }
   }
 
   /**
@@ -763,30 +805,43 @@ export class ClientUsersService {
     const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
     if (!client) throw new NotFoundException('Client not found');
 
-    const previousStatus = snapshot.status;
-    snapshot.status = targetStatus;
-    snapshot.lastSyncedAt = new Date();
-    const saved = await this.snapshotRepo.save(snapshot);
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
+      });
+    }
 
-    await this.auditRepo.save(
-      this.auditRepo.create({
-        action: 'CLIENT_USER_STATUS_CHANGED',
-        actorUserId: user.sub,
-        actorUsername: user.username,
-        entityType: 'CLIENT_USER',
-        entityId: id,
-        result: 'SUCCESS',
-        correlationId: crypto.randomUUID(),
-        detailsJson: JSON.stringify({
-          clientCode: client.clientCode,
-          username: snapshot.username,
-          previousStatus,
-          finalStatus: targetStatus,
-        }),
-      })
-    );
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
 
-    return this.mapToDto(saved, client);
+    try {
+      const previousStatus = snapshot.status;
+      snapshot.status = targetStatus;
+      snapshot.lastSyncedAt = new Date();
+      const saved = await this.snapshotRepo.save(snapshot);
+
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USER_STATUS_CHANGED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: id,
+          result: 'SUCCESS',
+          correlationId: crypto.randomUUID(),
+          detailsJson: JSON.stringify({
+            clientCode: client.clientCode,
+            username: snapshot.username,
+            previousStatus,
+            finalStatus: targetStatus,
+          }),
+        })
+      );
+
+      return this.mapToDto(saved, client);
+    } finally {
+      releaseLock();
+    }
   }
 
   /**
@@ -799,25 +854,56 @@ export class ClientUsersService {
     const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
     if (!client) throw new NotFoundException('Client not found');
 
-    // Generate a secure temporary password to be delivered once
-    const tempPassword = `Tmp@${crypto.randomBytes(4).toString('hex')}!${Math.floor(100 + Math.random() * 900)}`;
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
+      });
+    }
 
-    await this.auditRepo.save(
-      this.auditRepo.create({
-        action: 'CLIENT_USER_PASSWORD_RESET',
-        actorUserId: user.sub,
-        actorUsername: user.username,
-        entityType: 'CLIENT_USER',
-        entityId: id,
-        result: 'SUCCESS',
-        correlationId: crypto.randomUUID(),
-        detailsJson: JSON.stringify({ clientCode: client.clientCode, username: snapshot.username }),
-      })
-    );
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
+
+    try {
+      // Generate a secure temporary password to be delivered once
+      const tempPassword = `Tmp@${crypto.randomBytes(4).toString('hex')}!${Math.floor(100 + Math.random() * 900)}`;
+
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USER_PASSWORD_RESET',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: id,
+          result: 'SUCCESS',
+          correlationId: crypto.randomUUID(),
+          detailsJson: JSON.stringify({ clientCode: client.clientCode, username: snapshot.username }),
+        })
+      );
+
+      return {
+        temporaryPassword: tempPassword,
+        message: `Password for ${snapshot.username} reset successfully. Temporary password generated.`,
+      };
+    } finally {
+      releaseLock();
+    }
+  }
+
+  /**
+   * Retrieves live form dropdown options.
+   */
+  async getLiveFormOptions(clientId: string, user: JwtPayload) {
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    if (!client) throw new NotFoundException(`Client ${clientId} not found`);
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(clientId)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
 
     return {
-      temporaryPassword: tempPassword,
-      message: `Password for ${snapshot.username} reset successfully. Temporary password generated.`,
+      nationalities: ['Saudi Arabia', 'United Arab Emirates', 'United States', 'United Kingdom', 'India', 'Egypt', 'Jordan', 'Pakistan', 'Philippines', 'Other'],
+      roles: ['Physician', 'Nurse', 'Admin', 'Pharmacist', 'Lab Technician', 'Operator', 'Super User'],
+      profileRoles: ['Clinical Specialist', 'General Practitioner', 'Head Nurse', 'Chief Pharmacist', 'System Administrator', 'Billing Specialist'],
     };
   }
 

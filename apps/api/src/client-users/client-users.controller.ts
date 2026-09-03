@@ -56,6 +56,15 @@ export class ClientUsersController {
     );
   }
 
+  @Get('form-options')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getFormOptions(
+    @Query('clientId') clientId: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.getLiveFormOptions(clientId, user);
+  }
+
   @Post('sync')
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
   @HttpCode(HttpStatus.OK)
