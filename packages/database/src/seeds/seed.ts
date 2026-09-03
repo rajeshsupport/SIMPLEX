@@ -93,8 +93,8 @@ export async function runSeeds(): Promise<void> {
     {
       code: 'HMC_LOGIN',
       name: 'HMC Automated Login Workflow',
-      description: 'Navigates to /hmc/login, enters credentials, submits, and verifies dashboard arrival',
-      pageRoute: '/hmc/login',
+      description: 'Navigates to /login, enters credentials, submits, and verifies dashboard arrival',
+      pageRoute: '/login',
       steps: [
         {
           stepIndex: 1,

@@ -83,7 +83,7 @@ export class ClientsService {
       applicationPath: dto.applicationPath || '/hmc',
       environment: dto.environment,
       applicationVersion: dto.applicationVersion || 'v1.0',
-      loginRoute: dto.loginRoute || '/hmc/login',
+      loginRoute: dto.loginRoute || '/login',
       usersRoute: dto.usersRoute || '/hmc/users',
       servicesRoute: dto.servicesRoute || '/hmc/services',
       status: dto.status || 'ACTIVE',

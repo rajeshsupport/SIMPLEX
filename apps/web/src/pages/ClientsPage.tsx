@@ -49,7 +49,7 @@ export const ClientsPage: React.FC = () => {
     applicationPath: '/hmc',
     environment: 'Development' as ClientEnvironment,
     applicationVersion: 'v1.0',
-    loginRoute: '/hmc/login',
+    loginRoute: '/login',
     usersRoute: '/hmc/users',
     servicesRoute: '/hmc/services',
   });
@@ -105,7 +105,7 @@ export const ClientsPage: React.FC = () => {
         applicationPath: '/hmc',
         environment: 'Development',
         applicationVersion: 'v1.0',
-        loginRoute: '/hmc/login',
+        loginRoute: '/login',
         usersRoute: '/hmc/users',
         servicesRoute: '/hmc/services',
       });

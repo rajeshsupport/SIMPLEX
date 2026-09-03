@@ -12,7 +12,7 @@ export const CreateClientSchema = z.object({
   applicationPath: z.string().default('/hmc'),
   environment: z.enum(['Production', 'Staging', 'UAT', 'Test', 'Development', 'Local']),
   applicationVersion: z.string().default('v1.0'),
-  loginRoute: z.string().default('/hmc/login'),
+  loginRoute: z.string().default('/login'),
   usersRoute: z.string().default('/hmc/users'),
   servicesRoute: z.string().default('/hmc/services'),
   status: z.enum(['ACTIVE', 'INACTIVE', 'ARCHIVED']).default('ACTIVE'),

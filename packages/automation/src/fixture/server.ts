@@ -17,7 +17,7 @@ export function createFixtureApp(): express.Express {
   ];
 
   // 1. Login Page
-  app.get('/hmc/login', (req: Request, res: Response) => {
+  const handleLoginGet = (req: Request, res: Response) => {
     const error = req.query.error as string;
     const showMfa = req.query.mfa === 'true';
 
@@ -53,7 +53,7 @@ export function createFixtureApp(): express.Express {
               <input type="text" data-testid="input-mfa-code" placeholder="6-digit code" />
             </div>
           ` : ''}
-          <form method="POST" action="/hmc/login">
+          <form method="POST" action="${req.path}">
             <div class="field">
               <label for="username">Username</label>
               <input type="text" id="username" name="username" data-testid="input-username" placeholder="Enter your username" required autofocus />
@@ -68,17 +68,21 @@ export function createFixtureApp(): express.Express {
       </body>
       </html>
     `);
-  });
+  };
 
-  // Login POST handler
-  app.post('/hmc/login', (req: Request, res: Response) => {
+  const handleLoginPost = (req: Request, res: Response) => {
     const { username, password } = req.body;
+    const loginPath = req.path;
     if (username === 'invalid_user' || username === 'bad_user' || password === 'WrongPassword!' || password === 'WrongPassword123!') {
-      return res.redirect('/hmc/login?error=' + encodeURIComponent('Invalid credentials'));
+      return res.redirect(`${loginPath}?error=` + encodeURIComponent('Invalid credentials'));
     }
-    // Accept standard test operator login
     res.redirect('/hmc/dashboard');
-  });
+  };
+
+  app.get('/login', handleLoginGet);
+  app.post('/login', handleLoginPost);
+  app.get('/hmc/login', handleLoginGet);
+  app.post('/hmc/login', handleLoginPost);
 
   // 2. Client Dashboard
   app.get('/hmc/dashboard', (req: Request, res: Response) => {

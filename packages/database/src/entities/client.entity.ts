@@ -37,7 +37,7 @@ export class Client {
   @Column({ type: 'nvarchar', length: 50, default: 'v1.0' })
   applicationVersion!: string;
 
-  @Column({ type: 'nvarchar', length: 255, default: '/hmc/login' })
+  @Column({ type: 'nvarchar', length: 255, default: '/login' })
   loginRoute!: string;
 
   @Column({ type: 'nvarchar', length: 255, default: '/hmc/users' })
