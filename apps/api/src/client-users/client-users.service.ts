@@ -356,20 +356,20 @@ export class ClientUsersService {
 
     // Enforce bounded execution timeouts
     if (!isTerminal) {
-      if (elapsedMs >= 30000) {
+      if (elapsedMs >= 90000) {
         run.status = 'TIMED_OUT';
-        run.errorMessage = 'Sync timed out after 30 seconds. Previous cached data is still available.';
+        run.errorMessage = 'Sync timed out after 90 seconds. Previous cached data is still available.';
         run.completedAt = new Date();
         await this.runRepo.save(run);
-      } else if (run.status === 'QUEUED' && elapsedMs >= 3000) {
+      } else if (run.status === 'QUEUED' && elapsedMs >= 15000) {
         run.status = 'TIMED_OUT';
-        run.errorMessage = 'Sync job was not claimed by automation agent within 3 seconds.';
+        run.errorMessage = 'Sync job was not claimed by automation agent within 15 seconds.';
         run.completedAt = new Date();
         await this.runRepo.save(run);
       } else if (
         run.desktopAgent &&
         (!run.desktopAgent.lastHeartbeatAt ||
-          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 5000)
+          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 20000)
       ) {
         run.status = 'FAILED';
         run.errorMessage = 'Sync failed: Automation agent is offline.';

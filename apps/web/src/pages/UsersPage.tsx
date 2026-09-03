@@ -241,11 +241,12 @@ export const UsersPage: React.FC = () => {
 
       while (!isComplete) {
         const elapsedTotal = Date.now() - startTime;
-        if (elapsedTotal >= 30000) {
-          setSyncProgressMessage('Sync timed out after 30 seconds. Previous cached data is still available.');
+        if (elapsedTotal >= 90000) {
+          const timeoutMsg = 'Sync timed out after 90 seconds. Previous cached data is still available.';
+          setSyncProgressMessage(timeoutMsg);
           setActionMessage({
             type: 'error',
-            text: 'Sync timed out after 30 seconds. Previous cached data is still available.',
+            text: timeoutMsg,
           });
           setSyncTerminalState('TIMED_OUT');
           break;
@@ -290,7 +291,7 @@ export const UsersPage: React.FC = () => {
           } else if (statusRes.status === 'TIMED_OUT') {
             isComplete = true;
             setSyncTerminalState('TIMED_OUT');
-            const timeoutMsg = 'Sync timed out after 30 seconds. Previous cached data is still available.';
+            const timeoutMsg = statusRes.errorMessage || 'Sync timed out. Previous cached data is still available.';
             setSyncProgressMessage(timeoutMsg);
             setActionMessage({ type: 'error', text: timeoutMsg });
             break;

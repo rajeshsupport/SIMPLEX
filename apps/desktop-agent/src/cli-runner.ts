@@ -31,16 +31,37 @@ async function startAgentRunner() {
   console.log(`[AGENT] Successfully paired! Agent ID: ${agentClient.getStatus().agentId}`);
   console.log('[AGENT] Starting fast event-polling loop (250ms)...');
 
-  // Dedicated independent Heartbeat Timer (runs every 1s so agent stays reliably ONLINE during tasks)
+  let isExecuting = false;
+
+  const handlePendingTask = async (pendingTask: any) => {
+    if (!pendingTask || isExecuting) return;
+    isExecuting = true;
+    console.log(`\n[AGENT] >>> Received task: ${pendingTask.taskType} (Run ID: ${pendingTask.runId}) for client [${pendingTask.clientId}]`);
+    try {
+      await worker.executeTask(pendingTask, (msg) => {
+        console.log(`[TASK PROGRESS] ${msg}`);
+      });
+    } catch (err) {
+      console.error('[AGENT] Task execution error:', err);
+    } finally {
+      isExecuting = false;
+    }
+    // Check next queued task immediately
+    setImmediate(pollCycle);
+  };
+
+  // Dedicated Heartbeat Timer during task execution
   const heartbeatTimer = setInterval(async () => {
     try {
-      await agentClient.sendHeartbeat('ONLINE');
+      const status = isExecuting ? 'BUSY' : 'ONLINE';
+      const pendingTask = await agentClient.sendHeartbeat(status);
+      if (pendingTask && !isExecuting) {
+        await handlePendingTask(pendingTask);
+      }
     } catch (err) {
       // quiet log
     }
-  }, 1000);
-
-  let isExecuting = false;
+  }, 2000);
 
   const pollCycle = async () => {
     if (isExecuting) return;
@@ -48,17 +69,7 @@ async function startAgentRunner() {
     try {
       const pendingTask = await agentClient.sendHeartbeat('ONLINE');
       if (pendingTask) {
-        isExecuting = true;
-        console.log(`\n[AGENT] >>> Received task: ${pendingTask.taskType} (Run ID: ${pendingTask.runId}) for client [${pendingTask.clientId}]`);
-        try {
-          await worker.executeTask(pendingTask, (msg) => {
-            console.log(`[TASK PROGRESS] ${msg}`);
-          });
-        } finally {
-          isExecuting = false;
-        }
-        // Immediately poll next task without waiting for interval
-        setImmediate(pollCycle);
+        await handlePendingTask(pendingTask);
       }
     } catch (err) {
       console.error('[AGENT] Error in heartbeat/task loop:', err);
@@ -66,7 +77,7 @@ async function startAgentRunner() {
     }
   };
 
-  const heartbeatInterval = setInterval(pollCycle, 250);
+  const heartbeatInterval = setInterval(pollCycle, 500);
 
   const shutdown = async () => {
     console.log('\n[AGENT] Shutting down agent runner...');
