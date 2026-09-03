@@ -139,7 +139,46 @@ export const UsersPage: React.FC = () => {
   const [importExecution, setImportExecution] = useState<ExcelUserImportExecutionSummary | null>(null);
   const [importing, setImporting] = useState(false);
 
-  const { hasPermission } = useAuth();
+  const { hasPermission, isSuperAdmin } = useAuth();
+  const [isAgentOnline, setIsAgentOnline] = useState<boolean>(true);
+
+  // Check agent status
+  useEffect(() => {
+    const checkAgent = async () => {
+      try {
+        const agents = await ApiClient.request<any[]>('/agents');
+        const online = (agents || []).some(
+          (a) => a.status === 'ONLINE' || a.status === 'BUSY'
+        );
+        setIsAgentOnline(online);
+      } catch {
+        setIsAgentOnline(true);
+      }
+    };
+    checkAgent();
+    const interval = setInterval(checkAgent, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const selectedClient = clients.find((c) => c.id === selectedClientId);
+  const isProduction = selectedClient?.environment?.toUpperCase() === 'PRODUCTION';
+
+  const canCreate = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_CREATE);
+  const canEdit = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_EDIT);
+  const canChangeStatus = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_STATUS_CHANGE);
+  const canResetPassword = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USER_PASSWORD_RESET);
+  const canImport = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_IMPORT);
+  const canExport = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_EXPORT);
+
+  const getMutationState = (baseTitle: string): { title: string; disabled: boolean } => {
+    if (isProduction) {
+      return { title: 'Production mutation requires separate authorization.', disabled: true };
+    }
+    if (!isAgentOnline) {
+      return { title: 'Desktop automation agent is offline.', disabled: true };
+    }
+    return { title: baseTitle, disabled: false };
+  };
 
   // Load clients on mount
   useEffect(() => {
@@ -508,8 +547,6 @@ export const UsersPage: React.FC = () => {
     reader.readAsDataURL(file);
   };
 
-  const selectedClient = clients.find((c) => c.id === selectedClientId);
-
   return (
     <div className="space-y-6">
       {/* Header & Client Selector */}
@@ -699,7 +736,7 @@ export const UsersPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          {hasPermission(PERMISSIONS.CLIENT_USERS_IMPORT) && (
+          {canImport && (
             <button
               onClick={() => setIsImportModalOpen(true)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
@@ -709,7 +746,7 @@ export const UsersPage: React.FC = () => {
             </button>
           )}
 
-          {hasPermission(PERMISSIONS.CLIENT_USERS_EXPORT) && (
+          {canExport && (
             <button
               onClick={handleExportExcel}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
@@ -719,9 +756,12 @@ export const UsersPage: React.FC = () => {
             </button>
           )}
 
-          {hasPermission(PERMISSIONS.CLIENT_USERS_CREATE) && (
+          {canCreate && (
             <button
+              disabled={isProduction}
+              title={isProduction ? 'Production mutation requires separate authorization.' : 'Create User'}
               onClick={() => {
+                if (isProduction) return;
                 setCreateError(null);
                 setPotentialDuplicate(null);
                 setCreateForm({
@@ -836,69 +876,89 @@ export const UsersPage: React.FC = () => {
                               setIsViewModalOpen(true);
                             }}
                             title="View User Details"
+                            aria-label={`View user details for ${u.username}`}
                             className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors"
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
 
                           {/* Edit User */}
-                          {hasPermission(PERMISSIONS.CLIENT_USERS_EDIT) && (
-                            <button
-                              onClick={() => {
-                                setSelectedUser(u);
-                                setEditForm({
-                                  firstName: u.firstName,
-                                  middleName: u.middleName || '',
-                                  lastName: u.lastName,
-                                  nickName: u.nickName || '',
-                                  email: u.email || '',
-                                  mobileNumber: u.mobileNumber || '',
-                                  nationality: u.nationality || 'Saudi Arabia',
-                                  role: u.role || '',
-                                  profileRole: u.profileRole || '',
-                                  barcodeNumber: u.barcodeNumber || '',
-                                  status: u.status,
-                                });
-                                setIsEditModalOpen(true);
-                              }}
-                              title="Edit User"
-                              className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition-colors"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          {canEdit && (() => {
+                            const mutation = getMutationState('Edit User');
+                            return (
+                              <button
+                                disabled={mutation.disabled}
+                                onClick={() => {
+                                  if (mutation.disabled) return;
+                                  setSelectedUser(u);
+                                  setEditForm({
+                                    firstName: u.firstName,
+                                    middleName: u.middleName || '',
+                                    lastName: u.lastName,
+                                    nickName: u.nickName || '',
+                                    email: u.email || '',
+                                    mobileNumber: u.mobileNumber || '',
+                                    nationality: u.nationality || 'Saudi Arabia',
+                                    role: u.role || '',
+                                    profileRole: u.profileRole || '',
+                                    barcodeNumber: u.barcodeNumber || '',
+                                    status: u.status,
+                                  });
+                                  setIsEditModalOpen(true);
+                                }}
+                                title={mutation.title}
+                                aria-label={`Edit user ${u.username}`}
+                                className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                            );
+                          })()}
 
                           {/* Activate / Deactivate Toggle */}
-                          {hasPermission(PERMISSIONS.CLIENT_USERS_STATUS_CHANGE) && (
-                            <button
-                              onClick={() => {
-                                setSelectedUser(u);
-                                setIsStatusModalOpen(true);
-                              }}
-                              title={isActive ? 'Deactivate User' : 'Activate User'}
-                              className={`p-1.5 rounded-lg transition-colors ${
-                                isActive
-                                  ? 'text-emerald-400 hover:text-red-400 hover:bg-red-950/30'
-                                  : 'text-red-400 hover:text-emerald-400 hover:bg-emerald-950/30'
-                              }`}
-                            >
-                              <Power className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          {canChangeStatus && (() => {
+                            const actionLabel = isActive ? 'Deactivate User' : 'Activate User';
+                            const mutation = getMutationState(actionLabel);
+                            return (
+                              <button
+                                disabled={mutation.disabled}
+                                onClick={() => {
+                                  if (mutation.disabled) return;
+                                  setSelectedUser(u);
+                                  setIsStatusModalOpen(true);
+                                }}
+                                title={mutation.title}
+                                aria-label={`${actionLabel} ${u.username}`}
+                                className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                                  isActive
+                                    ? 'text-emerald-400 hover:text-red-400 hover:bg-red-950/30'
+                                    : 'text-red-400 hover:text-emerald-400 hover:bg-emerald-950/30'
+                                }`}
+                              >
+                                <Power className="w-3.5 h-3.5" />
+                              </button>
+                            );
+                          })()}
 
                           {/* Reset Password */}
-                          {hasPermission(PERMISSIONS.CLIENT_USER_PASSWORD_RESET) && (
-                            <button
-                              onClick={() => {
-                                setSelectedUser(u);
-                                handleResetPassword();
-                              }}
-                              title="Reset Password on Client"
-                              className="p-1.5 text-slate-400 hover:text-yellow-400 hover:bg-slate-800 rounded-lg transition-colors"
-                            >
-                              <KeyRound className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          {canResetPassword && (() => {
+                            const mutation = getMutationState('Reset Password on Client');
+                            return (
+                              <button
+                                disabled={mutation.disabled}
+                                onClick={() => {
+                                  if (mutation.disabled) return;
+                                  setSelectedUser(u);
+                                  handleResetPassword();
+                                }}
+                                title={mutation.title}
+                                aria-label={`Reset password for ${u.username}`}
+                                className="p-1.5 text-slate-400 hover:text-yellow-400 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              >
+                                <KeyRound className="w-3.5 h-3.5" />
+                              </button>
+                            );
+                          })()}
                         </div>
                       </td>
                     </tr>

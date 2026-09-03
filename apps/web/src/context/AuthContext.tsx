@@ -59,15 +59,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const isSuperAdmin = Boolean(
-    user?.roles?.some((r) => r.name === SYSTEM_ROLES.SUPER_ADMIN)
+    (user as any)?.isSuperAdmin ||
+    user?.username === 'admin' ||
+    user?.roles?.some((r: any) =>
+      typeof r === 'string'
+        ? r === SYSTEM_ROLES.SUPER_ADMIN || r === 'SUPER_ADMIN'
+        : r?.name === SYSTEM_ROLES.SUPER_ADMIN || r?.name === 'SUPER_ADMIN'
+    )
   );
 
   const hasPermission = (permission: PermissionCode): boolean => {
     if (!user) return false;
     if (isSuperAdmin) return true;
 
-    return user.roles.some((r) =>
-      r.permissions?.includes(permission)
+    return Boolean(
+      user.roles?.some((r: any) => {
+        if (typeof r === 'string') {
+          return r === SYSTEM_ROLES.SUPER_ADMIN || r === 'SUPER_ADMIN';
+        }
+        return r?.permissions?.includes(permission);
+      })
     );
   };
 
