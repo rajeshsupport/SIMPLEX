@@ -617,34 +617,47 @@ export class WorkflowExecutor {
   private static async checkSessionActive(page: Page, workflow: WorkflowVersionConfig): Promise<boolean> {
     const currentUrl = page.url().toLowerCase();
 
-    // 1. URL pattern check
-    if (
-      currentUrl.includes('/dashboard') ||
-      currentUrl.includes('/home') ||
-      currentUrl.includes('/index') ||
-      currentUrl.includes('/main') ||
-      (currentUrl.includes('masterv9.3') && !currentUrl.includes('/login'))
-    ) {
-      const isLoginVisible = await page.locator('#loginForm:visible, input[name="password"]:visible, #pasWord:visible').count();
-      if (isLoginVisible === 0) {
+    // 0. If login form, password input, or sign-in button is visible, session is definitely NOT active
+    const isLoginFormVisible = await page
+      .locator(
+        '#loginForm:visible, #username:visible, #pasWord:visible, input[name="username"]:visible, input[name="password"]:visible, input[type="password"]:visible, button#SignIn:visible, [data-testid="input-password"]:visible'
+      )
+      .count()
+      .catch(() => 0);
+
+    if (isLoginFormVisible > 0) {
+      return false;
+    }
+
+    // 1. URL pattern check (must NOT be at a /login route)
+    if (!currentUrl.includes('/login')) {
+      if (
+        currentUrl.includes('/dashboard') ||
+        currentUrl.includes('/home') ||
+        currentUrl.includes('/index') ||
+        currentUrl.includes('/main') ||
+        (currentUrl.includes('masterv9.3') && !currentUrl.includes('/login'))
+      ) {
         return true;
       }
     }
 
-    // 2. Success conditions from workflow
-    for (const cond of workflow.successConditions || []) {
-      if (cond.type === 'URL_CONTAINS' && cond.expectedValue && currentUrl.includes(cond.expectedValue.toLowerCase())) {
-        return true;
+    // 2. Success conditions from workflow (only valid if not on /login route)
+    if (!currentUrl.includes('/login')) {
+      for (const cond of workflow.successConditions || []) {
+        if (cond.type === 'URL_CONTAINS' && cond.expectedValue && currentUrl.includes(cond.expectedValue.toLowerCase())) {
+          return true;
+        }
+        if (cond.type === 'ELEMENT_VISIBLE' && cond.selector) {
+          const found = await SelectorResolver.findVisibleLocator(page, cond.selector, [], 500);
+          if (found) return true;
+        }
       }
-      if (cond.type === 'ELEMENT_VISIBLE' && cond.selector) {
-        const found = await SelectorResolver.findVisibleLocator(page, cond.selector, [], 500);
-        if (found) return true;
-      }
-    }
 
-    // 3. Fallback dashboard selectors
-    const dashResult = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.DASHBOARD_FALLBACKS, 500);
-    if (dashResult) return true;
+      // 3. Fallback dashboard selectors
+      const dashResult = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.DASHBOARD_FALLBACKS, 500);
+      if (dashResult) return true;
+    }
 
     return false;
   }

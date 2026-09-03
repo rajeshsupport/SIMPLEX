@@ -71,8 +71,7 @@ export class SelectorResolver {
     'button:has-text("Logout" i)',
     'a:has-text("Logout" i)',
     'a[href*="signout" i]',
-    '.icon-person-fill',
-    '.user-profile',
+    'button:has-text("Sign Out" i)',
     '#hmc-app-header',
   ];
 
