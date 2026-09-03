@@ -47,6 +47,8 @@ export interface ClientUser {
   stampUrl?: string | null;
   hasProfileImage: boolean;
   profileImageUrl?: string | null;
+  isPresentRemotely?: boolean;
+  syncRunId?: string | null;
   remoteCreatedAt?: string | null;
   remoteUpdatedAt?: string | null;
   lastSyncedAt: string;
@@ -54,14 +56,38 @@ export interface ClientUser {
   updatedAt?: string;
 }
 
+export interface FormDropdownOption {
+  label: string;
+  value: string;
+  clientId?: string;
+  applicationVersion?: string;
+  roleDependency?: string;
+}
+
+export interface ClientCreateFormMetadata {
+  clientId: string;
+  applicationVersion: string;
+  addUsersUrl: string;
+  nationalities: FormDropdownOption[];
+  roles: FormDropdownOption[];
+  profileRoles: FormDropdownOption[];
+  fieldMappings?: Record<string, string>;
+}
+
 export interface ClientUserListResponse {
   users: ClientUser[];
   totalCount: number;
   lastSyncedAt: string | null;
+  syncSummary?: {
+    remoteUsersFetched: number;
+    centralUsersDisplayed: number;
+    excludedStaleRecords: number;
+    duplicateRemoteRecordsRemoved: number;
+  };
   liveClientOptions?: {
-    nationalities: string[];
-    roles: string[];
-    profileRoles: string[];
+    nationalities: string[] | FormDropdownOption[];
+    roles: string[] | FormDropdownOption[];
+    profileRoles: string[] | FormDropdownOption[];
   };
 }
 

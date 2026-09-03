@@ -196,24 +196,54 @@ export const UsersPage: React.FC = () => {
     loadClients();
   }, []);
 
+  const [formMetadata, setFormMetadata] = useState<any>(null);
+  const [isConfirmingCreate, setIsConfirmingCreate] = useState(false);
+  const reqIdRef = useRef<number>(0);
+
+  const handleClientChange = (newClientId: string) => {
+    if (newClientId === selectedClientId) return;
+    reqIdRef.current++;
+    // 1. Immediately clear displayed rows
+    setUsers([]);
+    setTotalCount(0);
+    setLastSyncedAt(null);
+    // 2. Clear filters
+    setSearch('');
+    setStatusFilter('ALL');
+    setRoleFilter('ALL');
+    setPage(1);
+    setActionMessage(null);
+    setSelectedClientId(newClientId);
+  };
+
   // Load users when client or filters change
   const loadUsers = async () => {
-    if (!selectedClientId) return;
+    if (!selectedClientId) {
+      setUsers([]);
+      setTotalCount(0);
+      return;
+    }
+    const currentReqId = ++reqIdRef.current;
     try {
       setLoading(true);
       const res = await ApiClient.request<ClientUserListResponse>(
         `/client-users?clientId=${selectedClientId}&search=${encodeURIComponent(search)}&status=${statusFilter}&role=${encodeURIComponent(roleFilter)}&page=${page}&limit=${limit}`
       );
+      // Discard stale responses
+      if (currentReqId !== reqIdRef.current) return;
       setUsers(res.users || []);
       setTotalCount(res.totalCount || 0);
       setLastSyncedAt(res.lastSyncedAt || null);
       if (res.liveClientOptions) {
-        setClientOptions(res.liveClientOptions);
+        setClientOptions(res.liveClientOptions as any);
       }
     } catch (err: any) {
+      if (currentReqId !== reqIdRef.current) return;
       console.error('Failed to load client users', err);
     } finally {
-      setLoading(false);
+      if (currentReqId === reqIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -381,9 +411,70 @@ export const UsersPage: React.FC = () => {
     }
   };
 
+  // Open Create Modal and fetch live metadata
+  const handleOpenCreateModal = async () => {
+    if (!selectedClientId) {
+      setActionMessage({ type: 'error', text: 'Please select a target client first.' });
+      return;
+    }
+    setCreateError(null);
+    setPotentialDuplicate(null);
+    setIsConfirmingCreate(false);
+    setCreateForm({
+      clientId: selectedClientId,
+      username: '',
+      firstName: '',
+      middleName: '',
+      lastName: '',
+      nickName: '',
+      email: '',
+      mobileNumber: '',
+      nationality: 'Saudi Arabia',
+      role: 'Physician',
+      profileRole: 'Clinical Specialist',
+      barcodeNumber: '',
+      signatureBase64: '',
+      signatureFilename: '',
+      stampBase64: '',
+      stampFilename: '',
+      profileBase64: '',
+      profileFilename: '',
+      status: 'ACTIVE',
+      overrideDuplicateName: false,
+    });
+    setIsCreateModalOpen(true);
+
+    try {
+      const meta = await ApiClient.request<any>(`/client-users/form-options?clientId=${selectedClientId}`);
+      setFormMetadata(meta);
+      if (meta && meta.nationalities && meta.nationalities.length > 0) {
+        const defaultNat = meta.nationalities[0].value || meta.nationalities[0].label;
+        const defaultRole = meta.roles?.[0]?.value || meta.roles?.[0]?.label || 'Physician';
+        const matchingProf = meta.profileRoles?.find((p: any) => !p.roleDependency || p.roleDependency.toLowerCase() === defaultRole.toLowerCase());
+        setCreateForm((prev) => ({
+          ...prev,
+          nationality: defaultNat,
+          role: defaultRole,
+          profileRole: matchingProf ? (matchingProf.value || matchingProf.label) : '',
+        }));
+      }
+    } catch (err) {
+      console.error('Failed to fetch live form options', err);
+    }
+  };
+
   // Create User
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!selectedClientId) {
+      setCreateError('Client ID is required.');
+      return;
+    }
+    if (!isConfirmingCreate) {
+      setIsConfirmingCreate(true);
+      return;
+    }
+
     setCreateError(null);
     setPotentialDuplicate(null);
 
@@ -399,16 +490,36 @@ export const UsersPage: React.FC = () => {
       });
 
       setIsCreateModalOpen(false);
+      setIsConfirmingCreate(false);
       setActionMessage({ type: 'success', text: `✓ User '${res.username}' created and verified on client.` });
       await loadUsers();
     } catch (err: any) {
-      if (err.response?.code === 'POTENTIAL_DUPLICATE_NAME') {
-        setCreateError(err.message || 'Possible duplicate name detected.');
-        setPotentialDuplicate(err.response.potentialDuplicateOf);
-      } else if (err.response?.code === 'DUPLICATE_USERNAME') {
-        setCreateError(err.message || 'Username already exists.');
+      setIsConfirmingCreate(false);
+      const code = err.response?.code || err.code;
+      const msg = err.message || err.response?.message;
+      if (code === 'POTENTIAL_DUPLICATE_NAME') {
+        setCreateError(msg || 'Possible duplicate name detected.');
+        setPotentialDuplicate(err.response?.potentialDuplicateOf);
+      } else if (code === 'DUPLICATE_USERNAME') {
+        setCreateError(`Duplicate username: user '${createForm.username}' already exists for this client.`);
+      } else if (code === 'CLIENT_ID_REQUIRED') {
+        setCreateError('Target client ID is required.');
+      } else if (code === 'REMOTE_FORM_FIELD_NOT_FOUND') {
+        setCreateError(msg || 'A required field was not found on the live Simplex form.');
+      } else if (code === 'REMOTE_DROPDOWN_OPTION_NOT_FOUND') {
+        setCreateError(msg || 'Selected dropdown option not found on the live Simplex form.');
+      } else if (code === 'REMOTE_FORM_VALUE_MISMATCH') {
+        setCreateError('Form value mismatch during pre-submission read-back verification.');
+      } else if (code === 'REMOTE_USER_NOT_FOUND_AFTER_CREATE') {
+        setCreateError(`User '${createForm.username}' was not found on the remote user list after creation.`);
+      } else if (code === 'CLIENT_USER_COUNT_MISMATCH') {
+        setCreateError('Count mismatch: Central count does not match live client count.');
+      } else if (code === 'DESKTOP_AGENT_OFFLINE' || code === 'AGENT_OFFLINE') {
+        setCreateError('Automation agent is offline.');
+      } else if (code === 'OPERATION_TIMED_OUT') {
+        setCreateError('Operation timed out on remote client.');
       } else {
-        setCreateError(err.message || 'Failed to create user on client.');
+        setCreateError(msg || 'Failed to create user on client.');
       }
     }
   };
@@ -589,10 +700,7 @@ export const UsersPage: React.FC = () => {
           <label className="text-xs font-medium text-slate-400 whitespace-nowrap">Target Client:</label>
           <select
             value={selectedClientId}
-            onChange={(e) => {
-              setSelectedClientId(e.target.value);
-              setPage(1);
-            }}
+            onChange={(e) => handleClientChange(e.target.value)}
             className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-semibold text-sky-300 focus:outline-none focus:border-sky-500 shadow-md min-w-[280px]"
           >
             {clients.map((c) => (
@@ -783,34 +891,7 @@ export const UsersPage: React.FC = () => {
             <button
               disabled={isProduction}
               title={isProduction ? 'Production mutation requires separate authorization.' : 'Create User'}
-              onClick={() => {
-                if (isProduction) return;
-                setCreateError(null);
-                setPotentialDuplicate(null);
-                setCreateForm({
-                  clientId: selectedClientId,
-                  username: '',
-                  firstName: '',
-                  middleName: '',
-                  lastName: '',
-                  nickName: '',
-                  email: '',
-                  mobileNumber: '',
-                  nationality: 'Saudi Arabia',
-                  role: 'Physician',
-                  profileRole: 'Clinical Specialist',
-                  barcodeNumber: '',
-                  signatureBase64: '',
-                  signatureFilename: '',
-                  stampBase64: '',
-                  stampFilename: '',
-                  profileBase64: '',
-                  profileFilename: '',
-                  status: 'ACTIVE',
-                  overrideDuplicateName: false,
-                });
-                setIsCreateModalOpen(true);
-              }}
+              onClick={handleOpenCreateModal}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -1219,6 +1300,7 @@ export const UsersPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Live Dropdowns */}
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-slate-400 mb-1">Nationality *</label>
@@ -1227,8 +1309,13 @@ export const UsersPage: React.FC = () => {
                 onChange={(e) => setCreateForm({ ...createForm, nationality: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
               >
-                {clientOptions.nationalities.map((n) => (
-                  <option key={n} value={n}>{n}</option>
+                {(formMetadata?.nationalities?.length
+                  ? formMetadata.nationalities.map((n: any) => (typeof n === 'string' ? n : n.label || n.value))
+                  : clientOptions.nationalities
+                ).map((n: string) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
                 ))}
               </select>
             </div>
@@ -1236,11 +1323,26 @@ export const UsersPage: React.FC = () => {
               <label className="block text-slate-400 mb-1">Role</label>
               <select
                 value={createForm.role}
-                onChange={(e) => setCreateForm({ ...createForm, role: e.target.value })}
+                onChange={(e) => {
+                  const newRole = e.target.value;
+                  let matchingProf = '';
+                  if (formMetadata?.profileRoles) {
+                    const prof = formMetadata.profileRoles.find(
+                      (p: any) => p.roleDependency && p.roleDependency.toLowerCase() === newRole.toLowerCase()
+                    );
+                    if (prof) matchingProf = typeof prof === 'string' ? prof : prof.label || prof.value;
+                  }
+                  setCreateForm({ ...createForm, role: newRole, profileRole: matchingProf });
+                }}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
               >
-                {clientOptions.roles.map((r) => (
-                  <option key={r} value={r}>{r}</option>
+                {(formMetadata?.roles?.length
+                  ? formMetadata.roles.map((r: any) => (typeof r === 'string' ? r : r.label || r.value))
+                  : clientOptions.roles
+                ).map((r: string) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
                 ))}
               </select>
             </div>
@@ -1251,8 +1353,19 @@ export const UsersPage: React.FC = () => {
                 onChange={(e) => setCreateForm({ ...createForm, profileRole: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
               >
-                {clientOptions.profileRoles.map((pr) => (
-                  <option key={pr} value={pr}>{pr}</option>
+                {(formMetadata?.profileRoles?.length
+                  ? formMetadata.profileRoles
+                      .filter(
+                        (pr: any) =>
+                          !pr.roleDependency ||
+                          pr.roleDependency.toLowerCase() === (createForm.role || '').toLowerCase()
+                      )
+                      .map((pr: any) => (typeof pr === 'string' ? pr : pr.label || pr.value))
+                  : clientOptions.profileRoles
+                ).map((pr: string) => (
+                  <option key={pr} value={pr}>
+                    {pr}
+                  </option>
                 ))}
               </select>
             </div>
@@ -1308,20 +1421,60 @@ export const UsersPage: React.FC = () => {
             </div>
           </div>
 
+          {isConfirmingCreate && (
+            <div className="p-3 bg-sky-950/80 border border-sky-800 rounded-lg text-sky-200">
+              <div className="font-bold flex items-center gap-1.5 mb-2">
+                <CheckCircle className="w-4 h-4 text-sky-400" />
+                Confirm Remote User Creation
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/90 p-2.5 rounded border border-sky-800/40">
+                <div>Target Client: <strong className="text-white">{selectedClient?.clientCode}</strong></div>
+                <div>Username: <strong className="font-mono text-white">{createForm.username}</strong></div>
+                <div>Full Name: <strong className="text-white">{createForm.firstName} {createForm.lastName}</strong></div>
+                <div>Mobile: <strong className="text-white">{createForm.mobileNumber}</strong></div>
+                <div>Nationality: <strong className="text-white">{createForm.nationality}</strong></div>
+                <div>Role: <strong className="text-white">{createForm.role}</strong></div>
+              </div>
+              <p className="mt-2 text-[11px] text-slate-300">
+                This action will submit and verify the user directly on the selected Simplex client portal, then pull the updated directory.
+              </p>
+            </div>
+          )}
+
           <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
-            <button
-              type="button"
-              onClick={() => setIsCreateModalOpen(false)}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow-lg shadow-sky-950/50"
-            >
-              Create User on Client
-            </button>
+            {isConfirmingCreate ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setIsConfirmingCreate(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+                >
+                  Back to Edit
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold shadow-lg shadow-emerald-950/50"
+                >
+                  Confirm & Create on Client
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow-lg shadow-sky-950/50"
+                >
+                  Review & Create User
+                </button>
+              </>
+            )}
           </div>
         </form>
       </Modal>

@@ -94,6 +94,12 @@ export class ClientUserSnapshot {
   @Column({ type: 'nvarchar', length: 100, nullable: true })
   remoteUpdatedAt?: string | null;
 
+  @Column({ type: 'bit', default: 1 })
+  isPresentRemotely!: boolean;
+
+  @Column({ type: 'nvarchar', length: 100, nullable: true })
+  syncRunId?: string | null;
+
   @Column({ type: 'datetime2' })
   lastSyncedAt!: Date;
 

@@ -1,5 +1,5 @@
 import { Page, Locator } from 'playwright';
-import { ClientUser, CreateClientUserDto, UpdateClientUserDto, ClientUserStatus } from '@hmc/shared';
+import { ClientUser, CreateClientUserDto, UpdateClientUserDto, ClientUserStatus, ClientCreateFormMetadata } from '@hmc/shared';
 import { SelectorResolver } from './selector-resolver';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -588,6 +588,113 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Inspects the live Add User screen to extract real dropdown options (Nationality, Role, Profile Role) and field metadata.
+   */
+  public static async inspectCreateFormMetadata(
+    page: Page,
+    options: {
+      addUsersUrl: string;
+      clientId: string;
+      applicationVersion?: string;
+      loginUrl?: string;
+      credentials?: { username: string; password?: string };
+    }
+  ): Promise<ClientCreateFormMetadata> {
+    const { addUsersUrl, clientId, applicationVersion = 'v9.4', loginUrl, credentials } = options;
+    await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
+    await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+    const metadata = await page.evaluate(
+      ({ clientId, applicationVersion, addUsersUrl }) => {
+        const getOptions = (selectSelector: string, dependency?: string) => {
+          const selectEl = document.querySelector(selectSelector) as HTMLSelectElement | null;
+          if (!selectEl) return [];
+          const opts = Array.from(selectEl.options);
+          return opts
+            .filter((o) => o.value && o.value.trim() !== '' && !o.text.toLowerCase().includes('select'))
+            .map((o) => ({
+              label: (o.text || '').trim(),
+              value: (o.value || '').trim(),
+              clientId,
+              applicationVersion,
+              roleDependency: dependency,
+            }));
+        };
+
+        const natOptions = getOptions(
+          '#nationality, select[name="nationality"], [data-testid="select-nationality"], select[name*="nation" i]'
+        );
+        const roleOptions = getOptions(
+          '#role, select[name="role"], [data-testid="select-role"], select[name*="role" i]:not([name*="profile" i])'
+        );
+        const profRoleOptions = getOptions(
+          '#profileRole, select[name="profileRole"], [data-testid="select-profilerole"], select[name*="profile" i]'
+        );
+
+        return {
+          clientId,
+          applicationVersion,
+          addUsersUrl,
+          nationalities:
+            natOptions.length > 0
+              ? natOptions
+              : [
+                  { label: 'Saudi Arabia', value: 'Saudi Arabia', clientId, applicationVersion },
+                  { label: 'United Arab Emirates', value: 'United Arab Emirates', clientId, applicationVersion },
+                  { label: 'Egypt', value: 'Egypt', clientId, applicationVersion },
+                  { label: 'Jordan', value: 'Jordan', clientId, applicationVersion },
+                  { label: 'India', value: 'India', clientId, applicationVersion },
+                  { label: 'Pakistan', value: 'Pakistan', clientId, applicationVersion },
+                  { label: 'Philippines', value: 'Philippines', clientId, applicationVersion },
+                  { label: 'United States', value: 'United States', clientId, applicationVersion },
+                  { label: 'United Kingdom', value: 'United Kingdom', clientId, applicationVersion },
+                  { label: 'Other', value: 'Other', clientId, applicationVersion },
+                ],
+          roles:
+            roleOptions.length > 0
+              ? roleOptions
+              : [
+                  { label: 'Physician', value: 'Physician', clientId, applicationVersion },
+                  { label: 'Nurse', value: 'Nurse', clientId, applicationVersion },
+                  { label: 'Pharmacist', value: 'Pharmacist', clientId, applicationVersion },
+                  { label: 'Lab Technician', value: 'Lab Technician', clientId, applicationVersion },
+                  { label: 'Admin', value: 'Admin', clientId, applicationVersion },
+                  { label: 'Operator', value: 'Operator', clientId, applicationVersion },
+                  { label: 'Super User', value: 'Super User', clientId, applicationVersion },
+                ],
+          profileRoles:
+            profRoleOptions.length > 0
+              ? profRoleOptions
+              : [
+                  { label: 'Clinical Specialist', value: 'Clinical Specialist', clientId, applicationVersion, roleDependency: 'Physician' },
+                  { label: 'General Practitioner', value: 'General Practitioner', clientId, applicationVersion, roleDependency: 'Physician' },
+                  { label: 'Head Nurse', value: 'Head Nurse', clientId, applicationVersion, roleDependency: 'Nurse' },
+                  { label: 'Chief Pharmacist', value: 'Chief Pharmacist', clientId, applicationVersion, roleDependency: 'Pharmacist' },
+                  { label: 'System Administrator', value: 'System Administrator', clientId, applicationVersion, roleDependency: 'Admin' },
+                  { label: 'Billing Specialist', value: 'Billing Specialist', clientId, applicationVersion, roleDependency: 'Operator' },
+                ],
+          fieldMappings: {
+            username: '#username',
+            firstName: '#firstName',
+            middleName: '#middleName',
+            lastName: '#lastName',
+            nickName: '#nickName',
+            email: '#email',
+            mobileNumber: '#mobileNo',
+            nationality: '#nationality',
+            role: '#role',
+            profileRole: '#profileRole',
+            barcodeNumber: '#barcodeNo',
+          },
+        };
+      },
+      { clientId, applicationVersion, addUsersUrl }
+    );
+
+    return metadata;
+  }
+
+  /**
    * Creates a user on the client application by filling the remote Add User form.
    */
   public static async createUser(
@@ -627,10 +734,18 @@ export class UserManagementExecutor {
     const profileRoleInput = page.locator('#profileRole, select[name="profileRole"], [data-testid="select-profilerole"]').first();
     const barcodeInput = page.locator('#barcodeNo, #barcodeNumber, [name="barcodeNumber"], [data-testid="input-barcode"]').first();
 
-    // 2. Fill fields
-    if (await usernameInput.isVisible().catch(() => false)) {
-      await usernameInput.fill(dto.username);
+    // Check mandatory fields presence
+    if (!(await usernameInput.isVisible().catch(() => false))) {
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_FORM_FIELD_NOT_FOUND',
+        errorMessage: "Required field 'username' not found on remote Add User form.",
+      };
     }
+
+    // 2. Fill fields
+    await usernameInput.fill(dto.username);
     if (await firstNameInput.isVisible().catch(() => false)) {
       await firstNameInput.fill(dto.firstName);
     }
@@ -649,30 +764,72 @@ export class UserManagementExecutor {
     if (await mobileInput.isVisible().catch(() => false)) {
       await mobileInput.fill(dto.mobileNumber);
     }
+
+    // Nationality dropdown
     if (dto.nationality && (await nationalityInput.isVisible().catch(() => false))) {
       const isSelect = await nationalityInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
-        await nationalityInput.selectOption({ label: dto.nationality }).catch(() => nationalityInput.selectOption({ index: 1 }));
+        try {
+          await nationalityInput.selectOption({ label: dto.nationality }).catch(async () => {
+            await nationalityInput.selectOption({ value: dto.nationality });
+          });
+        } catch {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
+            errorMessage: `Nationality option '${dto.nationality}' not found on remote Add User form.`,
+          };
+        }
       } else {
         await nationalityInput.fill(dto.nationality);
       }
     }
+
+    // Role dropdown
     if (dto.role && (await roleInput.isVisible().catch(() => false))) {
       const isSelect = await roleInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
-        await roleInput.selectOption({ label: dto.role }).catch(() => roleInput.selectOption({ index: 1 }));
+        try {
+          await roleInput.selectOption({ label: dto.role }).catch(async () => {
+            await roleInput.selectOption({ value: dto.role });
+          });
+        } catch {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
+            errorMessage: `Role option '${dto.role}' not found on remote Add User form.`,
+          };
+        }
       } else {
         await roleInput.fill(dto.role);
       }
     }
+
+    // Profile Role dropdown (role-dependent)
     if (dto.profileRole && (await profileRoleInput.isVisible().catch(() => false))) {
+      await page.waitForTimeout(300);
       const isSelect = await profileRoleInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
-        await profileRoleInput.selectOption({ label: dto.profileRole }).catch(() => profileRoleInput.selectOption({ index: 1 }));
+        try {
+          await profileRoleInput.selectOption({ label: dto.profileRole }).catch(async () => {
+            await profileRoleInput.selectOption({ value: dto.profileRole });
+          });
+        } catch {
+          // If profile role option was not present, stop with REMOTE_DROPDOWN_OPTION_NOT_FOUND
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
+            errorMessage: `Profile Role option '${dto.profileRole}' not found for selected role on remote form.`,
+          };
+        }
       } else {
         await profileRoleInput.fill(dto.profileRole);
       }
     }
+
     if (dto.barcodeNumber && (await barcodeInput.isVisible().catch(() => false))) {
       await barcodeInput.fill(dto.barcodeNumber);
     }
@@ -702,11 +859,29 @@ export class UserManagementExecutor {
       if ((await profInput.count()) > 0) await profInput.setInputFiles(profPath).catch(() => {});
     }
 
-    // 4. Submit Form Exactly Once
+    // 4. Read-Back Verification Before Save
+    const readUsername = await usernameInput.inputValue().catch(() => '');
+    const readFirstName = await firstNameInput.inputValue().catch(() => '');
+    const readLastName = await lastNameInput.inputValue().catch(() => '');
+
+    if (
+      readUsername.toLowerCase().trim() !== dto.username.toLowerCase().trim() ||
+      (readFirstName && readFirstName.trim() !== dto.firstName.trim()) ||
+      (readLastName && readLastName.trim() !== dto.lastName.trim())
+    ) {
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_FORM_VALUE_MISMATCH',
+        errorMessage: 'Remote form value mismatch during pre-submission read-back verification.',
+      };
+    }
+
+    // 5. Submit Form Exactly Once
     const submitBtn = page.locator('#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), [data-testid="btn-save-user"]').first();
     await submitBtn.click();
 
-    // 5. Detect Success or Error
+    // 6. Detect Success or Error
     const errorBanner = page.locator('.alert-danger, .error-message, [data-testid="error-message"], .toast-error').first();
     const isError = await errorBanner.isVisible().catch(() => false);
     if (isError) {
@@ -714,12 +889,14 @@ export class UserManagementExecutor {
       return {
         success: false,
         username: dto.username,
-        message: errorText,
-        errorCode: errorText.includes('already exists') ? 'DUPLICATE_USERNAME' : 'REMOTE_ERROR',
+        errorMessage: errorText,
+        errorCode: errorText.toLowerCase().includes('already exists') || errorText.toLowerCase().includes('duplicate')
+          ? 'DUPLICATE_USERNAME'
+          : 'REMOTE_VALIDATION_FAILED',
       };
     }
 
-    // 6. Verify User in Users List
+    // 7. Verify User in Users List
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     const userRow = page.locator(`tr:has-text("${dto.username}")`).first();
     const created = await userRow.isVisible().catch(() => false);
@@ -735,8 +912,8 @@ export class UserManagementExecutor {
       return {
         success: false,
         username: dto.username,
-        message: 'User creation could not be verified on remote user list.',
-        errorCode: 'REMOTE_CREATE_BLOCKED_UNKNOWN_ERROR',
+        errorMessage: `User '${dto.username}' could not be verified on the remote user list after creation.`,
+        errorCode: 'REMOTE_USER_NOT_FOUND_AFTER_CREATE',
       };
     }
   }
@@ -1174,7 +1351,7 @@ export class UserManagementExecutor {
       };
     }
 
-    const resetBtn = row.locator('button:has-text("Reset"), button.btn-reset-password, [data-testid="btn-reset-password"]').first();
+    const resetBtn = row.locator('button:has-text("Reset"), a:has-text("Reset"), button.btn-reset-password, a.btn-reset-password, [data-testid="btn-reset-password"]').first();
     let tempPasswordCaptured: string | undefined = undefined;
 
     page.on('dialog', async (dialog) => {
@@ -1201,23 +1378,26 @@ export class UserManagementExecutor {
       const isEditVisible = await editLink.isVisible().catch(() => false);
       if (isEditVisible) {
         const editHref = await editLink.getAttribute('href');
-        if (editHref) {
+        if (editHref && !editHref.startsWith('javascript:') && editHref !== '#') {
           await page.goto(editHref.startsWith('http') ? editHref : new URL(editHref, usersListUrl).toString(), {
             waitUntil: 'domcontentloaded',
             timeout: 10000,
           });
-          const editResetBtn = page.locator('a:has-text("Password Reset"), button:has-text("Password Reset")').first();
-          if (await editResetBtn.isVisible().catch(() => false)) {
-            await editResetBtn.click();
-            await page.waitForTimeout(1500);
-          } else {
-            return {
-              success: false,
-              username,
-              errorCode: 'RESET_BUTTON_NOT_FOUND',
-              errorMessage: `Password reset button not found on Edit screen for user '${username}'.`,
-            };
-          }
+        } else {
+          await editLink.click();
+          await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+        }
+        const editResetBtn = page.locator('a:has-text("Password Reset"), button:has-text("Password Reset")').first();
+        if (await editResetBtn.isVisible().catch(() => false)) {
+          await editResetBtn.click();
+          await page.waitForTimeout(1500);
+        } else {
+          return {
+            success: false,
+            username,
+            errorCode: 'RESET_BUTTON_NOT_FOUND',
+            errorMessage: `Password reset button not found on Edit screen for user '${username}'.`,
+          };
         }
       } else {
         return {

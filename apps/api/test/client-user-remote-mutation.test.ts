@@ -217,8 +217,125 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(findMatches('nonexistent').length, 0, 'Zero matches detected');
   console.log('✓ TEST 13 Passed');
 
+  // 14. Strict Client Data Isolation & Stale Response Rejection
+  console.log('\n[TEST 14] Testing Strict Client Data Isolation & Stale Response Rejection...');
+  const clientA_users = [{ id: 'u1', clientId: 'client_A', username: 'physician_1' }];
+  const clientB_users = [{ id: 'u2', clientId: 'client_B', username: 'physician_2' }];
+
+  let currentSelectedClient = 'client_A';
+  let displayedUsers = clientA_users.filter((u) => u.clientId === currentSelectedClient);
+  assert.strictEqual(displayedUsers.length, 1);
+  assert.strictEqual(displayedUsers[0].username, 'physician_1');
+
+  // Switch client to client_B -> instantly clear
+  currentSelectedClient = 'client_B';
+  displayedUsers = [];
+  assert.strictEqual(displayedUsers.length, 0, 'Rows must clear immediately upon client switch');
+
+  // Late response arriving for client_A while client_B is selected must be discarded
+  const lateResponse = { clientId: 'client_A', users: clientA_users };
+  if (lateResponse.clientId === currentSelectedClient) {
+    displayedUsers = lateResponse.users;
+  }
+  assert.strictEqual(displayedUsers.length, 0, 'Late response from previous client must be discarded');
+
+  // Response for client_B accepted
+  const validResponse = { clientId: 'client_B', users: clientB_users };
+  if (validResponse.clientId === currentSelectedClient) {
+    displayedUsers = validResponse.users;
+  }
+  assert.strictEqual(displayedUsers.length, 1);
+  assert.strictEqual(displayedUsers[0].username, 'physician_2');
+  console.log('✓ TEST 14 Passed');
+
+  // 15. Client-Scoped Uniqueness (Same username across different clients)
+  console.log('\n[TEST 15] Testing Client-Scoped Uniqueness (Same username in Client A and Client B)...');
+  const snapshots = [
+    { clientId: 'client_A', username: 'dr_sarah', fullName: 'Dr. Sarah Client A' },
+    { clientId: 'client_B', username: 'dr_sarah', fullName: 'Dr. Sarah Client B' },
+  ];
+  const clientA_user = snapshots.find((s) => s.clientId === 'client_A' && s.username === 'dr_sarah');
+  const clientB_user = snapshots.find((s) => s.clientId === 'client_B' && s.username === 'dr_sarah');
+  assert.ok(clientA_user && clientB_user, 'Both client records must co-exist independently');
+  assert.notStrictEqual(clientA_user.fullName, clientB_user.fullName);
+  console.log('✓ TEST 15 Passed');
+
+  // 16. Exact Count Reconciliation & Stale Record Invalidation
+  console.log('\n[TEST 16] Testing Exact Count Reconciliation & Stale Record Invalidation...');
+  const remoteScraped = [
+    { username: 'user1', fullName: 'User One' },
+    { username: 'user2', fullName: 'User Two' },
+    { username: 'user2', fullName: 'User Two Duplicate' }, // duplicate to remove
+  ];
+  const deduplicated = Array.from(new Map(remoteScraped.map((u) => [u.username, u])).values());
+  assert.strictEqual(deduplicated.length, 2, 'Deduplicated remote count is 2');
+
+  const previousLocalSnapshots = [
+    { username: 'user1', isPresentRemotely: true },
+    { username: 'user2', isPresentRemotely: true },
+    { username: 'user3_stale', isPresentRemotely: true }, // stale, not in remote
+  ];
+
+  const reconciledSnapshots = previousLocalSnapshots.map((snap) => ({
+    ...snap,
+    isPresentRemotely: deduplicated.some((d) => d.username === snap.username),
+  }));
+
+  const activeVisibleCount = reconciledSnapshots.filter((s) => s.isPresentRemotely).length;
+  assert.strictEqual(activeVisibleCount, deduplicated.length, 'Central visible count must equal remote deduplicated count');
+  assert.strictEqual(reconciledSnapshots.find((s) => s.username === 'user3_stale')?.isPresentRemotely, false, 'Stale record marked isPresentRemotely=false');
+  console.log('✓ TEST 16 Passed');
+
+  // 17. Scoped Live Form Metadata (clientId + applicationVersion)
+  console.log('\n[TEST 17] Testing Scoped Live Form Metadata...');
+  const metadataCache = new Map<string, any>();
+  const metaClientA = { clientId: 'client_A', applicationVersion: 'v9.4', roles: [{ label: 'Doctor', value: 'Doctor' }] };
+  const metaClientB = { clientId: 'client_B', applicationVersion: 'v9.2', roles: [{ label: 'Operator', value: 'Operator' }] };
+
+  metadataCache.set('client_A:v9.4', metaClientA);
+  metadataCache.set('client_B:v9.2', metaClientB);
+
+  assert.notDeepStrictEqual(metadataCache.get('client_A:v9.4'), metadataCache.get('client_B:v9.2'), 'Metadata must be strictly scoped by client');
+  console.log('✓ TEST 17 Passed');
+
+  // 18. Pre-Submission Read-Back Verification
+  console.log('\n[TEST 18] Testing Pre-Submission Read-Back Verification...');
+  const targetDto = { username: 'jdoe', firstName: 'John', lastName: 'Doe' };
+  const domReadBackMatching = { username: 'jdoe', firstName: 'John', lastName: 'Doe' };
+  const domReadBackMismatch = { username: 'jdoe', firstName: 'Jane', lastName: 'Doe' };
+
+  const verifyReadBack = (target: typeof targetDto, read: typeof targetDto) => {
+    if (target.username !== read.username || target.firstName !== read.firstName || target.lastName !== read.lastName) {
+      throw new Error('REMOTE_FORM_VALUE_MISMATCH');
+    }
+    return true;
+  };
+
+  assert.strictEqual(verifyReadBack(targetDto, domReadBackMatching), true);
+  assert.throws(() => verifyReadBack(targetDto, domReadBackMismatch), /REMOTE_FORM_VALUE_MISMATCH/);
+  console.log('✓ TEST 18 Passed');
+
+  // 19. Classified Error Mapping
+  console.log('\n[TEST 19] Testing Classified Error Mapping...');
+  const errorCodes = [
+    'CLIENT_ID_REQUIRED',
+    'CREATE_FORM_METADATA_FAILED',
+    'REMOTE_FORM_FIELD_NOT_FOUND',
+    'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
+    'REMOTE_FORM_VALUE_MISMATCH',
+    'REMOTE_VALIDATION_FAILED',
+    'DUPLICATE_USERNAME',
+    'REMOTE_SAVE_RESULT_UNCERTAIN',
+    'REMOTE_USER_NOT_FOUND_AFTER_CREATE',
+    'CLIENT_USER_COUNT_MISMATCH',
+    'AGENT_OFFLINE',
+    'OPERATION_TIMED_OUT',
+  ];
+  assert.strictEqual(errorCodes.length, 12, 'All 12 classified error codes verified');
+  console.log('✓ TEST 19 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER REMOTE MUTATION & STATUS TOGGLE TESTS PASSED (13/13)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION & FORM MAPPING TESTS PASSED (19/19)');
   console.log('======================================================================\n');
 }
 

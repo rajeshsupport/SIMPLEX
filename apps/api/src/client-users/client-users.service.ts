@@ -29,6 +29,7 @@ import {
   ClientUserStatus,
   JwtPayload,
   resolveClientRoute,
+  ClientCreateFormMetadata,
 } from '@hmc/shared';
 import { AgentsService } from '../agents/agents.service.js';
 
@@ -109,6 +110,13 @@ export class ClientUsersService {
     },
     user: JwtPayload
   ): Promise<ClientUserListResponse> {
+    if (!clientId || clientId.trim() === '') {
+      throw new BadRequestException({
+        code: 'CLIENT_ID_REQUIRED',
+        message: 'Target client ID is required.',
+      });
+    }
+
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
 
@@ -120,7 +128,9 @@ export class ClientUsersService {
     const limit = Math.min(100, Math.max(1, Number(query.limit) || 25));
     const skip = (page - 1) * limit;
 
-    const qb = this.snapshotRepo.createQueryBuilder('u').where('u.clientId = :clientId', { clientId });
+    const qb = this.snapshotRepo
+      .createQueryBuilder('u')
+      .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent', { clientId, isPresent: true });
 
     if (query.status && query.status !== 'ALL') {
       qb.andWhere('u.status = :status', { status: query.status });
@@ -143,18 +153,20 @@ export class ClientUsersService {
     const [users, totalCount] = await qb.getManyAndCount();
 
     const latestSync = await this.snapshotRepo.findOne({
-      where: { clientId },
+      where: { clientId, isPresentRemotely: true },
       order: { lastSyncedAt: 'DESC' },
     });
+
+    const liveOptions = await this.getLiveFormOptions(clientId, user);
 
     return {
       users: users.map((u) => this.mapToDto(u, client)),
       totalCount,
       lastSyncedAt: latestSync?.lastSyncedAt ? latestSync.lastSyncedAt.toISOString() : null,
       liveClientOptions: {
-        nationalities: ['Saudi Arabia', 'United Arab Emirates', 'United States', 'United Kingdom', 'India', 'Egypt', 'Jordan', 'Pakistan', 'Philippines', 'Other'],
-        roles: ['Physician', 'Nurse', 'Admin', 'Pharmacist', 'Lab Technician', 'Operator', 'Super User'],
-        profileRoles: ['Clinical Specialist', 'General Practitioner', 'Head Nurse', 'Chief Pharmacist', 'System Administrator', 'Billing Specialist'],
+        nationalities: liveOptions.nationalities,
+        roles: liveOptions.roles,
+        profileRoles: liveOptions.profileRoles,
       },
     };
   }
@@ -459,27 +471,60 @@ export class ClientUsersService {
   }
 
   /**
-   * Helper to persist scraped snapshot users into MSSQL database.
+   * Helper to persist scraped snapshot users into MSSQL database with exact client-level deduplication and reconciliation.
    */
-  private async persistScrapedUsers(clientId: string, scrapedUsers: any[]): Promise<void> {
+  private async persistScrapedUsers(
+    clientId: string,
+    scrapedUsers: any[]
+  ): Promise<{
+    remoteUsersFetched: number;
+    centralUsersDisplayed: number;
+    excludedStaleRecords: number;
+    duplicateRemoteRecordsRemoved: number;
+    syncRunId: string;
+  }> {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
-    if (!client || !scrapedUsers || scrapedUsers.length === 0) return;
+    if (!client || !scrapedUsers) {
+      return {
+        remoteUsersFetched: 0,
+        centralUsersDisplayed: 0,
+        excludedStaleRecords: 0,
+        duplicateRemoteRecordsRemoved: 0,
+        syncRunId: '',
+      };
+    }
 
+    const rawCount = scrapedUsers.length;
+    // Deduplicate only within this client by normalized username
+    const deduplicatedMap = new Map<string, any>();
+    for (const u of scrapedUsers) {
+      if (u && u.username) {
+        deduplicatedMap.set(u.username.trim().toLowerCase(), u);
+      }
+    }
+    const deduplicatedUsers = Array.from(deduplicatedMap.values());
+    const duplicatesRemoved = rawCount - deduplicatedUsers.length;
+    const syncRunId = crypto.randomUUID();
     const now = new Date();
-    for (const su of scrapedUsers) {
+    const activeUsernames = new Set<string>();
+
+    for (const su of deduplicatedUsers) {
+      const normUsername = su.username.trim();
+      activeUsernames.add(normUsername.toLowerCase());
+
       let snapshot = await this.snapshotRepo.findOne({
-        where: { clientId, username: su.username },
+        where: { clientId, username: normUsername },
       });
 
       if (!snapshot) {
         snapshot = this.snapshotRepo.create({
           clientId,
           clientCode: client.clientCode,
-          username: su.username,
+          username: normUsername,
           firstName: su.firstName,
           middleName: su.middleName,
           lastName: su.lastName,
-          fullName: su.fullName,
+          fullName: su.fullName || `${su.firstName} ${su.lastName}`.trim(),
           nickName: su.nickName,
           email: su.email,
           mobileNumber: su.mobileNumber,
@@ -491,13 +536,15 @@ export class ClientUsersService {
           hasSignature: su.hasSignature || false,
           hasStamp: su.hasStamp || false,
           hasProfileImage: su.hasProfileImage || false,
+          isPresentRemotely: true,
+          syncRunId,
           lastSyncedAt: now,
         });
       } else {
         snapshot.firstName = su.firstName;
         snapshot.middleName = su.middleName;
         snapshot.lastName = su.lastName;
-        snapshot.fullName = su.fullName;
+        snapshot.fullName = su.fullName || `${su.firstName} ${su.lastName}`.trim();
         snapshot.email = su.email;
         snapshot.mobileNumber = su.mobileNumber;
         snapshot.nationality = su.nationality;
@@ -507,16 +554,55 @@ export class ClientUsersService {
         snapshot.hasSignature = su.hasSignature || false;
         snapshot.hasStamp = su.hasStamp || false;
         snapshot.hasProfileImage = su.hasProfileImage || false;
+        snapshot.isPresentRemotely = true;
+        snapshot.syncRunId = syncRunId;
         snapshot.lastSyncedAt = now;
       }
       await this.snapshotRepo.save(snapshot);
     }
+
+    // Mark previous snapshots of this client that were NOT present remotely as isPresentRemotely = false
+    const existingSnapshots = await this.snapshotRepo.find({ where: { clientId } });
+    let excludedStaleCount = 0;
+    for (const existing of existingSnapshots) {
+      if (!activeUsernames.has(existing.username.toLowerCase())) {
+        existing.isPresentRemotely = false;
+        await this.snapshotRepo.save(existing);
+        excludedStaleCount++;
+      }
+    }
+
+    const currentRemotelyPresentCount = await this.snapshotRepo.count({
+      where: { clientId, isPresentRemotely: true },
+    });
+
+    if (currentRemotelyPresentCount !== deduplicatedUsers.length) {
+      throw new BadRequestException({
+        code: 'CLIENT_USER_COUNT_MISMATCH',
+        message: `Synchronization count mismatch: Remote deduplicated count (${deduplicatedUsers.length}) does not match Central displayed count (${currentRemotelyPresentCount}).`,
+      });
+    }
+
+    return {
+      remoteUsersFetched: rawCount,
+      centralUsersDisplayed: currentRemotelyPresentCount,
+      excludedStaleRecords: excludedStaleCount,
+      duplicateRemoteRecordsRemoved: duplicatesRemoved,
+      syncRunId,
+    };
   }
 
   /**
    * Synchronous / polling wrapper for syncClientUsers.
    */
   async syncClientUsers(clientId: string, user: JwtPayload): Promise<ClientUserListResponse> {
+    if (!clientId || clientId.trim() === '') {
+      throw new BadRequestException({
+        code: 'CLIENT_ID_REQUIRED',
+        message: 'Target client ID is required.',
+      });
+    }
+
     const { jobId } = await this.startSyncJob(clientId, user);
 
     // Wait up to 15s for the job to complete
@@ -532,11 +618,12 @@ export class ClientUsersService {
       }
     }
 
+    let syncSummary: any = undefined;
     if (completedRun && completedRun.status === 'COMPLETED' && completedRun.resultSummaryJson) {
       try {
         const resultData = JSON.parse(completedRun.resultSummaryJson);
         if (resultData.users) {
-          await this.persistScrapedUsers(clientId, resultData.users);
+          syncSummary = await this.persistScrapedUsers(clientId, resultData.users);
         }
       } catch (err) {
         console.error('Error saving scraped snapshot users:', err);
@@ -553,7 +640,9 @@ export class ClientUsersService {
       });
     }
 
-    return this.getClientUsers(clientId, {}, user);
+    const response = await this.getClientUsers(clientId, {}, user);
+    if (syncSummary) response.syncSummary = syncSummary;
+    return response;
   }
 
   private static activeMutationLocks = new Set<string>();
@@ -714,7 +803,18 @@ export class ClientUsersService {
       }
 
       if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status)) {
-        throw new BadRequestException(completedRun?.errorMessage || 'User creation failed on client portal.');
+        let errorCode = 'REMOTE_VALIDATION_FAILED';
+        let errorMessage = completedRun?.errorMessage || 'User creation failed on client portal.';
+        try {
+          const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
+          if (parsed.errorCode) errorCode = parsed.errorCode;
+          if (parsed.errorMessage) errorMessage = parsed.errorMessage;
+        } catch {}
+        if (completedRun?.status === 'TIMED_OUT') errorCode = 'OPERATION_TIMED_OUT';
+        throw new BadRequestException({
+          code: errorCode,
+          message: errorMessage,
+        });
       }
 
       // Automatically trigger post-mutation pull sync
@@ -746,6 +846,7 @@ export class ClientUsersService {
         hasSignature: Boolean(dto.signatureBase64),
         hasStamp: Boolean(dto.stampBase64),
         hasProfileImage: Boolean(dto.profileBase64),
+        isPresentRemotely: true,
         lastSyncedAt: now,
       });
 
@@ -1176,10 +1277,19 @@ export class ClientUsersService {
     }
   }
 
+  private static formOptionsCache = new Map<string, { timestamp: number; data: ClientCreateFormMetadata }>();
+
   /**
-   * Retrieves live form dropdown options.
+   * Retrieves live form dropdown options scoped by clientId and applicationVersion.
    */
-  async getLiveFormOptions(clientId: string, user: JwtPayload) {
+  async getLiveFormOptions(clientId: string, user: JwtPayload): Promise<ClientCreateFormMetadata> {
+    if (!clientId || clientId.trim() === '') {
+      throw new BadRequestException({
+        code: 'CLIENT_ID_REQUIRED',
+        message: 'Target client ID is required.',
+      });
+    }
+
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
 
@@ -1187,11 +1297,65 @@ export class ClientUsersService {
       throw new ForbiddenException('Not authorized for this client');
     }
 
-    return {
-      nationalities: ['Saudi Arabia', 'United Arab Emirates', 'United States', 'United Kingdom', 'India', 'Egypt', 'Jordan', 'Pakistan', 'Philippines', 'Other'],
-      roles: ['Physician', 'Nurse', 'Admin', 'Pharmacist', 'Lab Technician', 'Operator', 'Super User'],
-      profileRoles: ['Clinical Specialist', 'General Practitioner', 'Head Nurse', 'Chief Pharmacist', 'System Administrator', 'Billing Specialist'],
+    const version = client.applicationVersion || 'v9.4';
+    const cacheKey = `${client.id}:${version}`;
+    const cached = ClientUsersService.formOptionsCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 300000) {
+      return cached.data;
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+
+    const metadata: ClientCreateFormMetadata = {
+      clientId: client.id,
+      applicationVersion: version,
+      addUsersUrl: routes.resolvedAddUsersUrl,
+      nationalities: [
+        { label: 'Saudi Arabia', value: 'Saudi Arabia', clientId: client.id, applicationVersion: version },
+        { label: 'United Arab Emirates', value: 'United Arab Emirates', clientId: client.id, applicationVersion: version },
+        { label: 'Egypt', value: 'Egypt', clientId: client.id, applicationVersion: version },
+        { label: 'Jordan', value: 'Jordan', clientId: client.id, applicationVersion: version },
+        { label: 'India', value: 'India', clientId: client.id, applicationVersion: version },
+        { label: 'Pakistan', value: 'Pakistan', clientId: client.id, applicationVersion: version },
+        { label: 'Philippines', value: 'Philippines', clientId: client.id, applicationVersion: version },
+        { label: 'United States', value: 'United States', clientId: client.id, applicationVersion: version },
+        { label: 'United Kingdom', value: 'United Kingdom', clientId: client.id, applicationVersion: version },
+        { label: 'Other', value: 'Other', clientId: client.id, applicationVersion: version },
+      ],
+      roles: [
+        { label: 'Physician', value: 'Physician', clientId: client.id, applicationVersion: version },
+        { label: 'Nurse', value: 'Nurse', clientId: client.id, applicationVersion: version },
+        { label: 'Pharmacist', value: 'Pharmacist', clientId: client.id, applicationVersion: version },
+        { label: 'Lab Technician', value: 'Lab Technician', clientId: client.id, applicationVersion: version },
+        { label: 'Admin', value: 'Admin', clientId: client.id, applicationVersion: version },
+        { label: 'Operator', value: 'Operator', clientId: client.id, applicationVersion: version },
+        { label: 'Super User', value: 'Super User', clientId: client.id, applicationVersion: version },
+      ],
+      profileRoles: [
+        { label: 'Clinical Specialist', value: 'Clinical Specialist', clientId: client.id, applicationVersion: version, roleDependency: 'Physician' },
+        { label: 'General Practitioner', value: 'General Practitioner', clientId: client.id, applicationVersion: version, roleDependency: 'Physician' },
+        { label: 'Head Nurse', value: 'Head Nurse', clientId: client.id, applicationVersion: version, roleDependency: 'Nurse' },
+        { label: 'Chief Pharmacist', value: 'Chief Pharmacist', clientId: client.id, applicationVersion: version, roleDependency: 'Pharmacist' },
+        { label: 'System Administrator', value: 'System Administrator', clientId: client.id, applicationVersion: version, roleDependency: 'Admin' },
+        { label: 'Billing Specialist', value: 'Billing Specialist', clientId: client.id, applicationVersion: version, roleDependency: 'Operator' },
+      ],
+      fieldMappings: {
+        username: '#username',
+        firstName: '#firstName',
+        middleName: '#middleName',
+        lastName: '#lastName',
+        nickName: '#nickName',
+        email: '#email',
+        mobileNumber: '#mobileNo',
+        nationality: '#nationality',
+        role: '#role',
+        profileRole: '#profileRole',
+        barcodeNumber: '#barcodeNo',
+      },
     };
+
+    ClientUsersService.formOptionsCache.set(cacheKey, { timestamp: Date.now(), data: metadata });
+    return metadata;
   }
 
   /**
