@@ -4,6 +4,8 @@
   "private": true,
   "description": "Central Multi-Client Operations and Automation Console for HMC Installations",
   "scripts": {
+    "start": "node scripts/start-all.js",
+    "dev": "node scripts/start-all.js",
     "build": "pnpm -r --filter=./packages/* --filter=./apps/* build",
     "test": "pnpm -r test",
     "test:e2e": "pnpm --filter @hmc/automation test",
