@@ -502,6 +502,37 @@ export const ClientsPage: React.FC = () => {
               </div>
             </div>
 
+            {/* Steps Checklist */}
+            <div className="border-t border-slate-800 pt-3 space-y-2">
+              {[
+                { label: 'Opening client application…', stepIdx: 1 },
+                { label: 'Loading saved credentials securely…', stepIdx: 2 },
+                { label: 'Entering username…', stepIdx: 3 },
+                { label: 'Entering password securely…', stepIdx: 4 },
+                { label: 'Submitting login…', stepIdx: 5 },
+                { label: 'Verifying authenticated session…', stepIdx: 6 },
+                { label: 'Login successful — browser ready.', stepIdx: 7 },
+              ].map((s) => {
+                const isCurrent = activeStepText.toLowerCase().includes(s.label.toLowerCase().slice(0, 10));
+                const isDone = launchStatus === 'COMPLETED';
+
+                return (
+                  <div key={s.stepIdx} className="flex items-center gap-2.5 text-xs">
+                    {isDone ? (
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : isCurrent && (launchStatus === 'RUNNING' || launchStatus === 'STARTING') ? (
+                      <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin shrink-0" />
+                    ) : (
+                      <div className="w-3.5 h-3.5 rounded-full border border-slate-700 shrink-0" />
+                    )}
+                    <span className={isDone ? 'text-emerald-300 font-medium' : isCurrent ? 'text-sky-300 font-semibold' : 'text-slate-500'}>
+                      {s.label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
             {/* Error or Warning Display */}
             {launchErrorMessage && (
               <div className="p-3 bg-red-950/60 border border-red-800 rounded-lg text-red-300 text-xs flex items-start gap-2">
@@ -514,7 +545,7 @@ export const ClientsPage: React.FC = () => {
               <div className="p-3 bg-amber-950/60 border border-amber-800 rounded-lg text-amber-300 text-xs flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <div>
-                  <strong>Security Checkpoint:</strong> Manual security verification (MFA/OTP/CAPTCHA) is required in the opened browser window. Complete verification in the window to continue.
+                  <strong>Security Checkpoint:</strong> Manual security verification is required in the opened browser window. Complete verification in the window to continue.
                 </div>
               </div>
             )}

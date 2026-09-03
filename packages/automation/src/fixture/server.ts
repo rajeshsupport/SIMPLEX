@@ -286,6 +286,20 @@ export function createFixtureApp(): express.Express {
     `);
   });
 
+  // 5. Iframe Login Wrapper Page
+  app.get('/hmc/iframe-login', (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>HMC Embedded Portal</title></head>
+      <body style="margin:0; background:#0f172a;">
+        <h1 style="color:white; padding:1rem;">Embedded Clinical Portal</h1>
+        <iframe id="loginFrame" name="loginFrame" src="/hmc/login" style="width:100%; height:600px; border:none;"></iframe>
+      </body>
+      </html>
+    `);
+  });
+
   return app;
 }
 

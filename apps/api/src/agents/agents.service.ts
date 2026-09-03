@@ -189,7 +189,13 @@ export class AgentsService {
     if (!client) throw new NotFoundException('Client not found');
 
     if (!client.credential || !client.credential.isActive) {
-      throw new BadRequestException('Client has no active credentials configured. Please configure credentials first.');
+      throw new BadRequestException('Saved login credentials are unavailable for this client. Edit the client and save valid credentials.');
+    }
+
+    try {
+      await this.clientsService.getDecryptedCredentials(client.id);
+    } catch (err: any) {
+      throw new BadRequestException('Saved credentials could not be decrypted. Re-save the client credentials.');
     }
 
     // Check available online desktop agents
