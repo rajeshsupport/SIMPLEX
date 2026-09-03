@@ -1141,10 +1141,18 @@ export class UserManagementExecutor {
   }> {
     const normTarget = targetUsername.trim().toLowerCase();
 
-    // 1. Wait for users table or grid structure
+    // 1. Wait for loading spinners/overlays to disappear if present
+    try {
+      const spinnerLoc = page.locator('.loading, .spinner, .overlay, #loadingSpinner, .loader, .page-loader, [data-testid="loading-spinner"]');
+      if ((await spinnerLoc.count()) > 0) {
+        await spinnerLoc.first().waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
+      }
+    } catch {}
+
+    // 2. Wait up to 30s for users table or grid structure to render
     const tableVisible = await page
-      .waitForSelector('table, [data-testid="users-table"], .grid-container, [data-testid="hmc-users-screen"], #usersTable, .table-responsive', {
-        timeout: 20000,
+      .waitForSelector('table, [data-testid="users-table"], .grid-container, [data-testid="hmc-users-screen"], #usersTable, .table-responsive, table tbody tr', {
+        timeout: 30000,
       })
       .catch(() => null);
 
@@ -1158,8 +1166,8 @@ export class UserManagementExecutor {
       }
       return {
         success: false,
-        errorCode: 'CLIENT_USERS_SCREEN_FAILED',
-        errorMessage: 'Simplex users table did not load or render in time.',
+        errorCode: 'CLIENT_USERS_RENDER_TIMEOUT',
+        errorMessage: 'Simplex users table did not render within 30 seconds.',
       };
     }
 

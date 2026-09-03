@@ -164,7 +164,7 @@ export class BrowserProfileManager {
     options: ProfileOptions,
     isHeadless: boolean
   ): Promise<BrowserContext> {
-    return await chromium.launchPersistentContext(userDataDir, {
+    const launchOptions: any = {
       headless: isHeadless,
       viewport: options.viewport || { width: 1440, height: 900 },
       slowMo: options.slowMo || 0,
@@ -178,7 +178,21 @@ export class BrowserProfileManager {
         '--window-position=100,100',
       ],
       ignoreHTTPSErrors: true,
-    });
+    };
+
+    if (options.isHeaded) {
+      try {
+        return await chromium.launchPersistentContext(userDataDir, {
+          ...launchOptions,
+          channel: 'chrome',
+        });
+      } catch {
+        // Fallback to bundled Chromium if Google Chrome channel is not available
+        return await chromium.launchPersistentContext(userDataDir, launchOptions);
+      }
+    }
+
+    return await chromium.launchPersistentContext(userDataDir, launchOptions);
   }
 
   /**

@@ -144,7 +144,7 @@ export class AutomationWorker {
     }
 
     // =========================================================================
-    // 2. REMOTE CLIENT MUTATION WORKFLOWS (ISOLATED HEADLESS CONTEXT)
+    // 2. REMOTE CLIENT MUTATION WORKFLOWS (VISIBLE AUTOMATED CHROME WINDOW)
     // =========================================================================
     const isMutationTask = [
       'CREATE_CLIENT_USER',
@@ -159,16 +159,18 @@ export class AutomationWorker {
     if (isMutationTask) {
       let mutationContext: BrowserContext | null = null;
       try {
-        onProgress?.(`Launching isolated headless browser for task [${task.taskType}]...`);
+        onProgress?.(`Opening secure Chrome window for task [${task.taskType}]...`);
         mutationContext = await BrowserProfileManager.launchPersistentContext({
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: false, // Strict headless isolation for all remote mutations
-          namespace: 'sync',
-          slowMo: 0,
+          isHeaded: true, // Visible automated Chrome window for remote mutations
+          namespace: 'interactive',
+          slowMo: 50,
         });
 
         const mutationPage = mutationContext.pages()[0] || (await mutationContext.newPage());
+        await mutationPage.bringToFront().catch(() => {});
+
         const appPath = task.clientAppPath || task.payload?.applicationPath;
         const usersListUrl = resolveClientRoute({
           baseUrl: task.clientBaseUrl,
@@ -192,7 +194,8 @@ export class AutomationWorker {
             fallbackRoute: '/addUsers',
           });
           const username = payloadData?.username || task.payload?.username || 'user';
-          onProgress?.(`Creating client user '${username}' on ${addUsersUrl}...`);
+          onProgress?.(`Logging in to selected Simplex client…`);
+          onProgress?.(`Opening Add User screen for '${username}'…`);
           const createRes = await UserManagementExecutor.createUser(mutationPage, {
             addUsersUrl,
             usersListUrl,
@@ -203,6 +206,7 @@ export class AutomationWorker {
           const totalDurationMs = Date.now() - startTime;
           if (createRes.success) {
             onProgress?.(`✓ Created client user ${createRes.username}`);
+            onProgress?.(`Verifying remote result…`);
             await this.agentClient.sendTelemetry(task.runId, {
               status: 'COMPLETED',
               totalDurationMs,
@@ -221,7 +225,9 @@ export class AutomationWorker {
         }
 
         if (task.taskType === 'EDIT_CLIENT_USER' || task.taskType === 'EDIT_AND_UPDATE_CLIENT') {
-          onProgress?.(`Updating client user '${task.payload.username}' on remote client...`);
+          onProgress?.(`Logging in to selected Simplex client…`);
+          onProgress?.(`Opening Users screen…`);
+          onProgress?.(`Searching for '${task.payload.username}'…`);
           const editRes = await UserManagementExecutor.editUser(mutationPage, {
             usersListUrl,
             username: task.payload.username,
@@ -242,7 +248,10 @@ export class AutomationWorker {
 
         if (task.taskType === 'SET_CLIENT_USER_STATUS' || task.taskType === 'CHANGE_CLIENT_USER_STATUS') {
           const targetStatus = task.payload.status || task.payload.targetStatus;
-          onProgress?.(`Updating status for '${task.payload.username}' to ${targetStatus} in Simplex client...`);
+          onProgress?.(`Logging in to selected Simplex client…`);
+          onProgress?.(`Opening Users screen…`);
+          onProgress?.(`Searching for '${task.payload.username}'…`);
+          onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
           const statusRes = await UserManagementExecutor.setUserStatus(mutationPage, {
             usersListUrl,
             username: task.payload.username,
@@ -252,7 +261,9 @@ export class AutomationWorker {
           });
           const totalDurationMs = Date.now() - startTime;
           if (statusRes.success) {
+            onProgress?.(`Verifying remote result…`);
             onProgress?.(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
+            onProgress?.(`Synchronizing Central data…`);
             await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: statusRes });
           } else {
             onProgress?.(`✗ Remote status verification failed: ${statusRes.errorMessage || statusRes.message}`);
@@ -267,7 +278,10 @@ export class AutomationWorker {
         }
 
         if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
-          onProgress?.(`Resetting password for '${task.payload.username}' in Simplex client...`);
+          onProgress?.(`Logging in to selected Simplex client…`);
+          onProgress?.(`Opening Users screen…`);
+          onProgress?.(`Searching for '${task.payload.username}'…`);
+          onProgress?.(`Resetting password for '${task.payload.username}' in Simplex client…`);
           const resetRes = await UserManagementExecutor.resetUserPassword(mutationPage, {
             usersListUrl,
             username: task.payload.username,
@@ -276,6 +290,7 @@ export class AutomationWorker {
           });
           const totalDurationMs = Date.now() - startTime;
           if (resetRes.success) {
+            onProgress?.(`Verifying remote result…`);
             onProgress?.(`✓ Password reset completed for '${resetRes.username}'.`);
             await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: resetRes });
           } else {
@@ -300,8 +315,9 @@ export class AutomationWorker {
       } finally {
         if (mutationContext) {
           try {
+            await new Promise((r) => setTimeout(r, 600)); // Brief display of verified result
             await mutationContext.close();
-            onProgress?.(`Isolated headless browser context closed.`);
+            onProgress?.(`Visible Chrome mutation window closed safely.`);
           } catch {}
         }
       }
