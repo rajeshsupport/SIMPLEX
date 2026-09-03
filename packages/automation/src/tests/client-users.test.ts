@@ -170,7 +170,7 @@ async function runClientUsersTests() {
     assert.strictEqual(missingTableResult.success, false);
     assert.strictEqual(missingTableResult.liveStatus, 'CACHED');
     assert.ok(
-      ['CLIENT_USER_TABLE_NOT_FOUND', 'CLIENT_USER_SYNC_TIMEOUT', 'CLIENT_USER_ACCESS_DENIED'].includes(
+      ['USER_SCREEN_STRUCTURE_NOT_RECOGNIZED', 'CLIENT_USER_TABLE_NOT_FOUND', 'CLIENT_USER_SYNC_TIMEOUT', 'CLIENT_USER_ACCESS_DENIED'].includes(
         missingTableResult.errorCode || ''
       ),
       `Expected classified error code, got ${missingTableResult.errorCode}`
@@ -296,14 +296,14 @@ async function runClientUsersTests() {
     assert.strictEqual(masterLoginUrl, 'https://staging.simplexworld.com/MasterV9.4/login', 'Must not duplicate version in login route');
     console.log('✓ TEST 14 Passed');
 
-    // 15. Sync Failure Propagation & Zero-User Failure Classification
-    console.log('\n[TEST 15] Testing Failure Propagation on CLIENT_USER_TABLE_NOT_FOUND...');
+    // 15. Sync Failure Propagation & USER_SCREEN_STRUCTURE_NOT_RECOGNIZED Classification
+    console.log('\n[TEST 15] Testing Failure Propagation on USER_SCREEN_STRUCTURE_NOT_RECOGNIZED...');
     const failSyncResult = await UserManagementExecutor.syncUsersHeadless(page, {
       usersUrl: `${BASE_URL}/nonexistent/empty/route`,
     });
-    assert.strictEqual(failSyncResult.success, false, 'Sync must fail when table not found');
+    assert.strictEqual(failSyncResult.success, false, 'Sync must fail when structure not recognized');
     assert.strictEqual(failSyncResult.totalScraped, 0, 'Zero users must be scraped on failure');
-    assert.strictEqual(failSyncResult.errorCode, 'CLIENT_USER_TABLE_NOT_FOUND', 'Error code must be preserved as CLIENT_USER_TABLE_NOT_FOUND');
+    assert.strictEqual(failSyncResult.errorCode, 'USER_SCREEN_STRUCTURE_NOT_RECOGNIZED', 'Error code must be preserved as USER_SCREEN_STRUCTURE_NOT_RECOGNIZED');
     console.log('✓ TEST 15 Passed');
 
     console.log('\n======================================================');

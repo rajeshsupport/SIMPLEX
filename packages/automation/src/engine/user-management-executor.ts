@@ -200,41 +200,87 @@ export class UserManagementExecutor {
       };
     }
 
-    // Wait for the user table or explicit empty state (10s render timeout)
+    // 1. Check loading overlays
+    try {
+      await page.locator('.loading, #loading, .spinner, .overlay, img[src*="loading" i]').first().waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+    } catch {}
+
+    // 2. Identify Screen Heading
+    const screenHeading = await page.evaluate(() => {
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, .page-title, .screen-title, .title, .heading, legend, .mm-title, [class*="title" i], [class*="header" i]'))
+        .map(el => (el.textContent || '').trim())
+        .filter(t => t.length > 0 && !t.includes('\n'));
+      return headings.find(h => /user|master|details|himes/i.test(h)) || headings[0] || 'User Details';
+    });
+
+    // 3. Multi-structure record container detection
     // Check main page and all attached frames (iframes/framesets)
     const allFrames = [page.mainFrame(), ...page.frames().filter((f) => f !== page.mainFrame())];
     let targetFrame = page.mainFrame();
-    let hasTable = false;
+    let structureEval = { structure: 'NONE', count: 0, selector: '' };
 
     for (const frame of allFrames) {
-      const tableLocator = frame.locator('table, [data-testid="users-table"], #usersTable, .user-grid, table tbody tr, table tr').first();
-      const frameHasTable = await tableLocator.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
-      if (frameHasTable) {
+      const frameStructure = await frame.evaluate(() => {
+        // 1. HTML Table rows
+        const tableRows = Array.from(document.querySelectorAll('table tbody tr, table tr:not(:first-child)'));
+        if (tableRows.length > 0) {
+          return { structure: 'HTML_TABLE', count: tableRows.length, selector: 'table tbody tr, table tr:not(:first-child)' };
+        }
+
+        // 2. Accessibility role rows
+        const roleRows = Array.from(document.querySelectorAll('[role="row"]:not(:first-child), [role="listitem"]'));
+        if (roleRows.length > 0) {
+          return { structure: 'ACCESSIBILITY_ROLE_ROW', count: roleRows.length, selector: '[role="row"]:not(:first-child), [role="listitem"]' };
+        }
+
+        // 3. AngularJS ng-repeat
+        const ngRows = Array.from(document.querySelectorAll('[ng-repeat*="user" i], [ng-repeat*="item" i], [ng-repeat*="row" i], [ng-repeat*="data" i]'));
+        if (ngRows.length > 0) {
+          return { structure: 'ANGULAR_NG_REPEAT', count: ngRows.length, selector: '[ng-repeat*="user" i], [ng-repeat*="item" i], [ng-repeat*="row" i], [ng-repeat*="data" i]' };
+        }
+
+        // 4. Div-based grid rows
+        const gridRows = Array.from(document.querySelectorAll('.ui-grid-row, .ag-row, .custom-grid-row, .user-row, .user-grid-row, [class*="user-row" i], .user-card, .user-item'));
+        if (gridRows.length > 0) {
+          return { structure: 'DIV_BASED_GRID_ROW', count: gridRows.length, selector: '.ui-grid-row, .ag-row, .custom-grid-row, .user-row, .user-grid-row, [class*="user-row" i], .user-card, .user-item' };
+        }
+
+        // 5. Flex / row containers under column headings
+        const headerLabels = Array.from(document.querySelectorAll('th, .header, .col-header, [class*="header" i]')).map(h => (h.textContent || '').trim().toLowerCase());
+        const hasUserHeaders = headerLabels.some(h => h.includes('user') || h.includes('name') || h.includes('mobile') || h.includes('status'));
+        if (hasUserHeaders) {
+          const candidateRows = Array.from(document.querySelectorAll('.row, [class*="row" i]')).filter(r => r.children.length >= 3 && r.querySelectorAll('input, button, span, div, td').length >= 3);
+          if (candidateRows.length > 0) {
+            return { structure: 'FLEX_GRID_CONTAINER', count: candidateRows.length, selector: '.row, [class*="row" i]' };
+          }
+        }
+
+        return { structure: 'NONE', count: 0, selector: '' };
+      });
+
+      if (frameStructure.count > 0) {
         targetFrame = frame;
-        hasTable = true;
-        break;
-      }
-      const anyRows = await frame.$$('tr').then((r) => r.length > 0).catch(() => false);
-      if (anyRows) {
-        targetFrame = frame;
-        hasTable = true;
+        structureEval = frameStructure;
         break;
       }
     }
 
-    const isExplicitEmpty = await page.evaluate(() => {
-      const text = document.body ? document.body.innerText.toLowerCase() : '';
-      return text.includes('no users found') || text.includes('no records available') || text.includes('no data') || text.includes('0 records');
-    });
+    // 4. If record containers are not recognized, capture sanitized diagnostics and return USER_SCREEN_STRUCTURE_NOT_RECOGNIZED
+    if (structureEval.count === 0) {
+      const diagDir = path.join(os.homedir(), '.hmc-console', 'diagnostics');
+      try {
+        fs.mkdirSync(diagDir, { recursive: true });
+        const screenshotPath = path.join(diagDir, `user_screen_${Date.now()}.png`);
+        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+      } catch {}
 
-    if (!hasTable && !isExplicitEmpty) {
       return {
         success: false,
         users: [],
         totalScraped: 0,
         liveStatus: 'CACHED',
-        errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
-        errorMessage: 'User table could not be identified on client users route.',
+        errorCode: 'USER_SCREEN_STRUCTURE_NOT_RECOGNIZED',
+        errorMessage: `User directory screen structure could not be recognized. Screen heading: "${screenHeading}".`,
         options: this.getDefaultOptions(),
       };
     }
@@ -252,11 +298,15 @@ export class UserManagementExecutor {
         count: scrapedUsersMap.size,
       });
 
-      // Scrape current page rows with header awareness from the target frame/page
-      const pageRowsData = await targetFrame.evaluate(() => {
-        // Detect column indices from headers
-        const headers = Array.from(document.querySelectorAll('table thead th, table tr:first-child th, table tr:first-child td')).map(h => (h.textContent || '').trim().toLowerCase());
-        
+      // Scrape current page rows with flexible header and container awareness
+      const pageRowsData = await targetFrame.evaluate((selector) => {
+        const rows = Array.from(document.querySelectorAll(selector));
+
+        // Detect column indices from headers or visible labels
+        const headerEls = Array.from(document.querySelectorAll('table thead th, table tr:first-child th, table tr:first-child td, [role="columnheader"], .header-cell, .grid-header, th, dt'));
+        const headers = headerEls.map(h => (h.textContent || '').trim().toLowerCase());
+
+        let colSNo = -1;
         let colFullName = -1;
         let colUsername = -1;
         let colMobile = -1;
@@ -267,7 +317,8 @@ export class UserManagementExecutor {
         let colStatus = -1;
 
         headers.forEach((h, idx) => {
-          if (h.includes('user name') || h.includes('full name')) colFullName = idx;
+          if (h.includes('s.no') || h === 'sno' || h === '#' || h.includes('sl.no')) colSNo = idx;
+          else if (h.includes('user name') || h.includes('full name')) colFullName = idx;
           else if (h === 'name' || h.includes('user id') || h.includes('username') || h.includes('login')) colUsername = idx;
           else if (h.includes('mobile') || h.includes('phone') || h.includes('contact')) colMobile = idx;
           else if (h.includes('email') || h.includes('mail')) colEmail = idx;
@@ -277,21 +328,45 @@ export class UserManagementExecutor {
           else if (h.includes('status') || h.includes('state')) colStatus = idx;
         });
 
-        const rows = Array.from(document.querySelectorAll('table tbody tr, [data-testid="user-row"], .user-table-row, table tr:not(:first-child)'));
         return rows.map((r) => {
-          const cells = Array.from(r.querySelectorAll('td')).map((c) => (c.textContent || '').trim());
+          const cells = Array.from(r.querySelectorAll('td, [role="gridcell"], [role="cell"], .cell, .grid-cell, .col, div[class*="col-"]'))
+            .map((c) => (c.textContent || '').trim());
+          
           const hasSig = r.querySelectorAll('img[src*="sig" i], a[href*="sig" i], .has-signature').length > 0;
           const hasStmp = r.querySelectorAll('img[src*="stamp" i], a[href*="stamp" i], .has-stamp').length > 0;
           const hasProf = r.querySelectorAll('img[src*="profile" i], img[src*="user" i], .user-avatar').length > 0;
-          
-          // Check cell status classes or icons
-          const statusCell = colStatus >= 0 && colStatus < cells.length ? r.querySelectorAll('td')[colStatus] : null;
-          const hasActiveIcon = statusCell ? statusCell.querySelectorAll('.glyphicon-ok, .fa-check, .text-success, .status-active, .badge-success').length > 0 : false;
-          const hasInactiveIcon = statusCell ? statusCell.querySelectorAll('.glyphicon-remove, .fa-times, .text-danger, .status-inactive, .badge-danger').length > 0 : false;
 
-          return { cells, hasSig, hasStmp, hasProf, colFullName, colUsername, colMobile, colEmail, colNationality, colRole, colProfileRole, colStatus, hasActiveIcon, hasInactiveIcon };
+          // Status detection: icon, class, label, tooltip, or accessibility text
+          const statusCell = colStatus >= 0 && colStatus < cells.length ? r.querySelectorAll('td, [role="gridcell"], .cell')[colStatus] : r;
+          const statusText = statusCell ? (statusCell.textContent || '').toUpperCase() : '';
+
+          const hasActiveIndicator =
+            statusCell.querySelectorAll('.glyphicon-ok, .fa-check, .fa-toggle-on, .text-success, .status-active, .badge-success, [title*="active" i], [aria-label*="active" i]').length > 0 ||
+            statusText.includes('ACTIVE') || statusText.includes('ENABLED') || statusText.includes('ON');
+
+          const hasInactiveIndicator =
+            statusCell.querySelectorAll('.glyphicon-remove, .fa-times, .fa-toggle-off, .text-danger, .status-inactive, .badge-danger, [title*="inactive" i], [aria-label*="inactive" i]').length > 0 ||
+            statusText.includes('INACTIVE') || statusText.includes('DISABLED') || statusText.includes('OFF') || statusText.includes('LOCKED') || statusText.includes('BLOCK');
+
+          return {
+            cells,
+            hasSig,
+            hasStmp,
+            hasProf,
+            colSNo,
+            colFullName,
+            colUsername,
+            colMobile,
+            colEmail,
+            colNationality,
+            colRole,
+            colProfileRole,
+            colStatus,
+            hasActiveIndicator,
+            hasInactiveIndicator,
+          };
         });
-      });
+      }, structureEval.selector);
 
       // Signature of current page to prevent repeated page loop
       const pageSignature = pageRowsData.map(r => r.cells.slice(0, 3).join('|')).join('::');
@@ -308,7 +383,7 @@ export class UserManagementExecutor {
       for (let i = 0; i < pageRowsData.length; i++) {
         const row = pageRowsData[i];
         const texts = row.cells;
-        if (texts.length < 3) continue;
+        if (texts.length < 2) continue;
 
         // Use header mapped indices or fall back to positional indices
         let fullName = (row.colFullName >= 0 ? texts[row.colFullName] : texts[1]) || '';
@@ -329,9 +404,9 @@ export class UserManagementExecutor {
         if (!username) continue;
 
         let status: ClientUserStatus = 'ACTIVE';
-        if (row.hasInactiveIcon || rawStatus.includes('INACTIVE') || rawStatus.includes('DISABLED') || rawStatus.includes('OFF') || rawStatus.includes('LOCKED') || rawStatus.includes('BLOCK')) {
+        if (row.hasInactiveIndicator || rawStatus.includes('INACTIVE') || rawStatus.includes('DISABLED') || rawStatus.includes('OFF') || rawStatus.includes('LOCKED') || rawStatus.includes('BLOCK')) {
           status = 'INACTIVE';
-        } else if (row.hasActiveIcon || rawStatus.includes('ACTIVE') || rawStatus.includes('ENABLED') || rawStatus.includes('ON')) {
+        } else if (row.hasActiveIndicator || rawStatus.includes('ACTIVE') || rawStatus.includes('ENABLED') || rawStatus.includes('ON')) {
           status = 'ACTIVE';
         }
 
@@ -366,7 +441,7 @@ export class UserManagementExecutor {
 
       // Look for Next page control with 5s page timeout
       const nextButton = targetFrame.locator(
-        'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i]'
+        'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i], a[title*="next" i], .page-link:has-text("›")'
       ).first();
 
       const isNextCount = await nextButton.count();
@@ -393,8 +468,8 @@ export class UserManagementExecutor {
         users: [],
         totalScraped: 0,
         liveStatus: 'CACHED',
-        errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
-        errorMessage: 'User table could not be identified or contained zero user records on client users route.',
+        errorCode: 'USER_SCREEN_STRUCTURE_NOT_RECOGNIZED',
+        errorMessage: `User directory screen structure could not be recognized. Screen heading: "${screenHeading}".`,
         options: this.getDefaultOptions(),
       };
     }
