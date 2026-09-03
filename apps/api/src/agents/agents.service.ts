@@ -278,6 +278,7 @@ export class AgentsService {
       errorMessage?: string;
       step?: AutomationRunStepTelemetry;
       totalDurationMs?: number;
+      resultData?: any;
     }
   ): Promise<void> {
     const run = await this.runRepo.findOne({ where: { id: runId } });
@@ -286,6 +287,7 @@ export class AgentsService {
     if (dto.status) run.status = dto.status;
     if (dto.errorMessage) run.errorMessage = dto.errorMessage;
     if (dto.totalDurationMs) run.totalDurationMs = dto.totalDurationMs;
+    if (dto.resultData !== undefined) run.resultSummaryJson = JSON.stringify(dto.resultData);
     if (dto.status === 'COMPLETED' || dto.status === 'FAILED' || dto.status === 'REQUIRES_MANUAL_INTERVENTION') {
       run.completedAt = new Date();
     }

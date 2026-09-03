@@ -9,13 +9,14 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "fixture": "node dist/fixture/server.js",
-    "test": "node dist/tests/automation-engine.test.js && node dist/tests/open-auto-login.test.js && node dist/tests/headed-profile-isolation.test.js && node dist/tests/profile-security.test.js"
+    "test": "node dist/tests/automation-engine.test.js && node dist/tests/open-auto-login.test.js && node dist/tests/headed-profile-isolation.test.js && node dist/tests/profile-security.test.js && node dist/tests/client-users.test.js"
   },
   "dependencies": {
     "@hmc/shared": "workspace:*",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "playwright": "^1.49.1"
+    "playwright": "^1.49.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

@@ -37,10 +37,13 @@ export const Sidebar: React.FC = () => {
       visible: hasPermission(PERMISSIONS.IMPORT_PREVIEW) || hasPermission(PERMISSIONS.SERVICE_MASTER_IMPORT),
     },
     {
-      label: 'Application Users',
+      label: 'Users',
       path: '/users',
       icon: Users,
-      visible: hasPermission(PERMISSIONS.APPLICATION_USER_MANAGE),
+      visible:
+        hasPermission(PERMISSIONS.CLIENT_USERS_VIEW) ||
+        hasPermission(PERMISSIONS.USER_MANAGEMENT_VIEW) ||
+        hasPermission(PERMISSIONS.APPLICATION_USER_MANAGE),
     },
     {
       label: 'Roles & RBAC',

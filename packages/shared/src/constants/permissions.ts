@@ -18,6 +18,18 @@ export const PERMISSIONS = {
   USER_MANAGEMENT_CREATE: 'user_management.create',
   USER_MANAGEMENT_RESET_PASSWORD: 'user_management.reset_password',
 
+  // Client Users (Target HMC Central Directory & Management)
+  CLIENT_USERS_VIEW: 'client_users.view',
+  CLIENT_USERS_SYNC: 'client_users.sync',
+  CLIENT_USERS_CREATE: 'client_users.create',
+  CLIENT_USERS_EDIT: 'client_users.edit',
+  CLIENT_USERS_STATUS_CHANGE: 'client_users.status_change',
+  CLIENT_USER_PASSWORD_RESET: 'client_user.password_reset',
+  CLIENT_USERS_IMPORT: 'client_users.import',
+  CLIENT_USERS_EXPORT: 'client_users.export',
+  CLIENT_USERS_VIEW_SIGNATURE: 'client_users.view_signature',
+  CLIENT_USERS_VIEW_PROFILE: 'client_users.view_profile',
+
   // Service Master
   SERVICE_MASTER_VIEW: 'service_master.view',
   SERVICE_MASTER_IMPORT: 'service_master.import',

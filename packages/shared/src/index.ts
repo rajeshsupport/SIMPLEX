@@ -9,6 +9,7 @@ export * from './types/workflow.js';
 export * from './types/import.js';
 export * from './types/audit.js';
 export * from './types/agent.js';
+export * from './types/client-user.js';
 
 // Validation Schemas
 export * from './schemas/auth.schema.js';

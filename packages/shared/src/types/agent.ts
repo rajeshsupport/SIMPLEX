@@ -28,7 +28,19 @@ export interface AgentHeartbeatPayload {
 
 export interface AgentTaskAssignment {
   runId: string;
-  taskType: 'INTERACTIVE_LOGIN' | 'TEST_LOGIN' | 'CREATE_USER' | 'RESET_PASSWORD' | 'CREATE_SERVICE' | 'BULK_IMPORT';
+  taskType:
+    | 'INTERACTIVE_LOGIN'
+    | 'TEST_LOGIN'
+    | 'SYNC_CLIENT_USERS'
+    | 'CREATE_CLIENT_USER'
+    | 'EDIT_CLIENT_USER'
+    | 'SET_CLIENT_USER_STATUS'
+    | 'RESET_CLIENT_USER_PASSWORD'
+    | 'BULK_IMPORT_CLIENT_USERS'
+    | 'CREATE_USER'
+    | 'RESET_PASSWORD'
+    | 'CREATE_SERVICE'
+    | 'BULK_IMPORT';
   clientId: string;
   clientBaseUrl: string;
   clientAppPath: string;

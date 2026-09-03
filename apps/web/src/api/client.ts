@@ -1,8 +1,12 @@
 const API_BASE = '/api/v1';
 
 export class ApiClient {
-  private static getAccessToken(): string | null {
+  public static getAccessToken(): string | null {
     return localStorage.getItem('hmc_access_token');
+  }
+
+  public static getBaseUrl(): string {
+    return API_BASE;
   }
 
   private static getRefreshToken(): string | null {

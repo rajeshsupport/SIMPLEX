@@ -27,6 +27,7 @@ import {
   AutomationRunStep,
   StoredFile,
   RetentionPolicy,
+  ClientUserSnapshot,
 } from './entities/index.js';
 
 export const allEntities = [
@@ -48,6 +49,7 @@ export const allEntities = [
   AutomationRunStep,
   StoredFile,
   RetentionPolicy,
+  ClientUserSnapshot,
 ];
 
 export const getDataSourceOptions = (): DataSourceOptions => {
