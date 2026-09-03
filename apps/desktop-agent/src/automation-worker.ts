@@ -4,7 +4,7 @@ import { AgentTaskAssignment, AutomationRunStepTelemetry } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
 export class AutomationWorker {
-  private activeContexts: Map<string, BrowserContext> = new Map();
+  private activeProfileContexts: Map<string, BrowserContext> = new Map();
 
   constructor(private agentClient: AgentClient) {}
 
@@ -14,21 +14,53 @@ export class AutomationWorker {
 
     let context: BrowserContext | null = null;
     let page: Page | null = null;
+    const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const profileKey = `${task.clientId}_${effectiveUserId}`;
 
     try {
-      // 1. Launch isolated persistent browser context with user profile
-      const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
-      context = await BrowserProfileManager.launchPersistentContext({
-        clientId: task.clientId,
-        userId: effectiveUserId,
-        isHeaded: task.options?.isHeaded ?? true,
-        slowMo: task.options?.slowMoMs ?? 50,
-      });
+      // 1. Check if an active browser context already exists for this client profile
+      const existingContext = this.activeProfileContexts.get(profileKey);
+      if (existingContext) {
+        try {
+          const pages = existingContext.pages();
+          if (pages.length > 0) {
+            context = existingContext;
+            page = pages[0];
+            await page.bringToFront();
+            onProgress?.(`Reusing existing active browser window for client [${task.clientId}]`);
+          }
+        } catch {
+          // Existing context is closed/invalid
+          this.activeProfileContexts.delete(profileKey);
+          context = null;
+          page = null;
+        }
+      }
 
-      this.activeContexts.set(task.runId, context);
-      page = context.pages()[0] || (await context.newPage());
+      // 2. If no valid context is open, launch persistent context with robust recovery
+      if (!context) {
+        context = await BrowserProfileManager.launchPersistentContext({
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          isHeaded: task.options?.isHeaded ?? true,
+          slowMo: task.options?.slowMoMs ?? 50,
+        });
 
-      // 2. Prepare workflow variables
+        this.activeProfileContexts.set(profileKey, context);
+        context.on('close', () => {
+          this.activeProfileContexts.delete(profileKey);
+        });
+      }
+
+      if (!context) {
+        throw new Error('Failed to initialize or launch browser context');
+      }
+
+      if (!page) {
+        page = context.pages()[0] || (await context.newPage());
+      }
+
+      // 3. Prepare workflow variables
       const variables: Record<string, any> = {
         loginUrl: `${task.clientBaseUrl}${task.loginRoute}`,
         servicesUrl: `${task.clientBaseUrl}/hmc/services`,
@@ -38,7 +70,7 @@ export class AutomationWorker {
         ...task.payload,
       };
 
-      // 3. Execute workflow steps with session reuse and error mapping
+      // 4. Execute workflow steps with session reuse and error mapping
       const result = await WorkflowExecutor.executeWorkflow(
         page,
         task.workflowVersion,
@@ -64,7 +96,7 @@ export class AutomationWorker {
         // Keep browser open for interactive user session if requested
         if (!task.options?.leaveBrowserOpen) {
           await context.close();
-          this.activeContexts.delete(task.runId);
+          this.activeProfileContexts.delete(profileKey);
         }
       } else {
         onProgress?.(`✗ Task ${task.runId} ${result.status}: ${result.errorMessage}`);
@@ -77,7 +109,7 @@ export class AutomationWorker {
         // If manual intervention required or leave open, preserve window
         if (!task.options?.leaveBrowserOpen && result.status !== 'REQUIRES_MANUAL_INTERVENTION') {
           await context.close();
-          this.activeContexts.delete(task.runId);
+          this.activeProfileContexts.delete(profileKey);
         }
       }
     } catch (err: any) {
@@ -96,11 +128,11 @@ export class AutomationWorker {
   }
 
   public async closeAllSessions(): Promise<void> {
-    for (const [runId, ctx] of this.activeContexts.entries()) {
+    for (const [key, ctx] of this.activeProfileContexts.entries()) {
       try {
         await ctx.close();
       } catch {}
     }
-    this.activeContexts.clear();
+    this.activeProfileContexts.clear();
   }
 }

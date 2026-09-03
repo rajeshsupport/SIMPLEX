@@ -93,7 +93,6 @@ export class BrowserProfileManager {
         }
       } else {
         // Windows ACL protection: Documented and enforced via icacls / user profile root inheritance
-        // On Windows NTFS, profiles inherit user-exclusive ACLs under %USERPROFILE%\.hmc-console\profiles
       }
     } catch (err: any) {
       if (err.message.includes('Security Violation')) {
@@ -105,13 +104,63 @@ export class BrowserProfileManager {
   }
 
   /**
-   * Launches a persistent Chromium context isolated to this client and user.
+   * Checks and cleans up stale/orphaned Chromium profile locks (SingletonLock, SingletonSocket, SingletonCookie).
+   * If a previous process is lingering, terminates it gracefully before unlinking locks.
    */
-  public static async launchPersistentContext(options: ProfileOptions): Promise<BrowserContext> {
-    const userDataDir = this.getProfilePath(options.clientId, options.userId);
-    const isHeadless = options.isHeaded === true ? false : true;
+  public static async releaseProfileLock(userDataDir: string): Promise<void> {
+    const lockPath = path.join(userDataDir, 'SingletonLock');
+    const socketPath = path.join(userDataDir, 'SingletonSocket');
+    const cookiePath = path.join(userDataDir, 'SingletonCookie');
 
-    const context = await chromium.launchPersistentContext(userDataDir, {
+    try {
+      if (fs.existsSync(lockPath)) {
+        try {
+          const target = fs.readlinkSync(lockPath);
+          const match = target.match(/-(\d+)$/);
+          if (match && match[1]) {
+            const pid = parseInt(match[1], 10);
+            if (pid && pid !== process.pid) {
+              try {
+                process.kill(pid, 'SIGTERM');
+                await new Promise((r) => setTimeout(r, 400));
+                try {
+                  process.kill(pid, 'SIGKILL');
+                } catch {}
+              } catch {}
+            }
+          }
+        } catch {}
+
+        try {
+          fs.rmSync(lockPath, { force: true, recursive: true });
+        } catch {}
+      }
+
+      if (fs.existsSync(socketPath)) {
+        try {
+          fs.rmSync(socketPath, { force: true, recursive: true });
+        } catch {}
+      }
+
+      if (fs.existsSync(cookiePath)) {
+        try {
+          fs.rmSync(cookiePath, { force: true, recursive: true });
+        } catch {}
+      }
+    } catch {
+      // Non-fatal lock cleanup error
+    }
+  }
+
+  /**
+   * Internal helper to launch persistent context with robust options.
+   */
+  private static async doLaunch(
+    userDataDir: string,
+    options: ProfileOptions,
+    isHeadless: boolean
+  ): Promise<BrowserContext> {
+    return await chromium.launchPersistentContext(userDataDir, {
       headless: isHeadless,
       viewport: options.viewport || { width: 1440, height: 900 },
       slowMo: options.slowMo || 0,
@@ -123,8 +172,32 @@ export class BrowserProfileManager {
       ],
       ignoreHTTPSErrors: true,
     });
+  }
 
-    return context;
+  /**
+   * Launches a persistent Chromium context isolated to this client and user.
+   * Gracefully reclaims profile lock if a stale or previous instance was terminated.
+   */
+  public static async launchPersistentContext(options: ProfileOptions): Promise<BrowserContext> {
+    const userDataDir = this.getProfilePath(options.clientId, options.userId);
+    const isHeadless = options.isHeaded === true ? false : true;
+
+    try {
+      return await this.doLaunch(userDataDir, options, isHeadless);
+    } catch (err: any) {
+      if (
+        err.message &&
+        (err.message.includes('Opening in existing browser session') ||
+          err.message.includes('profile is already in use') ||
+          err.message.includes('Process singleton'))
+      ) {
+        // Reclaim profile lock and retry
+        await this.releaseProfileLock(userDataDir);
+        await new Promise((r) => setTimeout(r, 500));
+        return await this.doLaunch(userDataDir, options, isHeadless);
+      }
+      throw err;
+    }
   }
 
   /**
