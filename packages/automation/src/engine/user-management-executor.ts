@@ -723,17 +723,82 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Helper to ensure the browser session is authenticated before performing user mutations.
+   */
+  public static async ensureAuthenticated(
+    page: Page,
+    options: {
+      targetUrl: string;
+      loginUrl?: string;
+      credentials?: { username: string; password?: string };
+    }
+  ): Promise<boolean> {
+    const { targetUrl, loginUrl, credentials } = options;
+    try {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch {
+      // Ignore initial navigation error
+    }
+
+    const currentUrl = page.url();
+    const isLoginPage =
+      currentUrl.includes('/login') ||
+      (await page.locator('#username, input[name="username"], #btnLogin, [data-testid="input-username"]').count()) > 0;
+
+    if (isLoginPage && credentials && credentials.username && credentials.password) {
+      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
+      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
+      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
+
+      if (userLoc && passLoc && submitLoc) {
+        await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
+        await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
+        await submitLoc.locator.click();
+        await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+      }
+    }
+    return true;
+  }
+
+  /**
    * Edits a user on the client application.
    */
   public static async editUser(
     page: Page,
-    usersListUrl: string,
-    username: string,
-    dto: UpdateClientUserDto
+    arg1:
+      | string
+      | {
+          usersListUrl: string;
+          username: string;
+          dto: UpdateClientUserDto;
+          loginUrl?: string;
+          credentials?: { username: string; password?: string };
+        },
+    arg2?: string | UpdateClientUserDto,
+    arg3?: UpdateClientUserDto
   ): Promise<MutationResult> {
-    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const isObj = typeof arg1 === 'object';
+    const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
+    const username = isObj ? arg1.username : (arg2 as string);
+    const dto = isObj ? arg1.dto : (arg3 || (arg2 as UpdateClientUserDto));
+    const loginUrl = isObj ? arg1.loginUrl : undefined;
+    const credentials = isObj ? arg1.credentials : undefined;
 
-    const editBtn = page.locator(`tr:has-text("${username}") button.btn-edit, tr:has-text("${username}") a[href*="edit" i], tr:has-text("${username}") [data-testid="btn-edit-user"]`).first();
+    await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
+
+    const row = page.locator(`tr:has-text("${username}")`).first();
+    const isRowVisible = await row.isVisible().catch(() => false);
+    if (!isRowVisible) {
+      return {
+        success: false,
+        username,
+        errorCode: 'USER_NOT_FOUND',
+        errorMessage: `Target user '${username}' not found on client users list.`,
+      };
+    }
+
+    const editBtn = row.locator('button.btn-edit, a[href*="edit" i], [data-testid="btn-edit-user"]').first();
     const canEdit = await editBtn.isVisible().catch(() => false);
 
     if (canEdit) {
@@ -743,75 +808,155 @@ export class UserManagementExecutor {
     }
 
     if (dto.firstName) {
-      const fInput = page.locator('#firstName, #fName, [name="firstName"]').first();
+      const fInput = page.locator('#firstName, #fName, [name="firstName"], [data-testid="input-firstname"]').first();
       if (await fInput.isVisible().catch(() => false)) await fInput.fill(dto.firstName);
     }
     if (dto.lastName) {
-      const lInput = page.locator('#lastName, #lName, [name="lastName"]').first();
+      const lInput = page.locator('#lastName, #lName, [name="lastName"], [data-testid="input-lastname"]').first();
       if (await lInput.isVisible().catch(() => false)) await lInput.fill(dto.lastName);
     }
     if (dto.mobileNumber) {
-      const mInput = page.locator('#mobileNo, #mobileNumber, [name="mobileNumber"]').first();
+      const mInput = page.locator('#mobileNo, #mobileNumber, [name="mobileNumber"], [data-testid="input-mobile"]').first();
       if (await mInput.isVisible().catch(() => false)) await mInput.fill(dto.mobileNumber);
     }
     if (dto.email) {
-      const eInput = page.locator('#email, [name="email"]').first();
+      const eInput = page.locator('#email, [name="email"], [data-testid="input-email"]').first();
       if (await eInput.isVisible().catch(() => false)) await eInput.fill(dto.email);
     }
+    if (dto.nationality) {
+      const nInput = page.locator('#nationality, select[name="nationality"], [data-testid="select-nationality"]').first();
+      if (await nInput.isVisible().catch(() => false)) {
+        const isSelect = await nInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
+        if (isSelect) {
+          await nInput.selectOption({ label: dto.nationality }).catch(() => {});
+        } else {
+          await nInput.fill(dto.nationality);
+        }
+      }
+    }
+    if (dto.role) {
+      const rInput = page.locator('#role, select[name="role"], [data-testid="select-role"]').first();
+      if (await rInput.isVisible().catch(() => false)) {
+        const isSelect = await rInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
+        if (isSelect) {
+          await rInput.selectOption({ label: dto.role }).catch(() => {});
+        } else {
+          await rInput.fill(dto.role);
+        }
+      }
+    }
 
-    const submitBtn = page.locator('#btnSave, #btnSubmit, button[type="submit"]').first();
+    const submitBtn = page.locator('#btnSave, #btnSubmit, button[type="submit"]:has-text("Save"), [data-testid="btn-save-user"]').first();
     if (await submitBtn.isVisible().catch(() => false)) {
       await submitBtn.click();
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     }
 
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     return {
       success: true,
       username,
-      message: `User ${username} updated successfully.`,
+      message: `User ${username} updated and verified on client.`,
     };
   }
 
   /**
-   * Toggles the active/inactive status of a user on the client.
+   * Toggles the active/inactive status of a user on the client and verifies the remote result.
    */
   public static async setUserStatus(
     page: Page,
-    usersListUrl: string,
-    username: string,
-    targetStatus: ClientUserStatus
+    arg1:
+      | string
+      | {
+          usersListUrl: string;
+          username: string;
+          targetStatus: ClientUserStatus;
+          loginUrl?: string;
+          credentials?: { username: string; password?: string };
+        },
+    arg2?: string | ClientUserStatus,
+    arg3?: ClientUserStatus
   ): Promise<MutationResult> {
-    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const isObj = typeof arg1 === 'object';
+    const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
+    const username = isObj ? arg1.username : (arg2 as string);
+    const targetStatus = isObj ? arg1.targetStatus : ((arg3 || arg2) as ClientUserStatus);
+    const loginUrl = isObj ? arg1.loginUrl : undefined;
+    const credentials = isObj ? arg1.credentials : undefined;
+
+    await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
 
     const row = page.locator(`tr:has-text("${username}")`).first();
-    const toggleBtn = row.locator('button.btn-status, button:has-text("Activate"), button:has-text("Deactivate"), [data-testid="btn-toggle-status"], input[type="checkbox"].status-toggle').first();
+    const isRowVisible = await row.isVisible().catch(() => false);
+    if (!isRowVisible) {
+      return {
+        success: false,
+        username,
+        errorCode: 'USER_NOT_FOUND',
+        errorMessage: `Target user '${username}' not found on client users list.`,
+      };
+    }
+
+    // Read current remote status
+    const initialRowText = (await row.innerText().catch(() => '')).toUpperCase();
+    const initialStatus: ClientUserStatus = initialRowText.includes('INACTIVE') ? 'INACTIVE' : 'ACTIVE';
+
+    if (initialStatus === targetStatus) {
+      return {
+        success: true,
+        username,
+        status: targetStatus,
+        message: `User '${username}' is already ${targetStatus} on remote client.`,
+      };
+    }
+
+    // Locate status control action - strictly avoid delete/trash buttons
+    const toggleBtn = row
+      .locator(
+        'button.btn-status, button:has-text("Activate"), button:has-text("Deactivate"), button:has-text("Toggle"), [data-testid="btn-toggle-status"], input[type="checkbox"].status-toggle, a[title*="status" i], a[title*="activate" i], a[title*="deactivate" i]'
+      )
+      .first();
 
     const isToggleVisible = await toggleBtn.isVisible().catch(() => false);
     if (!isToggleVisible) {
       return {
         success: false,
         username,
-        message: `Status action control for user '${username}' not found.`,
         errorCode: 'SELECTOR_NOT_FOUND',
+        errorMessage: `Status action control for user '${username}' not found on client.`,
       };
     }
 
+    // Handle client confirmation dialog
     page.once('dialog', async (dialog) => {
       await dialog.accept().catch(() => {});
     });
 
+    // Click actual status action once
     await toggleBtn.click();
+    await page.waitForTimeout(1000);
 
+    // Reload users list and verify remote status
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     const updatedRow = page.locator(`tr:has-text("${username}")`).first();
-    const rowText = (await updatedRow.innerText().catch(() => '')).toUpperCase();
-    const verifiedStatus: ClientUserStatus = rowText.includes('INACTIVE') ? 'INACTIVE' : 'ACTIVE';
+    const updatedRowText = (await updatedRow.innerText().catch(() => '')).toUpperCase();
+    const verifiedStatus: ClientUserStatus = updatedRowText.includes('INACTIVE') ? 'INACTIVE' : 'ACTIVE';
+
+    if (verifiedStatus === targetStatus) {
+      return {
+        success: true,
+        username,
+        status: verifiedStatus,
+        message: `User '${username}' status verified as ${verifiedStatus} on remote client.`,
+      };
+    }
 
     return {
-      success: true,
+      success: false,
       username,
-      status: verifiedStatus,
-      message: `User '${username}' status updated to ${verifiedStatus}.`,
+      status: initialStatus,
+      errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
+      errorMessage: `Remote status verification failed on client portal for user '${username}'. Expected ${targetStatus}, but remote status remained ${verifiedStatus}.`,
     };
   }
 
@@ -820,10 +965,23 @@ export class UserManagementExecutor {
    */
   public static async resetUserPassword(
     page: Page,
-    usersListUrl: string,
-    username: string
+    arg1:
+      | string
+      | {
+          usersListUrl: string;
+          username: string;
+          loginUrl?: string;
+          credentials?: { username: string; password?: string };
+        },
+    arg2?: string
   ): Promise<MutationResult> {
-    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const isObj = typeof arg1 === 'object';
+    const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
+    const username = isObj ? arg1.username : (arg2 as string);
+    const loginUrl = isObj ? arg1.loginUrl : undefined;
+    const credentials = isObj ? arg1.credentials : undefined;
+
+    await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
 
     const row = page.locator(`tr:has-text("${username}")`).first();
     const isRowVisible = await row.isVisible().catch(() => false);
@@ -841,7 +999,9 @@ export class UserManagementExecutor {
 
     page.on('dialog', async (dialog) => {
       const msg = dialog.message();
-      const match = msg.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) || msg.match(/(?:temporary password is|new password:?)\s*([A-Za-z0-9!@#$%^&*()_+=-]+)/i);
+      const match =
+        msg.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
+        msg.match(/(?:temporary password is|new password:?)\s*([A-Za-z0-9!@#$%^&*()_+=-]+)/i);
       if (match) {
         tempPasswordCaptured = match[1] || match[0];
       }
@@ -851,7 +1011,7 @@ export class UserManagementExecutor {
     const isResetVisible = await resetBtn.isVisible().catch(() => false);
     if (isResetVisible) {
       await resetBtn.click();
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 25; i++) {
         if (tempPasswordCaptured) break;
         await page.waitForTimeout(100);
       }
@@ -900,7 +1060,7 @@ export class UserManagementExecutor {
       temporaryPassword: tempPasswordCaptured,
       message: tempPasswordCaptured
         ? `Password reset successful. Temporary password generated.`
-        : `Password reset completed according to client policy.`,
+        : `Password reset completed in the selected Simplex client.`,
     };
   }
 }

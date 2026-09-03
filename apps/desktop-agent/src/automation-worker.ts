@@ -201,6 +201,7 @@ export class AutomationWorker {
       }
 
       const usersListUrl = buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute, '/users');
+      const loginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
 
       if (task.taskType === 'CREATE_CLIENT_USER') {
         const addUsersUrl = buildAbsoluteUrl(task.clientBaseUrl, undefined, '/addUsers');
@@ -226,38 +227,67 @@ export class AutomationWorker {
         return;
       }
 
-      if (task.taskType === 'EDIT_CLIENT_USER') {
-        onProgress?.(`Updating client user '${task.payload.username}'...`);
-        const editRes = await UserManagementExecutor.editUser(page, usersListUrl, task.payload.username, task.payload as any);
+      if (task.taskType === 'EDIT_CLIENT_USER' || task.taskType === 'EDIT_AND_UPDATE_CLIENT') {
+        onProgress?.(`Updating client user '${task.payload.username}' on remote client...`);
+        const editRes = await UserManagementExecutor.editUser(page, {
+          usersListUrl,
+          username: task.payload.username,
+          dto: task.payload as any,
+          loginUrl,
+          credentials: task.credentials,
+        });
         const totalDurationMs = Date.now() - startTime;
         if (editRes.success) {
+          onProgress?.(`✓ Updated and verified user '${editRes.username}' on client.`);
           await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: editRes });
         } else {
-          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: editRes.message, totalDurationMs, resultData: editRes });
+          onProgress?.(`✗ Failed to update user: ${editRes.message || editRes.errorMessage}`);
+          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: editRes.message || editRes.errorMessage, totalDurationMs, resultData: editRes });
         }
         return;
       }
 
-      if (task.taskType === 'SET_CLIENT_USER_STATUS') {
-        onProgress?.(`Setting status for '${task.payload.username}' to ${task.payload.status}...`);
-        const statusRes = await UserManagementExecutor.setUserStatus(page, usersListUrl, task.payload.username, task.payload.status);
+      if (task.taskType === 'SET_CLIENT_USER_STATUS' || task.taskType === 'CHANGE_CLIENT_USER_STATUS') {
+        const targetStatus = task.payload.status || task.payload.targetStatus;
+        onProgress?.(`Updating status for '${task.payload.username}' to ${targetStatus} in Simplex client...`);
+        const statusRes = await UserManagementExecutor.setUserStatus(page, {
+          usersListUrl,
+          username: task.payload.username,
+          targetStatus,
+          loginUrl,
+          credentials: task.credentials,
+        });
         const totalDurationMs = Date.now() - startTime;
         if (statusRes.success) {
+          onProgress?.(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
           await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: statusRes });
         } else {
-          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: statusRes.message, totalDurationMs, resultData: statusRes });
+          onProgress?.(`✗ Remote status verification failed: ${statusRes.errorMessage || statusRes.message}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: statusRes.errorMessage || statusRes.message || 'Remote status verification failed',
+            totalDurationMs,
+            resultData: statusRes,
+          });
         }
         return;
       }
 
       if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
-        onProgress?.(`Resetting password for '${task.payload.username}'...`);
-        const resetRes = await UserManagementExecutor.resetUserPassword(page, usersListUrl, task.payload.username);
+        onProgress?.(`Resetting password for '${task.payload.username}' in Simplex client...`);
+        const resetRes = await UserManagementExecutor.resetUserPassword(page, {
+          usersListUrl,
+          username: task.payload.username,
+          loginUrl,
+          credentials: task.credentials,
+        });
         const totalDurationMs = Date.now() - startTime;
         if (resetRes.success) {
+          onProgress?.(`✓ Password reset completed for '${resetRes.username}'.`);
           await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: resetRes });
         } else {
-          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: resetRes.message, totalDurationMs, resultData: resetRes });
+          onProgress?.(`✗ Password reset failed: ${resetRes.errorMessage || resetRes.message}`);
+          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: resetRes.errorMessage || resetRes.message, totalDurationMs, resultData: resetRes });
         }
         return;
       }

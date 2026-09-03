@@ -349,7 +349,8 @@ export const UsersPage: React.FC = () => {
             } else if (statusRes.errorCode === 'CLIENT_USER_ACCESS_DENIED') {
               friendlyError = 'Client portal returned Access Denied for configured users route.';
             }
-            const failMsg = `Sync failed: ${friendlyError}`;
+            const cleanError = friendlyError.replace(/^Sync failed:\s*/i, '');
+            const failMsg = `Sync failed: ${cleanError}`;
             setSyncProgressMessage(failMsg);
             setActionMessage({ type: 'error', text: failMsg });
             break;
@@ -370,7 +371,8 @@ export const UsersPage: React.FC = () => {
       if (err.response?.code === 'DESKTOP_AGENT_OFFLINE' || err.message?.includes('offline')) {
         friendlyError = 'Automation agent is offline.';
       }
-      const failMsg = `Sync failed: ${friendlyError}`;
+      const cleanError = friendlyError.replace(/^Sync failed:\s*/i, '');
+      const failMsg = `Sync failed: ${cleanError}`;
       setSyncProgressMessage(failMsg);
       setActionMessage({ type: 'error', text: failMsg });
     } finally {
@@ -411,66 +413,87 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  // Edit User
+  // Edit User (Save & Update Simplex)
+  const [isMutatingEdit, setIsMutatingEdit] = useState(false);
   const handleEditUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedUser) return;
+    if (!selectedUser || isMutatingEdit) return;
+    setIsMutatingEdit(true);
     try {
       await ApiClient.request(`/client-users/${selectedUser.id}`, {
         method: 'PUT',
         body: JSON.stringify(editForm),
       });
       setIsEditModalOpen(false);
-      setActionMessage({ type: 'success', text: `✓ User '${selectedUser.username}' updated successfully.` });
+      setActionMessage({ type: 'success', text: `✓ User '${selectedUser.username}' updated and verified in ${selectedClient?.clientCode || 'Simplex'}.` });
       await loadUsers();
     } catch (err: any) {
-      alert(`Update failed: ${err.message}`);
+      const cleanError = (err.message || 'Update failed').replace(/^Sync failed:\s*/i, '');
+      setActionMessage({ type: 'error', text: `Update failed: ${cleanError}` });
+    } finally {
+      setIsMutatingEdit(false);
     }
   };
 
-  // Status Change
+  // Status Change (Activate/Deactivate in Simplex)
+  const [isMutatingStatus, setIsMutatingStatus] = useState(false);
   const handleStatusChange = async () => {
-    if (!selectedUser) return;
+    if (!selectedUser || isMutatingStatus) return;
     const nextStatus = selectedUser.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    setIsMutatingStatus(true);
     try {
       await ApiClient.request(`/client-users/${selectedUser.id}/status`, {
         method: 'POST',
         body: JSON.stringify({ status: nextStatus }),
       });
       setIsStatusModalOpen(false);
-      setActionMessage({ type: 'success', text: `✓ User '${selectedUser.username}' set to ${nextStatus}.` });
+      setActionMessage({ type: 'success', text: `✓ User '${selectedUser.username}' status updated to ${nextStatus} in ${selectedClient?.clientCode || 'Simplex'}.` });
       await loadUsers();
     } catch (err: any) {
-      alert(`Status update failed: ${err.message}`);
+      const cleanError = (err.message || 'Status update failed').replace(/^Sync failed:\s*/i, '');
+      setActionMessage({ type: 'error', text: `Status update failed: ${cleanError}` });
+    } finally {
+      setIsMutatingStatus(false);
     }
   };
 
-  // Password Reset
-  const handleResetPassword = async () => {
-    if (!selectedUser) return;
+  // Password Reset in Simplex
+  const [isResetConfirmModalOpen, setIsResetConfirmModalOpen] = useState(false);
+  const [isMutatingReset, setIsMutatingReset] = useState(false);
+  const handleResetPasswordExecute = async () => {
+    if (!selectedUser || isMutatingReset) return;
+    setIsMutatingReset(true);
     try {
       const res = await ApiClient.request<{ temporaryPassword?: string; message: string }>(
         `/client-users/${selectedUser.id}/reset-password`,
         { method: 'POST' }
       );
-      setTempPassword(res.temporaryPassword || 'TempPass@1234');
-      setShowPassword(false);
-      setPasswordCountdown(60);
-      setIsResetModalOpen(true);
+      setIsResetConfirmModalOpen(false);
+      if (res.temporaryPassword) {
+        setTempPassword(res.temporaryPassword);
+        setShowPassword(false);
+        setPasswordCountdown(60);
+        setIsResetModalOpen(true);
 
-      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-      countdownTimerRef.current = setInterval(() => {
-        setPasswordCountdown((prev) => {
-          if (prev <= 1) {
-            if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-            setTempPassword(null);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
+        if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = setInterval(() => {
+          setPasswordCountdown((prev) => {
+            if (prev <= 1) {
+              if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+              setTempPassword(null);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      } else {
+        setActionMessage({ type: 'success', text: `✓ ${res.message || 'Password reset completed in the selected Simplex client.'}` });
+      }
     } catch (err: any) {
-      alert(`Password reset failed: ${err.message}`);
+      const cleanError = (err.message || 'Password reset failed').replace(/^Sync failed:\s*/i, '');
+      setActionMessage({ type: 'error', text: `Password reset failed: ${cleanError}` });
+    } finally {
+      setIsMutatingReset(false);
     }
   };
 
@@ -869,22 +892,22 @@ export const UsersPage: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {/* View Details */}
+                          {/* View */}
                           <button
                             onClick={() => {
                               setSelectedUser(u);
                               setIsViewModalOpen(true);
                             }}
-                            title="View User Details"
-                            aria-label={`View user details for ${u.username}`}
+                            title="View"
+                            aria-label={`View user ${u.username}`}
                             className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors"
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
 
-                          {/* Edit User */}
+                          {/* Edit & Update Client */}
                           {canEdit && (() => {
-                            const mutation = getMutationState('Edit User');
+                            const mutation = getMutationState('Edit & Update Client');
                             return (
                               <button
                                 disabled={mutation.disabled}
@@ -907,7 +930,7 @@ export const UsersPage: React.FC = () => {
                                   setIsEditModalOpen(true);
                                 }}
                                 title={mutation.title}
-                                aria-label={`Edit user ${u.username}`}
+                                aria-label={`Edit & Update Client for ${u.username}`}
                                 className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
@@ -915,9 +938,9 @@ export const UsersPage: React.FC = () => {
                             );
                           })()}
 
-                          {/* Activate / Deactivate Toggle */}
+                          {/* Activate / Deactivate in Simplex */}
                           {canChangeStatus && (() => {
-                            const actionLabel = isActive ? 'Deactivate User' : 'Activate User';
+                            const actionLabel = isActive ? 'Deactivate in Simplex' : 'Activate in Simplex';
                             const mutation = getMutationState(actionLabel);
                             return (
                               <button
@@ -940,19 +963,19 @@ export const UsersPage: React.FC = () => {
                             );
                           })()}
 
-                          {/* Reset Password */}
+                          {/* Reset Password in Simplex */}
                           {canResetPassword && (() => {
-                            const mutation = getMutationState('Reset Password on Client');
+                            const mutation = getMutationState('Reset Password in Simplex');
                             return (
                               <button
                                 disabled={mutation.disabled}
                                 onClick={() => {
                                   if (mutation.disabled) return;
                                   setSelectedUser(u);
-                                  handleResetPassword();
+                                  setIsResetConfirmModalOpen(true);
                                 }}
                                 title={mutation.title}
-                                aria-label={`Reset password for ${u.username}`}
+                                aria-label={`Reset Password in Simplex for ${u.username}`}
                                 className="p-1.5 text-slate-400 hover:text-yellow-400 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
                               >
                                 <KeyRound className="w-3.5 h-3.5" />
@@ -1314,9 +1337,17 @@ export const UsersPage: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Modal: Edit User */}
-      <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title={`Edit User: ${selectedUser?.username}`}>
+      {/* Modal: Edit & Update Client User */}
+      <Modal
+        isOpen={isEditModalOpen}
+        onClose={() => !isMutatingEdit && setIsEditModalOpen(false)}
+        title={`Edit & Update Client: ${selectedUser?.username}`}
+      >
         <form onSubmit={handleEditUser} className="space-y-4 text-xs">
+          <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded text-slate-400 text-[11px]">
+            Target Client: <span className="text-white font-semibold">{selectedClient?.clientCode}</span> • Username: <span className="text-sky-400 font-mono font-semibold">{selectedUser?.username}</span>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-slate-400 mb-1">First Name *</label>
@@ -1342,9 +1373,10 @@ export const UsersPage: React.FC = () => {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-slate-400 mb-1">Mobile Number</label>
+              <label className="block text-slate-400 mb-1">Mobile Number *</label>
               <input
                 type="tel"
+                required
                 value={editForm.mobileNumber}
                 onChange={(e) => setEditForm({ ...editForm, mobileNumber: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white font-mono"
@@ -1391,52 +1423,103 @@ export const UsersPage: React.FC = () => {
           <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
             <button
               type="button"
+              disabled={isMutatingEdit}
               onClick={() => setIsEditModalOpen(false)}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded font-semibold shadow"
+              disabled={isMutatingEdit}
+              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow disabled:opacity-50"
             >
-              Save Changes
+              {isMutatingEdit ? 'Updating Simplex…' : 'Save & Update Simplex'}
             </button>
           </div>
         </form>
       </Modal>
 
-      {/* Modal: Activate/Deactivate Confirmation */}
-      <Modal isOpen={isStatusModalOpen} onClose={() => setIsStatusModalOpen(false)} title="Confirm Status Change">
+      {/* Modal: Activate/Deactivate Confirmation in Simplex */}
+      <Modal
+        isOpen={isStatusModalOpen}
+        onClose={() => !isMutatingStatus && setIsStatusModalOpen(false)}
+        title={selectedUser?.status === 'ACTIVE' ? 'Deactivate in Simplex' : 'Activate in Simplex'}
+      >
         {selectedUser && (
           <div className="space-y-4 text-xs">
-            <p className="text-slate-300">
+            <p className="text-slate-300 text-sm">
               {selectedUser.status === 'ACTIVE'
-                ? `Deactivate ${selectedUser.username} for ${selectedUser.clientName}?`
-                : `Activate ${selectedUser.username} for ${selectedUser.clientName}?`}
+                ? `Deactivate ${selectedUser.username} in ${selectedClient?.clientCode || selectedUser.clientName}? This will update the selected Simplex client application.`
+                : `Activate ${selectedUser.username} in ${selectedClient?.clientCode || selectedUser.clientName}? This will update the selected Simplex client application.`}
             </p>
             <p className="text-slate-500 text-[11px]">
-              This will execute the real status toggle on the remote client application via the desktop agent and verify the persisted state.
+              This will execute the real status change on the target Simplex client application via the desktop automation agent, verify remote success, and automatically pull the updated status into Central Console.
             </p>
 
             <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
               <button
                 type="button"
+                disabled={isMutatingStatus}
                 onClick={() => setIsStatusModalOpen(false)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
+                disabled={isMutatingStatus}
                 onClick={handleStatusChange}
-                className={`px-4 py-2 rounded font-semibold text-white shadow ${
+                className={`px-4 py-2 rounded font-semibold text-white shadow disabled:opacity-50 ${
                   selectedUser.status === 'ACTIVE'
                     ? 'bg-red-600 hover:bg-red-500'
                     : 'bg-emerald-600 hover:bg-emerald-500'
                 }`}
               >
-                Confirm {selectedUser.status === 'ACTIVE' ? 'Deactivation' : 'Activation'}
+                {isMutatingStatus
+                  ? 'Updating in Simplex…'
+                  : selectedUser.status === 'ACTIVE'
+                  ? 'Deactivate in Simplex'
+                  : 'Activate in Simplex'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Reset Password in Simplex Confirmation */}
+      <Modal
+        isOpen={isResetConfirmModalOpen}
+        onClose={() => !isMutatingReset && setIsResetConfirmModalOpen(false)}
+        title="Reset Password in Simplex"
+      >
+        {selectedUser && (
+          <div className="space-y-4 text-xs">
+            <p className="text-slate-300 text-sm">
+              Reset password for <span className="font-semibold text-white">{selectedUser.username}</span> in{' '}
+              <span className="font-semibold text-white">{selectedClient?.clientCode || selectedUser.clientName}</span>?
+              This will update the selected Simplex client application.
+            </p>
+            <p className="text-slate-500 text-[11px]">
+              The automation agent will execute the password reset workflow on the target Simplex portal. Any returned temporary password will be displayed once for 60 seconds.
+            </p>
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isMutatingReset}
+                onClick={() => setIsResetConfirmModalOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isMutatingReset}
+                onClick={handleResetPasswordExecute}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded font-semibold shadow disabled:opacity-50"
+              >
+                {isMutatingReset ? 'Resetting in Simplex…' : 'Reset Password in Simplex'}
               </button>
             </div>
           </div>

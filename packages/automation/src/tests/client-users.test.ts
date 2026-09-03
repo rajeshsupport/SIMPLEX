@@ -352,7 +352,10 @@ async function runClientUsersTests() {
       'INACTIVE'
     );
     assert.strictEqual(nonExistentRes.success, false, 'Non-existent user status update must fail');
-    assert.strictEqual(nonExistentRes.errorCode, 'SELECTOR_NOT_FOUND', 'Must return SELECTOR_NOT_FOUND error code');
+    assert.ok(
+      ['USER_NOT_FOUND', 'SELECTOR_NOT_FOUND'].includes(nonExistentRes.errorCode || ''),
+      `Must return USER_NOT_FOUND or SELECTOR_NOT_FOUND, got ${nonExistentRes.errorCode}`
+    );
     console.log('✓ TEST 19 Passed');
 
     // 20. Ephemeral Password Lifecycle & Zero Plaintext Logging

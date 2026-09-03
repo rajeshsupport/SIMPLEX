@@ -39,9 +39,16 @@ export class AutomationRun {
     | 'INTERACTIVE_LOGIN'
     | 'TEST_LOGIN'
     | 'CREATE_USER'
+    | 'CREATE_CLIENT_USER'
+    | 'EDIT_CLIENT_USER'
+    | 'EDIT_AND_UPDATE_CLIENT'
+    | 'SET_CLIENT_USER_STATUS'
+    | 'CHANGE_CLIENT_USER_STATUS'
+    | 'RESET_CLIENT_USER_PASSWORD'
     | 'RESET_PASSWORD'
     | 'CREATE_SERVICE'
-    | 'BULK_IMPORT';
+    | 'BULK_IMPORT'
+    | 'BULK_IMPORT_CLIENT_USERS';
 
   @Index()
   @Column({ type: 'nvarchar', length: 50, default: 'QUEUED' })

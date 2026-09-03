@@ -737,7 +737,7 @@ export class ClientUsersService {
   }
 
   /**
-   * Updates an existing user on the client.
+   * Updates an existing user on the remote client with verification and automatic pull sync.
    */
   async updateClientUser(id: string, dto: UpdateClientUserDto, user: JwtPayload): Promise<ClientUser> {
     const snapshot = await this.snapshotRepo.findOne({ where: { id } });
@@ -756,25 +756,91 @@ export class ClientUsersService {
     const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
 
     try {
-      if (dto.firstName) snapshot.firstName = dto.firstName.trim();
-      if (dto.middleName !== undefined) snapshot.middleName = dto.middleName ? dto.middleName.trim() : null;
-      if (dto.lastName) snapshot.lastName = dto.lastName.trim();
-      snapshot.fullName = `${snapshot.firstName} ${snapshot.middleName ? snapshot.middleName + ' ' : ''}${snapshot.lastName}`.trim();
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException({
+          code: 'DESKTOP_AGENT_OFFLINE',
+          message: 'Update failed: Automation agent is offline.',
+        });
+      }
 
-      if (dto.nickName !== undefined) snapshot.nickName = dto.nickName ? dto.nickName.trim() : null;
-      if (dto.email !== undefined) snapshot.email = dto.email ? dto.email.trim() : null;
-      if (dto.mobileNumber !== undefined) snapshot.mobileNumber = dto.mobileNumber ? dto.mobileNumber.trim() : null;
-      if (dto.nationality !== undefined) snapshot.nationality = dto.nationality;
-      if (dto.role !== undefined) snapshot.role = dto.role;
-      if (dto.profileRole !== undefined) snapshot.profileRole = dto.profileRole;
-      if (dto.status !== undefined) snapshot.status = dto.status;
-      if (dto.barcodeNumber !== undefined) snapshot.barcodeNumber = dto.barcodeNumber;
-      if (dto.signatureBase64) snapshot.hasSignature = true;
-      if (dto.stampBase64) snapshot.hasStamp = true;
-      if (dto.profileBase64) snapshot.hasProfileImage = true;
-      snapshot.lastSyncedAt = new Date();
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
 
-      const saved = await this.snapshotRepo.save(snapshot);
+      const routes = this.resolveClientUserRoutes(client);
+      const correlationId = crypto.randomUUID();
+
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'EDIT_CLIENT_USER',
+        status: 'PENDING',
+        parametersJson: JSON.stringify({
+          taskType: 'EDIT_CLIENT_USER',
+          userId: user.sub,
+          username: snapshot.username,
+          clientBaseUrl: client.baseUrl,
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: routes.resolvedUsersUrl,
+          credentials,
+          payload: {
+            username: snapshot.username,
+            ...dto,
+          },
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      });
+
+      const savedRun = await this.runRepo.save(run);
+
+      // Wait for agent completion and remote verification (up to 20s)
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+      while (Date.now() - startTime < 20000) {
+        await new Promise((r) => setTimeout(r, 300));
+        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+          completedRun = r;
+          break;
+        }
+      }
+
+      if (!completedRun || completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+        let errorCode = 'REMOTE_EDIT_FAILED';
+        let errorMsg = completedRun?.errorMessage || 'User edit failed on remote client portal.';
+        try {
+          const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
+          if (parsed.errorCode) errorCode = parsed.errorCode;
+          if (parsed.errorMessage) errorMsg = parsed.errorMessage;
+        } catch {}
+        throw new BadRequestException({
+          code: errorCode,
+          message: errorMsg,
+        });
+      }
+
+      // Remote verification succeeded -> Trigger automatic pull sync
+      await this.syncClientUsers(client.id, user);
+
+      const updatedSnapshot = await this.snapshotRepo.findOne({ where: { id } });
+      if (!updatedSnapshot) throw new NotFoundException(`User ${id} not found after sync`);
 
       await this.auditRepo.save(
         this.auditRepo.create({
@@ -784,19 +850,23 @@ export class ClientUsersService {
           entityType: 'CLIENT_USER',
           entityId: id,
           result: 'SUCCESS',
-          correlationId: crypto.randomUUID(),
-          detailsJson: JSON.stringify({ clientCode: client.clientCode, username: snapshot.username }),
+          correlationId,
+          detailsJson: JSON.stringify({
+            clientCode: client.clientCode,
+            username: snapshot.username,
+            runId: savedRun.id,
+          }),
         })
       );
 
-      return this.mapToDto(saved, client);
+      return this.mapToDto(updatedSnapshot, client);
     } finally {
       releaseLock();
     }
   }
 
   /**
-   * Sets the active/inactive status of a client user.
+   * Sets the active/inactive status of a client user on the remote client with verification and automatic pull sync.
    */
   async setUserStatus(id: string, targetStatus: ClientUserStatus, user: JwtPayload): Promise<ClientUser> {
     const snapshot = await this.snapshotRepo.findOne({ where: { id } });
@@ -815,10 +885,95 @@ export class ClientUsersService {
     const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
 
     try {
-      const previousStatus = snapshot.status;
-      snapshot.status = targetStatus;
-      snapshot.lastSyncedAt = new Date();
-      const saved = await this.snapshotRepo.save(snapshot);
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException({
+          code: 'DESKTOP_AGENT_OFFLINE',
+          message: 'Status update failed: Automation agent is offline.',
+        });
+      }
+
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
+
+      const routes = this.resolveClientUserRoutes(client);
+      const correlationId = crypto.randomUUID();
+
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'CHANGE_CLIENT_USER_STATUS',
+        status: 'PENDING',
+        parametersJson: JSON.stringify({
+          taskType: 'CHANGE_CLIENT_USER_STATUS',
+          userId: user.sub,
+          remoteUserId: snapshot.remoteUserId,
+          username: snapshot.username,
+          currentStatus: snapshot.status,
+          targetStatus,
+          clientBaseUrl: client.baseUrl,
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: routes.resolvedUsersUrl,
+          credentials,
+          idempotencyKey: crypto.randomUUID(),
+          payload: {
+            username: snapshot.username,
+            status: targetStatus,
+            targetStatus,
+          },
+        }),
+      });
+
+      const savedRun = await this.runRepo.save(run);
+
+      // Wait for agent completion and remote verification (up to 20s)
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+      while (Date.now() - startTime < 20000) {
+        await new Promise((r) => setTimeout(r, 300));
+        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+          completedRun = r;
+          break;
+        }
+      }
+
+      if (!completedRun || completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+        let errorCode = 'REMOTE_STATUS_VERIFICATION_FAILED';
+        let errorMsg = completedRun?.errorMessage || 'Remote status verification failed on client portal.';
+        try {
+          const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
+          if (parsed.errorCode) errorCode = parsed.errorCode;
+          if (parsed.errorMessage) errorMsg = parsed.errorMessage;
+        } catch {}
+        throw new BadRequestException({
+          code: errorCode,
+          message: errorMsg,
+        });
+      }
+
+      // Remote verification succeeded -> Trigger automatic pull sync
+      await this.syncClientUsers(client.id, user);
+
+      const updatedSnapshot = await this.snapshotRepo.findOne({ where: { id } });
+      if (!updatedSnapshot) throw new NotFoundException(`User ${id} not found after sync`);
 
       await this.auditRepo.save(
         this.auditRepo.create({
@@ -828,24 +983,25 @@ export class ClientUsersService {
           entityType: 'CLIENT_USER',
           entityId: id,
           result: 'SUCCESS',
-          correlationId: crypto.randomUUID(),
+          correlationId,
           detailsJson: JSON.stringify({
             clientCode: client.clientCode,
             username: snapshot.username,
-            previousStatus,
+            previousStatus: snapshot.status,
             finalStatus: targetStatus,
+            runId: savedRun.id,
           }),
         })
       );
 
-      return this.mapToDto(saved, client);
+      return this.mapToDto(updatedSnapshot, client);
     } finally {
       releaseLock();
     }
   }
 
   /**
-   * Resets password and returns one-time temporary password.
+   * Resets password on the remote client with verification and returns one-time temporary password.
    */
   async resetUserPassword(id: string, user: JwtPayload): Promise<{ temporaryPassword?: string; message: string }> {
     const snapshot = await this.snapshotRepo.findOne({ where: { id } });
@@ -864,8 +1020,96 @@ export class ClientUsersService {
     const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
 
     try {
-      // Generate a secure temporary password to be delivered once
-      const tempPassword = `Tmp@${crypto.randomBytes(4).toString('hex')}!${Math.floor(100 + Math.random() * 900)}`;
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException({
+          code: 'DESKTOP_AGENT_OFFLINE',
+          message: 'Password reset failed: Automation agent is offline.',
+        });
+      }
+
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
+
+      const routes = this.resolveClientUserRoutes(client);
+      const correlationId = crypto.randomUUID();
+
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'RESET_CLIENT_USER_PASSWORD',
+        status: 'PENDING',
+        parametersJson: JSON.stringify({
+          taskType: 'RESET_CLIENT_USER_PASSWORD',
+          userId: user.sub,
+          username: snapshot.username,
+          clientBaseUrl: client.baseUrl,
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: routes.resolvedUsersUrl,
+          credentials,
+          payload: {
+            username: snapshot.username,
+          },
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      });
+
+      const savedRun = await this.runRepo.save(run);
+
+      // Wait for agent completion and remote verification (up to 20s)
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+      while (Date.now() - startTime < 20000) {
+        await new Promise((r) => setTimeout(r, 300));
+        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+          completedRun = r;
+          break;
+        }
+      }
+
+      if (!completedRun || completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+        let errorCode = 'RESET_PASSWORD_FAILED';
+        let errorMsg = completedRun?.errorMessage || 'Password reset failed on remote client portal.';
+        try {
+          const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
+          if (parsed.errorCode) errorCode = parsed.errorCode;
+          if (parsed.errorMessage) errorMsg = parsed.errorMessage;
+        } catch {}
+        throw new BadRequestException({
+          code: errorCode,
+          message: errorMsg,
+        });
+      }
+
+      let tempPassword: string | undefined = undefined;
+      let message = 'Password reset completed in the selected Simplex client.';
+      try {
+        const parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
+        if (parsed.temporaryPassword) {
+          tempPassword = parsed.temporaryPassword;
+          message = `Password for ${snapshot.username} reset successfully. Temporary password generated.`;
+        } else if (parsed.message) {
+          message = parsed.message;
+        }
+      } catch {}
 
       await this.auditRepo.save(
         this.auditRepo.create({
@@ -875,14 +1119,18 @@ export class ClientUsersService {
           entityType: 'CLIENT_USER',
           entityId: id,
           result: 'SUCCESS',
-          correlationId: crypto.randomUUID(),
-          detailsJson: JSON.stringify({ clientCode: client.clientCode, username: snapshot.username }),
+          correlationId,
+          detailsJson: JSON.stringify({
+            clientCode: client.clientCode,
+            username: snapshot.username,
+            runId: savedRun.id,
+          }),
         })
       );
 
       return {
         temporaryPassword: tempPassword,
-        message: `Password for ${snapshot.username} reset successfully. Temporary password generated.`,
+        message,
       };
     } finally {
       releaseLock();
