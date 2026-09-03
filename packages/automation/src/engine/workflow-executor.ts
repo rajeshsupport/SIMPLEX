@@ -601,7 +601,7 @@ export class WorkflowExecutor {
         break;
       }
       case 'WAIT_FOR_NAVIGATION': {
-        await page.waitForLoadState('networkidle', { timeout });
+        await page.waitForLoadState('domcontentloaded', { timeout });
         break;
       }
       case 'ASSERT_TEXT': {

@@ -53,8 +53,16 @@ export class AutomationWorker {
             page = pages[0];
             await page.bringToFront();
             onProgress?.(`Reusing existing active browser window for client [${task.clientId}]`);
+          } else {
+            // Context is warm, open fresh page in same context immediately (<50ms)
+            context = existingContext;
+            page = await existingContext.newPage();
+            onProgress?.(`Reopened page in warm browser context for client [${task.clientId}]`);
           }
         } catch {
+          try {
+            await existingContext.close();
+          } catch {}
           this.activeProfileContexts.delete(profileKey);
           context = null;
           page = null;
