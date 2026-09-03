@@ -182,25 +182,89 @@ export const UsersPage: React.FC = () => {
     loadUsers();
   }, [selectedClientId, search, statusFilter, roleFilter, page]);
 
+  const [syncProgressMessage, setSyncProgressMessage] = useState<string | null>(null);
+  const [directoryStatus, setDirectoryStatus] = useState<'LIVE' | 'CACHED'>('CACHED');
+
   // Sync Users
   const handleSyncUsers = async () => {
     if (!selectedClientId || syncing) return;
     try {
       setSyncing(true);
-      setActionMessage({ type: 'info', text: 'Connecting to client and scraping live user directory…' });
-      const res = await ApiClient.request<ClientUserListResponse>('/client-users/sync', {
+      setSyncProgressMessage('Connecting securely…');
+      setActionMessage({ type: 'info', text: 'Connecting securely to client portal…' });
+
+      const syncJob = await ApiClient.request<{ jobId: string; status: string; message: string }>('/client-users/sync-job', {
         method: 'POST',
         body: JSON.stringify({ clientId: selectedClientId }),
       });
-      setUsers(res.users || []);
-      setTotalCount(res.totalCount || 0);
-      setLastSyncedAt(res.lastSyncedAt || new Date().toISOString());
-      setActionMessage({ type: 'success', text: `✓ Synchronized ${res.totalCount} users successfully from client.` });
+
+      let isComplete = false;
+      let attempts = 0;
+
+      while (!isComplete && attempts < 60) {
+        attempts++;
+        await new Promise((r) => setTimeout(r, 350));
+
+        try {
+          const statusRes = await ApiClient.request<{
+            status: string;
+            progressMessage?: string;
+            errorMessage?: string;
+            errorCode?: string;
+            totalScraped?: number;
+            liveStatus?: 'LIVE' | 'CACHED';
+            streamedUsers?: any[];
+          }>(`/client-users/sync-status/${syncJob.jobId}`);
+
+          if (statusRes.progressMessage) {
+            setSyncProgressMessage(statusRes.progressMessage);
+          }
+
+          if (statusRes.status === 'COMPLETED') {
+            isComplete = true;
+            setDirectoryStatus('LIVE');
+            setSyncProgressMessage(`${statusRes.totalScraped || 0} users synchronized successfully.`);
+            setActionMessage({
+              type: 'success',
+              text: `✓ ${statusRes.totalScraped || 0} users synchronized successfully from client.`,
+            });
+            await loadUsers();
+            break;
+          } else if (statusRes.status === 'FAILED') {
+            isComplete = true;
+            let friendlyError = statusRes.errorMessage || 'Background user sync failed.';
+            if (statusRes.errorCode === 'CLIENT_BACKGROUND_LOGIN_FAILED') {
+              friendlyError = 'Background authentication failed on client portal. Check saved credentials.';
+            } else if (statusRes.errorCode === 'CLIENT_USER_ROUTE_VERSION_MISMATCH') {
+              friendlyError = 'Application version does not match configured users route.';
+            } else if (statusRes.errorCode === 'CLIENT_USER_TABLE_NOT_FOUND') {
+              friendlyError = 'User directory table could not be identified on client portal.';
+            } else if (statusRes.errorCode === 'CLIENT_USER_ACCESS_DENIED') {
+              friendlyError = 'Client portal returned Access Denied for configured users route.';
+            } else if (statusRes.errorCode === 'DESKTOP_AGENT_OFFLINE') {
+              friendlyError = 'Desktop browser automation agent is offline.';
+            }
+            setSyncProgressMessage(`Sync failed: ${friendlyError}`);
+            setActionMessage({ type: 'error', text: `Sync failed: ${friendlyError}` });
+            break;
+          }
+        } catch {}
+      }
     } catch (err: any) {
-      setActionMessage({ type: 'error', text: `Sync failed: ${err.message}` });
+      let friendlyError = err.message || 'Sync failed';
+      if (err.response?.code === 'CLIENT_BACKGROUND_LOGIN_FAILED') {
+        friendlyError = 'Background authentication failed on client portal.';
+      } else if (err.response?.code === 'CLIENT_USER_ROUTE_VERSION_MISMATCH') {
+        friendlyError = 'Application version does not match configured users route.';
+      }
+      setSyncProgressMessage(`Sync failed: ${friendlyError}`);
+      setActionMessage({ type: 'error', text: `Sync failed: ${friendlyError}` });
     } finally {
       setSyncing(false);
-      setTimeout(() => setActionMessage(null), 5000);
+      setTimeout(() => {
+        setSyncProgressMessage(null);
+        setActionMessage(null);
+      }, 6000);
     }
   };
 
@@ -432,10 +496,14 @@ export const UsersPage: React.FC = () => {
 
           <div className="flex items-center gap-4">
             <div className="text-right">
-              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Directory Snapshot</span>
-              <span className="text-slate-300 font-mono">
-                {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : 'Not synchronized yet'}
-              </span>
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Directory Status</span>
+              <div className="flex items-center gap-1.5 justify-end">
+                <span className={`w-2 h-2 rounded-full ${directoryStatus === 'LIVE' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                <span className="text-slate-300 font-mono text-xs">
+                  {directoryStatus === 'LIVE' ? 'LIVE' : 'CACHED'}
+                  {lastSyncedAt ? ` — ${new Date(lastSyncedAt).toLocaleTimeString()}` : ''}
+                </span>
+              </div>
             </div>
 
             <button
@@ -447,6 +515,13 @@ export const UsersPage: React.FC = () => {
               {syncing ? 'Syncing...' : 'Sync Users'}
             </button>
           </div>
+        </div>
+      )}
+
+      {syncProgressMessage && (
+        <div className="flex items-center gap-2.5 p-3 rounded-lg border bg-sky-950/40 border-sky-800/80 text-sky-300 text-xs font-semibold shadow-sm animate-pulse">
+          <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+          <span>{syncProgressMessage}</span>
         </div>
       )}
 

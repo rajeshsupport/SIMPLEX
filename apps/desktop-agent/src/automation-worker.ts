@@ -1,5 +1,5 @@
 import { BrowserContext, Page } from 'playwright';
-import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor } from '@hmc/automation';
+import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
 import { AgentTaskAssignment, AutomationRunStepTelemetry } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
@@ -11,16 +11,17 @@ export class AutomationWorker {
 
   public async executeTask(task: AgentTaskAssignment, onProgress?: (msg: string) => void): Promise<void> {
     const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const profileKey = `${task.clientId}_${effectiveUserId}`;
+    const isHeadlessSync = task.taskType === 'SYNC_CLIENT_USERS_HEADLESS' || task.taskType === 'SYNC_CLIENT_USERS';
+    const profileKey = `${task.clientId}_${effectiveUserId}_${isHeadlessSync ? 'sync' : 'interactive'}`;
 
-    // Single-flight lock: Prevent duplicate concurrent launches for the same client profile
+    // Single-flight lock: Prevent duplicate concurrent launches for the same client profile namespace
     const inFlight = this.singleFlightTasks.get(profileKey);
     if (inFlight) {
-      onProgress?.(`A launch task is already in-flight for client [${task.clientId}]. Awaiting existing execution...`);
+      onProgress?.(`A task is already in-flight for client [${task.clientId}] (${isHeadlessSync ? 'sync' : 'interactive'}). Awaiting execution...`);
       return inFlight;
     }
 
-    const taskExecutionPromise = this.performTaskExecution(task, profileKey, effectiveUserId, onProgress);
+    const taskExecutionPromise = this.performTaskExecution(task, profileKey, effectiveUserId, isHeadlessSync, onProgress);
     this.singleFlightTasks.set(profileKey, taskExecutionPromise);
 
     try {
@@ -34,16 +35,113 @@ export class AutomationWorker {
     task: AgentTaskAssignment,
     profileKey: string,
     effectiveUserId: string,
+    isHeadlessSync: boolean,
     onProgress?: (msg: string) => void
   ): Promise<void> {
     const startTime = Date.now();
     onProgress?.(`Starting task [${task.taskType}] for client [${task.clientId}]...`);
 
+    // =========================================================================
+    // 1. DEDICATED HEADLESS BACKGROUND SYNC HANDLER (ZERO VISIBLE BROWSER)
+    // =========================================================================
+    if (isHeadlessSync) {
+      let syncContext: BrowserContext | null = null;
+      try {
+        onProgress?.(`[BACKGROUND SYNC] Launching isolated headless sync context for client [${task.clientId}]...`);
+        
+        syncContext = await BrowserProfileManager.launchPersistentContext({
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          isHeaded: false,
+          namespace: 'sync',
+          slowMo: 0,
+        });
+
+        const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
+
+        const usersListUrl = task.targetRoute
+          ? (task.targetRoute.startsWith('http') ? task.targetRoute : `${task.clientBaseUrl}${task.targetRoute}`)
+          : `${task.clientBaseUrl}/MasterV9.4/users`;
+
+        const loginUrl = task.loginRoute
+          ? (task.loginRoute.startsWith('http') ? task.loginRoute : `${task.clientBaseUrl}${task.loginRoute}`)
+          : `${task.clientBaseUrl}/login`;
+
+        onProgress?.(`[BACKGROUND SYNC] Executing user scrape on ${usersListUrl}...`);
+
+        const syncRes = await UserManagementExecutor.syncUsersHeadless(syncPage, {
+          usersUrl: usersListUrl,
+          loginUrl,
+          credentials: task.credentials?.password
+            ? { username: task.credentials.username, password: task.credentials.password }
+            : undefined,
+          onProgress: (update: SyncProgressUpdate) => {
+            onProgress?.(`[SYNC PROGRESS] ${update.message}`);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: {
+                  message: update.message,
+                  stage: update.stage,
+                  currentPage: update.currentPage,
+                  count: update.count,
+                  streamedUsers: update.streamedUsers,
+                },
+              })
+              .catch(() => {});
+          },
+        });
+
+        const totalDurationMs = Date.now() - startTime;
+
+        if (syncRes.success) {
+          onProgress?.(`✓ [BACKGROUND SYNC COMPLETED] Scraped ${syncRes.totalScraped} users in ${totalDurationMs}ms.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: syncRes,
+          });
+        } else {
+          onProgress?.(`✗ [BACKGROUND SYNC FAILED] ${syncRes.errorCode}: ${syncRes.errorMessage}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: syncRes.errorMessage || 'Background user synchronization failed',
+            totalDurationMs,
+            resultData: syncRes,
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        onProgress?.(`[FATAL SYNC ERROR] ${err.message}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: err.message || 'Background sync runtime failure',
+          totalDurationMs,
+          resultData: {
+            success: false,
+            errorCode: 'CLIENT_USER_SYNC_TIMEOUT',
+            errorMessage: err.message,
+          },
+        });
+      } finally {
+        if (syncContext) {
+          try {
+            await syncContext.close();
+            onProgress?.('[BACKGROUND SYNC] Headless sync context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // =========================================================================
+    // 2. INTERACTIVE & DIRECT CLIENT APPLICATION WORKFLOWS (HEADED)
+    // =========================================================================
     let context: BrowserContext | null = null;
     let page: Page | null = null;
 
     try {
-      // 1. Check if an active browser context already exists for this client profile
+      // Check if an active browser context already exists for this client profile
       const existingContext = this.activeProfileContexts.get(profileKey);
       if (existingContext) {
         try {
@@ -69,13 +167,14 @@ export class AutomationWorker {
         }
       }
 
-      // 2. If no valid context is open, launch persistent context with robust recovery
+      // If no valid context is open, launch persistent context
       if (!context) {
         context = await BrowserProfileManager.launchPersistentContext({
           clientId: task.clientId,
           userId: effectiveUserId,
           isHeaded: task.options?.isHeaded ?? true,
-          slowMo: 0, // Zero artificial delay for maximum performance
+          namespace: 'interactive',
+          slowMo: 0,
         });
 
         this.activeProfileContexts.set(profileKey, context);
@@ -92,23 +191,9 @@ export class AutomationWorker {
         page = context.pages()[0] || (await context.newPage());
       }
 
-      // 3. User Management Tasks Dispatcher
       const usersListUrl = task.targetRoute
-        ? `${task.clientBaseUrl}${task.targetRoute}`
+        ? (task.targetRoute.startsWith('http') ? task.targetRoute : `${task.clientBaseUrl}${task.targetRoute}`)
         : `${task.clientBaseUrl}/MasterV9.4/users`;
-
-      if (task.taskType === 'SYNC_CLIENT_USERS') {
-        onProgress?.(`Synchronizing users from ${usersListUrl}...`);
-        const syncRes = await UserManagementExecutor.syncUsers(page, usersListUrl);
-        const totalDurationMs = Date.now() - startTime;
-        onProgress?.(`✓ Scraped ${syncRes.totalScraped} users.`);
-        await this.agentClient.sendTelemetry(task.runId, {
-          status: 'COMPLETED',
-          totalDurationMs,
-          resultData: syncRes,
-        });
-        return;
-      }
 
       if (task.taskType === 'CREATE_CLIENT_USER') {
         const addUsersUrl = `${task.clientBaseUrl}/MasterV9.4/addUsers`;
@@ -170,7 +255,7 @@ export class AutomationWorker {
         return;
       }
 
-      // 4. Default Workflow Execution (Login, Service Creation, etc.)
+      // Default Interactive / Workflow Execution (Login, Service Creation, etc.)
       const variables: Record<string, any> = {
         loginUrl: `${task.clientBaseUrl}${task.loginRoute}`,
         servicesUrl: `${task.clientBaseUrl}/hmc/services`,

@@ -29,9 +29,22 @@ export interface ScrapedClientUser {
   remoteUpdatedAt?: string;
 }
 
+export interface SyncProgressUpdate {
+  stage: 'CONNECTING' | 'AUTHENTICATING' | 'LOADING_PAGE' | 'SYNCHRONIZING' | 'COMPLETED';
+  message: string;
+  currentPage: number;
+  totalPages?: number;
+  count: number;
+  streamedUsers?: ScrapedClientUser[];
+}
+
 export interface SyncUsersResult {
+  success: boolean;
   users: ScrapedClientUser[];
   totalScraped: number;
+  liveStatus: 'LIVE' | 'CACHED';
+  errorCode?: string;
+  errorMessage?: string;
   options: {
     nationalities: string[];
     roles: string[];
@@ -50,20 +63,170 @@ export interface MutationResult {
 
 export class UserManagementExecutor {
   /**
-   * Scrapes all users across all pagination pages from the client's users list.
-   * Ultra fast (<10ms evaluation), completely event-driven without networkidle.
+   * Performs an end-to-end background headless sync of all users across all pagination pages.
+   * Handles headless background auto-login if redirected to login, navigates directly to users route,
+   * extracts structured user data without binary leaks, streams progress, and detects errors.
    */
-  public static async syncUsers(page: Page, usersUrl: string): Promise<SyncUsersResult> {
-    await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+  public static async syncUsersHeadless(
+    page: Page,
+    options: {
+      usersUrl: string;
+      loginUrl?: string;
+      credentials?: { username: string; password: string };
+      onProgress?: (update: SyncProgressUpdate) => void;
+    }
+  ): Promise<SyncUsersResult> {
+    const { usersUrl, loginUrl, credentials, onProgress } = options;
 
+    onProgress?.({
+      stage: 'CONNECTING',
+      message: 'Connecting securely to client portal…',
+      currentPage: 1,
+      count: 0,
+    });
+
+    try {
+      await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (err: any) {
+      return {
+        success: false,
+        users: [],
+        totalScraped: 0,
+        liveStatus: 'CACHED',
+        errorCode: 'CLIENT_USER_SYNC_TIMEOUT',
+        errorMessage: `Connection timeout navigating to ${usersUrl}: ${err.message}`,
+        options: this.getDefaultOptions(),
+      };
+    }
+
+    // Check if redirected to login page or if login form is present
+    const isLoginPage = await page.evaluate(() => {
+      const isLoginUrl = window.location.pathname.toLowerCase().includes('login');
+      const hasLoginForm = document.querySelector('form[action*="login" i], input[type="password"]') !== null;
+      return isLoginUrl || hasLoginForm;
+    });
+
+    if (isLoginPage) {
+      onProgress?.({
+        stage: 'AUTHENTICATING',
+        message: 'Authenticating in background…',
+        currentPage: 1,
+        count: 0,
+      });
+
+      if (!credentials || !credentials.username || !credentials.password) {
+        return {
+          success: false,
+          users: [],
+          totalScraped: 0,
+          liveStatus: 'CACHED',
+          errorCode: 'CLIENT_BACKGROUND_LOGIN_FAILED',
+          errorMessage: 'Background login required but no active credentials configured for this client.',
+          options: this.getDefaultOptions(),
+        };
+      }
+
+      // Perform headless background login
+      const userInput = page.locator('#username, #txtUsername, [name="username"], [data-testid="input-username"], input[type="text"]').first();
+      const passInput = page.locator('#password, #txtPassword, [name="password"], [data-testid="input-password"], input[type="password"]').first();
+      const loginBtn = page.locator('#btnLogin, #btnSubmit, button[type="submit"], [data-testid="btn-login"]').first();
+
+      if (!(await userInput.isVisible({ timeout: 5000 }).catch(() => false)) || !(await passInput.isVisible({ timeout: 5000 }).catch(() => false))) {
+        return {
+          success: false,
+          users: [],
+          totalScraped: 0,
+          liveStatus: 'CACHED',
+          errorCode: 'CLIENT_BACKGROUND_LOGIN_FAILED',
+          errorMessage: 'Client login fields could not be identified during background authentication.',
+          options: this.getDefaultOptions(),
+        };
+      }
+
+      await userInput.fill(credentials.username);
+      await passInput.fill(credentials.password);
+      await loginBtn.click();
+
+      // Wait for navigation away from login
+      try {
+        await page.waitForFunction(
+          () => !window.location.pathname.toLowerCase().includes('login') && document.querySelector('input[type="password"]') === null,
+          { timeout: 10000 }
+        );
+      } catch {
+        return {
+          success: false,
+          users: [],
+          totalScraped: 0,
+          liveStatus: 'CACHED',
+          errorCode: 'CLIENT_BACKGROUND_LOGIN_FAILED',
+          errorMessage: 'Background authentication failed or credentials were rejected by client portal.',
+          options: this.getDefaultOptions(),
+        };
+      }
+
+      // Navigate to target users route after authentication
+      await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    }
+
+    // Check for Access Denied or Client Error Page
+    const pageStatus = await page.evaluate(() => {
+      const text = document.body ? document.body.innerText.toLowerCase() : '';
+      if (text.includes('403 forbidden') || text.includes('access denied') || text.includes('unauthorized access')) {
+        return 'ACCESS_DENIED';
+      }
+      if (text.includes('404 not found') || text.includes('page not found')) {
+        return 'PAGE_NOT_FOUND';
+      }
+      return 'OK';
+    });
+
+    if (pageStatus === 'ACCESS_DENIED') {
+      return {
+        success: false,
+        users: [],
+        totalScraped: 0,
+        liveStatus: 'CACHED',
+        errorCode: 'CLIENT_USER_ACCESS_DENIED',
+        errorMessage: 'Client portal returned Access Denied for the configured user directory route.',
+        options: this.getDefaultOptions(),
+      };
+    }
+
+    // Wait for the user table or explicit empty state
     const tableLocator = page.locator('table, [data-testid="users-table"], #usersTable, .user-grid').first();
-    await tableLocator.waitFor({ state: 'visible', timeout: 5000 }).catch(() => null);
+    const hasTable = await tableLocator.waitFor({ state: 'visible', timeout: 6000 }).then(() => true).catch(() => false);
+
+    const isExplicitEmpty = await page.evaluate(() => {
+      const text = document.body ? document.body.innerText.toLowerCase() : '';
+      return text.includes('no users found') || text.includes('no records available') || text.includes('no data');
+    });
+
+    if (!hasTable && !isExplicitEmpty) {
+      return {
+        success: false,
+        users: [],
+        totalScraped: 0,
+        liveStatus: 'CACHED',
+        errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
+        errorMessage: 'User table could not be identified on client users route.',
+        options: this.getDefaultOptions(),
+      };
+    }
 
     const scrapedUsersMap = new Map<string, ScrapedClientUser>();
     let currentPage = 1;
-    const maxPages = 20;
+    const maxPages = 30; // Guard against infinite pagination
+
+    onProgress?.({
+      stage: 'LOADING_PAGE',
+      message: 'Loading users page 1…',
+      currentPage: 1,
+      count: 0,
+    });
 
     while (currentPage <= maxPages) {
+      // Scrape current page rows
       const pageRowsData = await page.evaluate(() => {
         const rows = Array.from(document.querySelectorAll('table tbody tr, [data-testid="user-row"], .user-table-row'));
         return rows.map((r) => {
@@ -75,10 +238,22 @@ export class UserManagementExecutor {
         });
       });
 
+      const pageUsers: ScrapedClientUser[] = [];
+
       for (let i = 0; i < pageRowsData.length; i++) {
         const { cells: texts, hasSig, hasStmp, hasProf } = pageRowsData[i];
         if (texts.length < 3) continue;
 
+        // Screenshot Mapping:
+        // Col 1: S.No (e.g. "1")
+        // Col 2: User Name -> mapped to Full Name (e.g. "Dr. Sarah Al-Mansoor")
+        // Col 3: Name      -> mapped to Username  (e.g. "dr_sarah")
+        // Col 4: Mobile No -> Mobile Number       (e.g. "0501234567")
+        // Col 5: Email     -> Email               (e.g. "sarah@hospital.com")
+        // Col 6: Nationality -> Nationality       (e.g. "Saudi Arabia")
+        // Col 7: Role      -> Role                (e.g. "Physician")
+        // Col 8: Profile Role -> Profile Role     (e.g. "Clinical Specialist")
+        // Col 9: Status    -> Status badge        (e.g. "Active")
         let fullName = texts[1] || '';
         let username = texts[2] || '';
         let mobileNumber = texts[3] || '';
@@ -106,7 +281,7 @@ export class UserManagementExecutor {
         const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
         const middleName = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : undefined;
 
-        scrapedUsersMap.set(username.toLowerCase(), {
+        const scrapedUser: ScrapedClientUser = {
           remoteUserId: `remote_${username.toLowerCase()}`,
           username: username.trim(),
           firstName,
@@ -124,10 +299,22 @@ export class UserManagementExecutor {
           hasProfileImage: hasProf,
           remoteCreatedAt: undefined,
           remoteUpdatedAt: undefined,
-        });
+        };
+
+        scrapedUsersMap.set(username.toLowerCase(), scrapedUser);
+        pageUsers.push(scrapedUser);
       }
 
-      // Check for next page button
+      // Stream progress
+      onProgress?.({
+        stage: 'SYNCHRONIZING',
+        message: `Synchronizing page ${currentPage}… (${scrapedUsersMap.size} users found)`,
+        currentPage,
+        count: scrapedUsersMap.size,
+        streamedUsers: pageUsers,
+      });
+
+      // Look for Next page control
       const nextButton = page.locator(
         'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a'
       ).first();
@@ -138,7 +325,7 @@ export class UserManagementExecutor {
         const isAriaDisabled = await nextButton.getAttribute('aria-disabled');
         if (!isDisabled && isAriaDisabled !== 'true') {
           await nextButton.click().catch(() => {});
-          await page.waitForTimeout(100);
+          await page.waitForTimeout(150);
           currentPage++;
           continue;
         }
@@ -146,16 +333,37 @@ export class UserManagementExecutor {
       break;
     }
 
-    const options = {
+    const allUsers = Array.from(scrapedUsersMap.values());
+
+    onProgress?.({
+      stage: 'COMPLETED',
+      message: `${allUsers.length} users synchronized successfully.`,
+      currentPage,
+      count: allUsers.length,
+      streamedUsers: allUsers,
+    });
+
+    return {
+      success: true,
+      users: allUsers,
+      totalScraped: allUsers.length,
+      liveStatus: 'LIVE',
+      options: this.getDefaultOptions(),
+    };
+  }
+
+  /**
+   * Backwards compatible wrapper for syncUsers
+   */
+  public static async syncUsers(page: Page, usersUrl: string): Promise<SyncUsersResult> {
+    return this.syncUsersHeadless(page, { usersUrl });
+  }
+
+  private static getDefaultOptions() {
+    return {
       nationalities: ['Saudi Arabia', 'United Arab Emirates', 'United States', 'United Kingdom', 'India', 'Egypt', 'Jordan', 'Pakistan', 'Philippines', 'Other'],
       roles: ['Physician', 'Nurse', 'Admin', 'Pharmacist', 'Lab Technician', 'Operator', 'Super User'],
       profileRoles: ['Clinical Specialist', 'General Practitioner', 'Head Nurse', 'Chief Pharmacist', 'System Administrator', 'Billing Specialist'],
-    };
-
-    return {
-      users: Array.from(scrapedUsersMap.values()),
-      totalScraped: scrapedUsersMap.size,
-      options,
     };
   }
 

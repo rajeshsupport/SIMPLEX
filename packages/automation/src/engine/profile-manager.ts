@@ -7,6 +7,7 @@ export interface ProfileOptions {
   clientId: string;
   userId: string;
   isHeaded?: boolean;
+  namespace?: 'interactive' | 'sync';
   viewport?: { width: number; height: number };
   slowMo?: number;
 }
@@ -52,15 +53,17 @@ export class BrowserProfileManager {
   }
 
   /**
-   * Returns the canonical, validated profile path for a client and user.
+   * Returns the canonical, validated profile path for a client and user within an isolated namespace.
    */
-  public static getProfilePath(clientId: string, userId: string): string {
+  public static getProfilePath(clientId: string, userId: string, namespace: 'interactive' | 'sync' = 'interactive'): string {
     // 1. Strict validation (rejection of ambiguous / malicious inputs)
     const validClientId = this.validateIdentifier(clientId, 'Client');
     const validUserId = this.validateIdentifier(userId, 'User');
+    const validNamespace = this.validateIdentifier(namespace, 'Namespace');
 
     const clientDir = path.resolve(this.BASE_PROFILE_DIR, `client_${validClientId}`);
-    const profilePath = path.resolve(clientDir, `user_${validUserId}`);
+    const userDir = path.resolve(clientDir, `user_${validUserId}`);
+    const profilePath = path.resolve(userDir, validNamespace);
 
     // 2. Canonical Resolved Path Containment Check
     if (!profilePath.startsWith(this.BASE_PROFILE_DIR + path.sep)) {
@@ -81,6 +84,7 @@ export class BrowserProfileManager {
       if (process.platform !== 'win32') {
         fs.chmodSync(this.BASE_PROFILE_DIR, 0o700);
         fs.chmodSync(clientDir, 0o700);
+        fs.chmodSync(userDir, 0o700);
         fs.chmodSync(profilePath, 0o700);
 
         // Check ownership if running as non-root user
@@ -182,7 +186,8 @@ export class BrowserProfileManager {
    * Gracefully reclaims profile lock if a stale or previous instance was terminated.
    */
   public static async launchPersistentContext(options: ProfileOptions): Promise<BrowserContext> {
-    const userDataDir = this.getProfilePath(options.clientId, options.userId);
+    const namespace = options.namespace || (options.isHeaded ? 'interactive' : 'sync');
+    const userDataDir = this.getProfilePath(options.clientId, options.userId, namespace);
     const isHeadless = options.isHeaded === true ? false : true;
 
     try {
@@ -206,10 +211,19 @@ export class BrowserProfileManager {
   /**
    * Securely purges a profile directory.
    */
-  public static deleteProfile(clientId: string, userId: string): void {
-    const profilePath = this.getProfilePath(clientId, userId);
-    if (fs.existsSync(profilePath)) {
-      fs.rmSync(profilePath, { recursive: true, force: true });
+  public static deleteProfile(clientId: string, userId: string, namespace?: 'interactive' | 'sync'): void {
+    if (namespace) {
+      const profilePath = this.getProfilePath(clientId, userId, namespace);
+      if (fs.existsSync(profilePath)) {
+        fs.rmSync(profilePath, { recursive: true, force: true });
+      }
+    } else {
+      const validClientId = this.validateIdentifier(clientId, 'Client');
+      const validUserId = this.validateIdentifier(userId, 'User');
+      const userDir = path.resolve(this.BASE_PROFILE_DIR, `client_${validClientId}`, `user_${validUserId}`);
+      if (fs.existsSync(userDir)) {
+        fs.rmSync(userDir, { recursive: true, force: true });
+      }
     }
   }
 }

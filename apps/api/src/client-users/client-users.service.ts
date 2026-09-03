@@ -47,6 +47,49 @@ export class ClientUsersService {
   ) {}
 
   /**
+   * Resolves client routes safely using a structured URL builder and enforces version consistency.
+   */
+  public resolveClientUserRoutes(client: Client): {
+    origin: string;
+    resolvedLoginUrl: string;
+    resolvedUsersUrl: string;
+    resolvedAddUsersUrl: string;
+  } {
+    let origin = (client.baseUrl || '').replace(/\/+$/, '');
+    try {
+      if (origin.startsWith('http')) {
+        origin = new URL(client.baseUrl).origin;
+      }
+    } catch {}
+
+    const appPath = (client.applicationPath || '').replace(/^\/+|\/+$/g, '');
+    const usersRoute = (client.usersRoute || '/MasterV9.4/users').replace(/^\/+/, '');
+    const loginRoute = (client.loginRoute || '/login').replace(/^\/+/, '');
+
+    // Application Version vs Selector Version consistency check
+    if (client.applicationVersion && client.applicationVersion.toLowerCase().startsWith('masterv')) {
+      const configuredVersion = client.applicationVersion.toLowerCase();
+      if (usersRoute.toLowerCase().includes('masterv') && !usersRoute.toLowerCase().includes(configuredVersion)) {
+        throw new BadRequestException({
+          code: 'CLIENT_USER_ROUTE_VERSION_MISMATCH',
+          message: `Application version '${client.applicationVersion}' does not match configured users route '${client.usersRoute}'.`,
+        });
+      }
+    }
+
+    const resolvedLoginUrl = loginRoute.startsWith('http') ? loginRoute : `${origin}/${loginRoute}`;
+    const resolvedUsersUrl = usersRoute.startsWith('http') ? usersRoute : `${origin}/${usersRoute}`;
+    const resolvedAddUsersUrl = `${origin}/${appPath ? appPath + '/' : ''}addUsers`;
+
+    return {
+      origin,
+      resolvedLoginUrl,
+      resolvedUsersUrl,
+      resolvedAddUsersUrl,
+    };
+  }
+
+  /**
    * Retrieves paginated client user snapshots with optional search and filters.
    */
   async getClientUsers(
@@ -111,9 +154,10 @@ export class ClientUsersService {
   }
 
   /**
-   * Triggers a live sync job on the desktop agent and updates snapshot database records.
+   * Initiates a background headless user sync job and returns the job ID immediately.
+   * Prevents duplicate in-flight sync jobs for the same client.
    */
-  async syncClientUsers(clientId: string, user: JwtPayload): Promise<ClientUserListResponse> {
+  async startSyncJob(clientId: string, user: JwtPayload): Promise<{ jobId: string; status: string; message: string }> {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
 
@@ -121,9 +165,33 @@ export class ClientUsersService {
       throw new ForbiddenException('Not authorized for this client');
     }
 
+    // Version & URL validation
+    const routes = this.resolveClientUserRoutes(client);
+
+    // Duplicate sync job prevention
+    const existingActive = await this.runRepo.findOne({
+      where: {
+        clientId,
+        runType: 'SYNC_CLIENT_USERS_HEADLESS',
+        status: In(['PENDING', 'RUNNING']),
+      },
+      order: { createdAt: 'DESC' },
+    });
+
+    if (existingActive) {
+      return {
+        jobId: existingActive.id,
+        status: existingActive.status,
+        message: 'A background user sync is already in progress for this client.',
+      };
+    }
+
     const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE');
     if (onlineAgents.length === 0) {
-      throw new BadRequestException('Desktop browser agent is not running.');
+      throw new BadRequestException({
+        code: 'DESKTOP_AGENT_OFFLINE',
+        message: 'Desktop browser automation agent is offline.',
+      });
     }
 
     let credentials: { username: string; password: string } | undefined = undefined;
@@ -150,21 +218,20 @@ export class ClientUsersService {
       clientId: client.id,
       desktopAgentId: onlineAgents[0].id,
       triggeredByUserId: user.sub,
-      runType: 'INTERACTIVE_LOGIN',
+      runType: 'SYNC_CLIENT_USERS_HEADLESS',
       status: 'PENDING',
       parametersJson: JSON.stringify({
-        taskType: 'SYNC_CLIENT_USERS',
+        taskType: 'SYNC_CLIENT_USERS_HEADLESS',
         userId: user.sub,
         clientBaseUrl: client.baseUrl,
-        loginRoute: client.loginRoute,
-        targetRoute: client.usersRoute || '/MasterV9.4/users',
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: routes.resolvedUsersUrl,
         credentials,
       }),
     });
 
     const savedRun = await this.runRepo.save(run);
 
-    // Record audit log
     await this.auditRepo.save(
       this.auditRepo.create({
         action: 'CLIENT_USERS_SYNC_REQUESTED',
@@ -174,17 +241,120 @@ export class ClientUsersService {
         entityId: clientId,
         result: 'SUCCESS',
         correlationId,
-        detailsJson: JSON.stringify({ clientCode: client.clientCode, runId: savedRun.id }),
+        detailsJson: JSON.stringify({ clientCode: client.clientCode, runId: savedRun.id, executionMode: 'HEADLESS' }),
       })
     );
 
-    // Wait for agent to execute and return scraped data (or timeout after 15s)
+    return {
+      jobId: savedRun.id,
+      status: 'ACCEPTED',
+      message: 'Background user synchronization job initiated.',
+    };
+  }
+
+  /**
+   * Checks the status of a running sync job and persists scraped snapshots when complete.
+   */
+  async getSyncJobStatus(jobId: string, user: JwtPayload): Promise<any> {
+    const run = await this.runRepo.findOne({ where: { id: jobId } });
+    if (!run) throw new NotFoundException(`Sync job ${jobId} not found`);
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(run.clientId)) {
+      throw new ForbiddenException('Not authorized to view this sync job');
+    }
+
+    let resultData: any = null;
+    if (run.resultSummaryJson) {
+      try {
+        resultData = JSON.parse(run.resultSummaryJson);
+      } catch {}
+    }
+
+    // When run completes successfully, persist scraped users into snapshot DB
+    if (run.status === 'COMPLETED' && resultData && resultData.users) {
+      await this.persistScrapedUsers(run.clientId, resultData.users);
+    }
+
+    return {
+      jobId: run.id,
+      status: run.status,
+      progressMessage: resultData?.message || run.status,
+      errorMessage: run.errorMessage || resultData?.errorMessage,
+      errorCode: resultData?.errorCode || (run.status === 'FAILED' ? 'CLIENT_USER_SYNC_FAILED' : undefined),
+      totalScraped: resultData?.totalScraped || resultData?.count || 0,
+      streamedUsers: resultData?.streamedUsers || [],
+      liveStatus: resultData?.liveStatus || (run.status === 'COMPLETED' ? 'LIVE' : 'CACHED'),
+    };
+  }
+
+  /**
+   * Helper to persist scraped snapshot users into MSSQL database.
+   */
+  private async persistScrapedUsers(clientId: string, scrapedUsers: any[]): Promise<void> {
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    if (!client || !scrapedUsers || scrapedUsers.length === 0) return;
+
+    const now = new Date();
+    for (const su of scrapedUsers) {
+      let snapshot = await this.snapshotRepo.findOne({
+        where: { clientId, username: su.username },
+      });
+
+      if (!snapshot) {
+        snapshot = this.snapshotRepo.create({
+          clientId,
+          clientCode: client.clientCode,
+          username: su.username,
+          firstName: su.firstName,
+          middleName: su.middleName,
+          lastName: su.lastName,
+          fullName: su.fullName,
+          nickName: su.nickName,
+          email: su.email,
+          mobileNumber: su.mobileNumber,
+          nationality: su.nationality,
+          role: su.role,
+          profileRole: su.profileRole,
+          status: su.status,
+          barcodeNumber: su.barcodeNumber,
+          hasSignature: su.hasSignature || false,
+          hasStamp: su.hasStamp || false,
+          hasProfileImage: su.hasProfileImage || false,
+          lastSyncedAt: now,
+        });
+      } else {
+        snapshot.firstName = su.firstName;
+        snapshot.middleName = su.middleName;
+        snapshot.lastName = su.lastName;
+        snapshot.fullName = su.fullName;
+        snapshot.email = su.email;
+        snapshot.mobileNumber = su.mobileNumber;
+        snapshot.nationality = su.nationality;
+        snapshot.role = su.role;
+        snapshot.profileRole = su.profileRole;
+        snapshot.status = su.status;
+        snapshot.hasSignature = su.hasSignature || false;
+        snapshot.hasStamp = su.hasStamp || false;
+        snapshot.hasProfileImage = su.hasProfileImage || false;
+        snapshot.lastSyncedAt = now;
+      }
+      await this.snapshotRepo.save(snapshot);
+    }
+  }
+
+  /**
+   * Synchronous / polling wrapper for syncClientUsers.
+   */
+  async syncClientUsers(clientId: string, user: JwtPayload): Promise<ClientUserListResponse> {
+    const { jobId } = await this.startSyncJob(clientId, user);
+
+    // Wait up to 15s for the job to complete
     const startTime = Date.now();
     let completedRun: AutomationRun | null = null;
 
     while (Date.now() - startTime < 15000) {
       await new Promise((r) => setTimeout(r, 300));
-      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      const r = await this.runRepo.findOne({ where: { id: jobId } });
       if (r && (r.status === 'COMPLETED' || r.status === 'FAILED')) {
         completedRun = r;
         break;
@@ -194,57 +364,22 @@ export class ClientUsersService {
     if (completedRun && completedRun.status === 'COMPLETED' && completedRun.resultSummaryJson) {
       try {
         const resultData = JSON.parse(completedRun.resultSummaryJson);
-        const scrapedUsers = resultData.users || [];
-        const now = new Date();
-
-        for (const su of scrapedUsers) {
-          let snapshot = await this.snapshotRepo.findOne({
-            where: { clientId, username: su.username },
-          });
-
-          if (!snapshot) {
-            snapshot = this.snapshotRepo.create({
-              clientId,
-              clientCode: client.clientCode,
-              username: su.username,
-              firstName: su.firstName,
-              middleName: su.middleName,
-              lastName: su.lastName,
-              fullName: su.fullName,
-              nickName: su.nickName,
-              email: su.email,
-              mobileNumber: su.mobileNumber,
-              nationality: su.nationality,
-              role: su.role,
-              profileRole: su.profileRole,
-              status: su.status,
-              barcodeNumber: su.barcodeNumber,
-              hasSignature: su.hasSignature || false,
-              hasStamp: su.hasStamp || false,
-              hasProfileImage: su.hasProfileImage || false,
-              lastSyncedAt: now,
-            });
-          } else {
-            snapshot.firstName = su.firstName;
-            snapshot.middleName = su.middleName;
-            snapshot.lastName = su.lastName;
-            snapshot.fullName = su.fullName;
-            snapshot.email = su.email;
-            snapshot.mobileNumber = su.mobileNumber;
-            snapshot.nationality = su.nationality;
-            snapshot.role = su.role;
-            snapshot.profileRole = su.profileRole;
-            snapshot.status = su.status;
-            snapshot.hasSignature = su.hasSignature || false;
-            snapshot.hasStamp = su.hasStamp || false;
-            snapshot.hasProfileImage = su.hasProfileImage || false;
-            snapshot.lastSyncedAt = now;
-          }
-          await this.snapshotRepo.save(snapshot);
+        if (resultData.users) {
+          await this.persistScrapedUsers(clientId, resultData.users);
         }
       } catch (err) {
         console.error('Error saving scraped snapshot users:', err);
       }
+    } else if (completedRun && completedRun.status === 'FAILED') {
+      let errorCode = 'CLIENT_USER_SYNC_FAILED';
+      try {
+        const parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
+        if (parsed.errorCode) errorCode = parsed.errorCode;
+      } catch {}
+      throw new BadRequestException({
+        code: errorCode,
+        message: completedRun.errorMessage || 'Background sync failed',
+      });
     }
 
     return this.getClientUsers(clientId, {}, user);

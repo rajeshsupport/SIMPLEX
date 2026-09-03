@@ -29,6 +29,8 @@ export interface AgentHeartbeatPayload {
 export interface AgentTaskAssignment {
   runId: string;
   taskType:
+    | 'OPEN_INTERACTIVE_CLIENT_SESSION'
+    | 'SYNC_CLIENT_USERS_HEADLESS'
     | 'INTERACTIVE_LOGIN'
     | 'TEST_LOGIN'
     | 'SYNC_CLIENT_USERS'

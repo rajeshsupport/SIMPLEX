@@ -32,7 +32,16 @@ export class AutomationRun {
   triggeredByUserId?: string | null;
 
   @Column({ type: 'nvarchar', length: 50, default: 'INTERACTIVE_LOGIN' })
-  runType!: 'INTERACTIVE_LOGIN' | 'TEST_LOGIN' | 'CREATE_USER' | 'RESET_PASSWORD' | 'CREATE_SERVICE' | 'BULK_IMPORT';
+  runType!:
+    | 'OPEN_INTERACTIVE_CLIENT_SESSION'
+    | 'SYNC_CLIENT_USERS_HEADLESS'
+    | 'SYNC_CLIENT_USERS'
+    | 'INTERACTIVE_LOGIN'
+    | 'TEST_LOGIN'
+    | 'CREATE_USER'
+    | 'RESET_PASSWORD'
+    | 'CREATE_SERVICE'
+    | 'BULK_IMPORT';
 
   @Index()
   @Column({ type: 'nvarchar', length: 50, default: 'PENDING' })

@@ -64,6 +64,25 @@ export class ClientUsersController {
     return this.clientUsersService.syncClientUsers(clientId, user);
   }
 
+  @Post('sync-job')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @HttpCode(HttpStatus.OK)
+  async startSyncJob(
+    @Body('clientId') clientId: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.startSyncJob(clientId, user);
+  }
+
+  @Get('sync-status/:jobId')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  async getSyncJobStatus(
+    @Param('jobId') jobId: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.getSyncJobStatus(jobId, user);
+  }
+
   @Post()
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_CREATE)
   async createClientUser(
