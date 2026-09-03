@@ -4,6 +4,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Logger,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Like, In } from 'typeorm';
@@ -34,7 +35,7 @@ import {
 import { AgentsService } from '../agents/agents.service.js';
 
 @Injectable()
-export class ClientUsersService {
+export class ClientUsersService implements OnModuleInit {
   private readonly logger = new Logger(ClientUsersService.name);
 
   constructor(
@@ -50,6 +51,33 @@ export class ClientUsersService {
     private auditRepo: Repository<AuditLog>,
     private agentsService: AgentsService
   ) {}
+
+  async onModuleInit() {
+    try {
+      await this.snapshotRepo.query(`
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'syncRunId'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [syncRunId] NVARCHAR(100) NULL;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'isPresentRemotely'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [isPresentRemotely] BIT NOT NULL DEFAULT 1;
+        END
+      `);
+      this.logger.log('ClientUserSnapshot database schema columns verified.');
+    } catch (err: any) {
+      this.logger.warn(`Schema verification warning: ${err.message}`);
+    }
+  }
 
   /**
    * Resolves client routes safely using a structured URL builder and enforces version consistency.
