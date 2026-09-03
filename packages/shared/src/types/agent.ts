@@ -1,4 +1,5 @@
 export type DesktopAgentStatus = 'ONLINE' | 'OFFLINE' | 'BUSY';
+export type ExecutionMode = 'HEADED_MUTATION' | 'HEADLESS_SYNC';
 
 export interface DesktopAgentSummary {
   id: string;
@@ -10,6 +11,10 @@ export interface DesktopAgentSummary {
   status: DesktopAgentStatus;
   currentTaskDescription?: string;
   lastHeartbeatAt?: string | null;
+  supportsVisibleChromeMutations?: boolean;
+  buildCommit?: string;
+  buildTimestamp?: string;
+  headedMutationVersion?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -20,6 +25,11 @@ export interface AgentHeartbeatPayload {
   osInfo: string;
   status: DesktopAgentStatus;
   activeRunId?: string | null;
+  supportsVisibleChromeMutations?: boolean;
+  buildCommit?: string;
+  buildTimestamp?: string;
+  headedMutationVersion?: string;
+  supportedTaskTypes?: string[];
   systemMetrics?: {
     cpuPercent?: number;
     memoryFreeMb?: number;
@@ -52,6 +62,7 @@ export interface AgentTaskAssignment {
   targetRoute?: string;
   workflowVersion: any;
   payload: Record<string, any>;
+  executionMode?: ExecutionMode;
   credentials?: {
     username: string;
     password?: string;

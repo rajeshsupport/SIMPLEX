@@ -157,9 +157,24 @@ export class AutomationWorker {
     ].includes(task.taskType);
 
     if (isMutationTask) {
+      if (task.executionMode === 'HEADLESS_SYNC' || task.options?.isHeaded === false) {
+        onProgress?.(`✗ Rejected task [${task.taskType}]: MUTATION_BROWSER_MODE_MISMATCH`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: 'Mutation tasks cannot run in headless mode. Headed Chrome is required.',
+          totalDurationMs: Date.now() - startTime,
+          resultData: {
+            success: false,
+            errorCode: 'MUTATION_BROWSER_MODE_MISMATCH',
+            errorMessage: 'Mutation tasks cannot run in headless mode. Headed Chrome is required.',
+          },
+        });
+        return;
+      }
+
       let mutationContext: BrowserContext | null = null;
       try {
-        onProgress?.(`Opening secure Chrome window for task [${task.taskType}]...`);
+        onProgress?.(`Launching visible automated Chrome for mutation [${task.taskType}]`);
         mutationContext = await BrowserProfileManager.launchPersistentContext({
           clientId: task.clientId,
           userId: effectiveUserId,

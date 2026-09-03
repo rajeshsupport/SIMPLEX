@@ -71,6 +71,10 @@ export class AgentsService {
         status,
         currentTaskDescription: a.currentTaskDescription || undefined,
         lastHeartbeatAt: a.lastHeartbeatAt ? a.lastHeartbeatAt.toISOString() : null,
+        supportsVisibleChromeMutations: true,
+        buildCommit: '6d63f04',
+        buildTimestamp: a.updatedAt.toISOString(),
+        headedMutationVersion: 'v1.0.0',
         createdAt: a.createdAt.toISOString(),
         updatedAt: a.updatedAt.toISOString(),
       };
@@ -443,22 +447,37 @@ export class AgentsService {
       maxRetries: 1,
     };
 
+    const params = run.parametersJson ? JSON.parse(run.parametersJson) : {};
+    const isMutation = [
+      'CREATE_CLIENT_USER',
+      'CREATE_USER',
+      'EDIT_CLIENT_USER',
+      'EDIT_AND_UPDATE_CLIENT',
+      'SET_CLIENT_USER_STATUS',
+      'CHANGE_CLIENT_USER_STATUS',
+      'RESET_CLIENT_USER_PASSWORD',
+    ].includes(run.runType);
+
+    const executionMode = isMutation ? ('HEADED_MUTATION' as const) : ('HEADLESS_SYNC' as const);
+
     return {
       runId: run.id,
       taskType: run.runType,
       clientId: client.id,
-      clientBaseUrl: client.baseUrl,
-      clientAppPath: client.applicationPath,
-      loginRoute: client.loginRoute,
+      clientBaseUrl: params.clientBaseUrl || client.baseUrl,
+      clientAppPath: params.clientAppPath || client.applicationPath,
+      loginRoute: params.loginRoute || client.loginRoute,
+      targetRoute: params.targetRoute || client.usersRoute || '/users',
       workflowVersion: versionConfig,
-      payload: run.parametersJson ? JSON.parse(run.parametersJson) : {},
-      credentials: {
-        username: creds.username,
-        password: creds.password,
+      payload: params.payload || params,
+      executionMode,
+      credentials: params.credentials || {
+        username: creds?.username,
+        password: creds?.password,
       },
       options: {
-        isHeaded: true,
-        leaveBrowserOpen: true,
+        isHeaded: isMutation,
+        leaveBrowserOpen: isMutation,
       },
     };
   }

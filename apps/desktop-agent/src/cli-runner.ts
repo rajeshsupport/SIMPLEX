@@ -29,6 +29,7 @@ async function startAgentRunner() {
   }
 
   console.log(`[AGENT] Successfully paired! Agent ID: ${agentClient.getStatus().agentId}`);
+  console.log('Desktop Agent ready — visible Chrome mutations enabled — build 6d63f04');
   console.log('[AGENT] Starting fast event-polling loop (250ms)...');
 
   let isExecuting = false;
