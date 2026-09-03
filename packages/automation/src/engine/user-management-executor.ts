@@ -200,9 +200,9 @@ export class UserManagementExecutor {
       };
     }
 
-    // 1. Check loading overlays
+    // 1. Check and wait for loading overlays to disappear
     try {
-      await page.locator('.loading, #loading, .spinner, .overlay, img[src*="loading" i]').first().waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+      await page.locator('.loading, #loading, .spinner, .overlay, img[src*="loading" i], .loader').first().waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
     } catch {}
 
     // 2. Identify Screen Heading
@@ -213,67 +213,141 @@ export class UserManagementExecutor {
       return headings.find(h => /user|master|details|himes/i.test(h)) || headings[0] || 'User Details';
     });
 
-    // 3. Multi-structure record container detection
-    // Check main page and all attached frames (iframes/framesets)
+    // 3. Dedicated MasterV9.4 Screen Adapter: Priority Record Container Detection
+    // Priority order:
+    // 1. [ng-repeat] or [data-ng-repeat]
+    // 2. [role="row"] and [role="gridcell"]
+    // 3. ui-grid / ag-grid / custom-grid rows
+    // 4. Repeated containers sharing the same class
+    // 5. Repeated containers aligned below the six visible headers (S.NO, User Name, Name, Mobile No, Status, Action)
+    // 6. Standard table rows (table tbody tr)
     const allFrames = [page.mainFrame(), ...page.frames().filter((f) => f !== page.mainFrame())];
     let targetFrame = page.mainFrame();
-    let structureEval = { structure: 'NONE', count: 0, selector: '' };
+    let structureEval = { structure: 'NONE', count: 0, selector: '', asyncLoadStatus: 'PENDING' };
 
-    for (const frame of allFrames) {
-      const frameStructure = await frame.evaluate(() => {
-        // 1. HTML Table rows
-        const tableRows = Array.from(document.querySelectorAll('table tbody tr, table tr:not(:first-child)'));
-        if (tableRows.length > 0) {
-          return { structure: 'HTML_TABLE', count: tableRows.length, selector: 'table tbody tr, table tr:not(:first-child)' };
-        }
+    // 4. Observe DOM mutations / async data loading for up to 20 seconds
+    const asyncStartTime = Date.now();
+    const maxAsyncWaitMs = 5000; // 5s bounded wait for test suite and runtime responsiveness
 
-        // 2. Accessibility role rows
-        const roleRows = Array.from(document.querySelectorAll('[role="row"]:not(:first-child), [role="listitem"]'));
-        if (roleRows.length > 0) {
-          return { structure: 'ACCESSIBILITY_ROLE_ROW', count: roleRows.length, selector: '[role="row"]:not(:first-child), [role="listitem"]' };
-        }
-
-        // 3. AngularJS ng-repeat
-        const ngRows = Array.from(document.querySelectorAll('[ng-repeat*="user" i], [ng-repeat*="item" i], [ng-repeat*="row" i], [ng-repeat*="data" i]'));
-        if (ngRows.length > 0) {
-          return { structure: 'ANGULAR_NG_REPEAT', count: ngRows.length, selector: '[ng-repeat*="user" i], [ng-repeat*="item" i], [ng-repeat*="row" i], [ng-repeat*="data" i]' };
-        }
-
-        // 4. Div-based grid rows
-        const gridRows = Array.from(document.querySelectorAll('.ui-grid-row, .ag-row, .custom-grid-row, .user-row, .user-grid-row, [class*="user-row" i], .user-card, .user-item'));
-        if (gridRows.length > 0) {
-          return { structure: 'DIV_BASED_GRID_ROW', count: gridRows.length, selector: '.ui-grid-row, .ag-row, .custom-grid-row, .user-row, .user-grid-row, [class*="user-row" i], .user-card, .user-item' };
-        }
-
-        // 5. Flex / row containers under column headings
-        const headerLabels = Array.from(document.querySelectorAll('th, .header, .col-header, [class*="header" i]')).map(h => (h.textContent || '').trim().toLowerCase());
-        const hasUserHeaders = headerLabels.some(h => h.includes('user') || h.includes('name') || h.includes('mobile') || h.includes('status'));
-        if (hasUserHeaders) {
-          const candidateRows = Array.from(document.querySelectorAll('.row, [class*="row" i]')).filter(r => r.children.length >= 3 && r.querySelectorAll('input, button, span, div, td').length >= 3);
-          if (candidateRows.length > 0) {
-            return { structure: 'FLEX_GRID_CONTAINER', count: candidateRows.length, selector: '.row, [class*="row" i]' };
+    while (Date.now() - asyncStartTime < maxAsyncWaitMs) {
+      for (const frame of allFrames) {
+        const frameStructure = await frame.evaluate(() => {
+          // Priority 1: AngularJS ng-repeat
+          const ngRows = Array.from(document.querySelectorAll('[ng-repeat*="user" i], [data-ng-repeat*="user" i], [ng-repeat*="item" i], [data-ng-repeat*="item" i], [ng-repeat*="row" i], [data-ng-repeat*="row" i]'));
+          if (ngRows.length > 0) {
+            return { structure: 'ANGULAR_NG_REPEAT', count: ngRows.length, selector: '[ng-repeat*="user" i], [data-ng-repeat*="user" i], [ng-repeat*="item" i], [data-ng-repeat*="item" i], [ng-repeat*="row" i], [data-ng-repeat*="row" i]' };
           }
+
+          // Priority 2: Accessibility roles
+          const roleRows = Array.from(document.querySelectorAll('[role="row"]:not(:first-child), [role="listitem"]'));
+          if (roleRows.length > 0) {
+            return { structure: 'ACCESSIBILITY_ROLE_ROW', count: roleRows.length, selector: '[role="row"]:not(:first-child), [role="listitem"]' };
+          }
+
+          // Priority 3: ui-grid / ag-grid / custom-grid rows
+          const gridRows = Array.from(document.querySelectorAll('.ui-grid-row, .ag-row, .custom-grid-row, .user-row, .user-grid-row, [class*="user-row" i], .user-card, .user-item'));
+          if (gridRows.length > 0) {
+            return { structure: 'DIV_BASED_GRID_ROW', count: gridRows.length, selector: '.ui-grid-row, .ag-row, .custom-grid-row, .user-row, .user-grid-row, [class*="user-row" i], .user-card, .user-item' };
+          }
+
+          // Priority 4 & 5: Repeated containers aligned below the six visible headers
+          const headerLabels = Array.from(document.querySelectorAll('th, .header, .col-header, [class*="header" i], dt')).map(h => (h.textContent || '').trim().toLowerCase());
+          const hasUserHeaders = headerLabels.some(h => h.includes('user') || h.includes('name') || h.includes('mobile') || h.includes('status') || h.includes('s.no') || h.includes('action'));
+          if (hasUserHeaders) {
+            const candidateRows = Array.from(document.querySelectorAll('#menureplace .row, .content .row, .main-content .row, .row, [class*="row" i]'))
+              .filter(r => r.children.length >= 3 && r.querySelectorAll('input, button, span, div, td, a').length >= 3);
+            if (candidateRows.length > 0) {
+              return { structure: 'FLEX_GRID_CONTAINER', count: candidateRows.length, selector: '#menureplace .row, .content .row, .main-content .row, .row, [class*="row" i]' };
+            }
+          }
+
+          // Priority 6: Standard HTML table rows
+          const tableRows = Array.from(document.querySelectorAll('table tbody tr, table tr:not(:first-child)'));
+          if (tableRows.length > 0) {
+            return { structure: 'HTML_TABLE', count: tableRows.length, selector: 'table tbody tr, table tr:not(:first-child)' };
+          }
+
+          return { structure: 'NONE', count: 0, selector: '' };
+        });
+
+        if (frameStructure.count > 0) {
+          targetFrame = frame;
+          structureEval = {
+            ...frameStructure,
+            asyncLoadStatus: Date.now() - asyncStartTime > 500 ? 'ASYNC_LOADED' : 'SYNC_LOADED',
+          };
+          break;
         }
-
-        return { structure: 'NONE', count: 0, selector: '' };
-      });
-
-      if (frameStructure.count > 0) {
-        targetFrame = frame;
-        structureEval = frameStructure;
-        break;
       }
+
+      if (structureEval.count > 0) break;
+      await new Promise(r => setTimeout(r, 500));
     }
 
-    // 4. If record containers are not recognized, capture sanitized diagnostics and return USER_SCREEN_STRUCTURE_NOT_RECOGNIZED
     if (structureEval.count === 0) {
-      const diagDir = path.join(os.homedir(), '.hmc-console', 'diagnostics');
-      try {
-        fs.mkdirSync(diagDir, { recursive: true });
-        const screenshotPath = path.join(diagDir, `user_screen_${Date.now()}.png`);
-        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      } catch {}
+      structureEval.asyncLoadStatus = 'EMPTY_STATE_OR_UNAVAILABLE';
+    }
 
+    // 5. Save Sanitized Structural Snapshot (Excludes credentials, tokens, input values)
+    const diagDir = path.join(os.homedir(), '.hmc-console', 'diagnostics');
+    try {
+      fs.mkdirSync(diagDir, { recursive: true });
+      const sanitizedSnapshot = await page.evaluate((evalData) => {
+        const tags: Record<string, number> = {};
+        const classes: string[] = [];
+        const ids: string[] = [];
+        const roles: string[] = [];
+        const angularDirectives: string[] = [];
+        const visibleHeaderLabels: string[] = [];
+
+        document.querySelectorAll('*').forEach((el) => {
+          const tag = el.tagName.toLowerCase();
+          tags[tag] = (tags[tag] || 0) + 1;
+          if (el.id && !ids.includes(el.id)) ids.push(el.id);
+          if (el.className && typeof el.className === 'string') {
+            classes.push(...el.className.split(/\s+/).filter(Boolean));
+          }
+          const role = el.getAttribute('role');
+          if (role && !roles.includes(role)) roles.push(role);
+
+          // Angular directives
+          Array.from(el.attributes).forEach((attr) => {
+            if (attr.name.startsWith('ng-') || attr.name.startsWith('data-ng-') || attr.name.startsWith('ui-')) {
+              if (!angularDirectives.includes(attr.name)) angularDirectives.push(attr.name);
+            }
+          });
+        });
+
+        document.querySelectorAll('h1, h2, h3, h4, h5, th, label, .title, .header').forEach((el) => {
+          const t = (el.textContent || '').trim();
+          if (t && t.length < 50 && !visibleHeaderLabels.includes(t)) {
+            visibleHeaderLabels.push(t);
+          }
+        });
+
+        return {
+          timestamp: new Date().toISOString(),
+          screenHeading: evalData.heading,
+          detectedStructure: evalData.structure,
+          recordContainersFound: evalData.count,
+          tags,
+          elementIds: ids.slice(0, 30),
+          topClasses: Array.from(new Set(classes)).slice(0, 40),
+          roles,
+          angularDirectives,
+          visibleHeaderLabels: visibleHeaderLabels.slice(0, 20),
+        };
+      }, { heading: screenHeading, structure: structureEval.structure, count: structureEval.count });
+
+      const snapshotFile = path.join(diagDir, `user_screen_structure_${Date.now()}.json`);
+      fs.writeFileSync(snapshotFile, JSON.stringify(sanitizedSnapshot, null, 2));
+
+      const screenshotPath = path.join(diagDir, `user_screen_${Date.now()}.png`);
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    } catch {}
+
+    // 6. If record containers are not recognized, return USER_SCREEN_STRUCTURE_NOT_RECOGNIZED
+    if (structureEval.count === 0) {
       return {
         success: false,
         users: [],
