@@ -235,7 +235,20 @@ export const UsersPage: React.FC = () => {
       setTotalCount(res.totalCount || 0);
       setLastSyncedAt(res.lastSyncedAt || null);
       if (res.liveClientOptions) {
-        setClientOptions(res.liveClientOptions as any);
+        const toStrings = (arr: any[]): string[] => {
+          if (!Array.isArray(arr)) return [];
+          return arr
+            .map((item: any) =>
+              typeof item === 'string' ? item : (item?.label || item?.value || '')
+            )
+            .filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+        };
+
+        setClientOptions({
+          nationalities: toStrings(res.liveClientOptions.nationalities),
+          roles: toStrings(res.liveClientOptions.roles),
+          profileRoles: toStrings(res.liveClientOptions.profileRoles),
+        });
       }
     } catch (err: any) {
       if (currentReqId !== reqIdRef.current) return;
@@ -858,11 +871,14 @@ export const UsersPage: React.FC = () => {
             className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-sky-500"
           >
             <option value="ALL">All Roles</option>
-            {clientOptions.roles.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
+            {clientOptions.roles.map((r: any) => {
+              const val = typeof r === 'string' ? r : (r?.label || r?.value || '');
+              return (
+                <option key={val} value={val}>
+                  {val}
+                </option>
+              );
+            })}
           </select>
         </div>
 
@@ -1310,13 +1326,16 @@ export const UsersPage: React.FC = () => {
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
               >
                 {(formMetadata?.nationalities?.length
-                  ? formMetadata.nationalities.map((n: any) => (typeof n === 'string' ? n : n.label || n.value))
+                  ? formMetadata.nationalities.map((n: any) => (typeof n === 'string' ? n : n?.label || n?.value || ''))
                   : clientOptions.nationalities
-                ).map((n: string) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
+                ).map((n: any) => {
+                  const val = typeof n === 'string' ? n : (n?.label || n?.value || '');
+                  return (
+                    <option key={val} value={val}>
+                      {val}
+                    </option>
+                  );
+                })}
               </select>
             </div>
             <div>
@@ -1330,20 +1349,23 @@ export const UsersPage: React.FC = () => {
                     const prof = formMetadata.profileRoles.find(
                       (p: any) => p.roleDependency && p.roleDependency.toLowerCase() === newRole.toLowerCase()
                     );
-                    if (prof) matchingProf = typeof prof === 'string' ? prof : prof.label || prof.value;
+                    if (prof) matchingProf = typeof prof === 'string' ? prof : prof?.label || prof?.value || '';
                   }
                   setCreateForm({ ...createForm, role: newRole, profileRole: matchingProf });
                 }}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
               >
                 {(formMetadata?.roles?.length
-                  ? formMetadata.roles.map((r: any) => (typeof r === 'string' ? r : r.label || r.value))
+                  ? formMetadata.roles.map((r: any) => (typeof r === 'string' ? r : r?.label || r?.value || ''))
                   : clientOptions.roles
-                ).map((r: string) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
+                ).map((r: any) => {
+                  const val = typeof r === 'string' ? r : (r?.label || r?.value || '');
+                  return (
+                    <option key={val} value={val}>
+                      {val}
+                    </option>
+                  );
+                })}
               </select>
             </div>
             <div>
@@ -1360,13 +1382,16 @@ export const UsersPage: React.FC = () => {
                           !pr.roleDependency ||
                           pr.roleDependency.toLowerCase() === (createForm.role || '').toLowerCase()
                       )
-                      .map((pr: any) => (typeof pr === 'string' ? pr : pr.label || pr.value))
+                      .map((pr: any) => (typeof pr === 'string' ? pr : pr?.label || pr?.value || ''))
                   : clientOptions.profileRoles
-                ).map((pr: string) => (
-                  <option key={pr} value={pr}>
-                    {pr}
-                  </option>
-                ))}
+                ).map((pr: any) => {
+                  const val = typeof pr === 'string' ? pr : (pr?.label || pr?.value || '');
+                  return (
+                    <option key={val} value={val}>
+                      {val}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           </div>
@@ -1543,9 +1568,14 @@ export const UsersPage: React.FC = () => {
                 onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
               >
-                {clientOptions.roles.map((r) => (
-                  <option key={r} value={r}>{r}</option>
-                ))}
+                {clientOptions.roles.map((r: any) => {
+                  const val = typeof r === 'string' ? r : (r?.label || r?.value || '');
+                  return (
+                    <option key={val} value={val}>
+                      {val}
+                    </option>
+                  );
+                })}
               </select>
             </div>
             <div>
@@ -1555,9 +1585,14 @@ export const UsersPage: React.FC = () => {
                 onChange={(e) => setEditForm({ ...editForm, profileRole: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
               >
-                {clientOptions.profileRoles.map((pr) => (
-                  <option key={pr} value={pr}>{pr}</option>
-                ))}
+                {clientOptions.profileRoles.map((pr: any) => {
+                  const val = typeof pr === 'string' ? pr : (pr?.label || pr?.value || '');
+                  return (
+                    <option key={val} value={val}>
+                      {val}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           </div>
