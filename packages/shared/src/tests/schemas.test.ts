@@ -21,12 +21,20 @@ function runSchemaTests() {
     clientCode: 'HMC_METRO',
     clientName: 'Metro General Hospital',
     baseUrl: 'https://metro.hmc.example.com',
-    environment: 'Production',
+    environment: 'Staging',
   });
   if (!validClient.success) throw new Error(`Valid client failed: ${JSON.stringify(validClient.error)}`);
 
+  const validLocalClient = CreateClientSchema.safeParse({
+    clientCode: 'HMC_LOCAL',
+    clientName: 'Local Hospital Dev',
+    baseUrl: 'http://localhost:3000',
+    environment: 'Local',
+  });
+  if (!validLocalClient.success) throw new Error(`Valid local client failed: ${JSON.stringify(validLocalClient.error)}`);
+
   const invalidClient = CreateClientSchema.safeParse({
-    clientCode: 'lowercase_invalid',
+    clientCode: '!',
     clientName: 'Test',
     baseUrl: 'not-a-valid-url',
     environment: 'InvalidEnv',
