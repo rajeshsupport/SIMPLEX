@@ -100,28 +100,8 @@ export class UserManagementExecutor {
       count: 0,
     });
 
-    try {
-      await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    } catch (err: any) {
-      return {
-        success: false,
-        users: [],
-        totalScraped: 0,
-        liveStatus: 'CACHED',
-        errorCode: 'CLIENT_USER_SYNC_TIMEOUT',
-        errorMessage: `Connection timeout navigating to ${usersUrl}: ${err.message}`,
-        options: this.getDefaultOptions(),
-      };
-    }
-
-    // Check if redirected to login page or if login form is present
-    const isLoginPage = await page.evaluate(() => {
-      const isLoginUrl = window.location.pathname.toLowerCase().includes('login');
-      const hasLoginForm = document.querySelector('form[action*="login" i], input[type="password"]') !== null;
-      return isLoginUrl || hasLoginForm;
-    });
-
-    if (isLoginPage) {
+    // Perform background authentication if credentials are provided and session is not authenticated
+    if (credentials && credentials.username && credentials.password) {
       onProgress?.({
         stage: 'AUTHENTICATING',
         message: 'Authenticating securely…',
@@ -129,14 +109,17 @@ export class UserManagementExecutor {
         count: 0,
       });
 
-      if (!credentials || !credentials.username || !credentials.password) {
+      const targetLoginUrl = loginUrl || usersUrl.replace(/\/users.*$/i, '/login');
+      try {
+        await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch (err: any) {
         return {
           success: false,
           users: [],
           totalScraped: 0,
           liveStatus: 'CACHED',
-          errorCode: 'CLIENT_BACKGROUND_LOGIN_FAILED',
-          errorMessage: 'Background login required but no active credentials configured for this client.',
+          errorCode: 'CLIENT_USER_SYNC_TIMEOUT',
+          errorMessage: `Connection timeout navigating to login page: ${err.message}`,
           options: this.getDefaultOptions(),
         };
       }
@@ -162,8 +145,9 @@ export class UserManagementExecutor {
       await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
       await submitLoc.locator.click();
 
-      // Wait for navigation after authentication without long fixed sleeps
+      // Confirm login redirect completed and wait for authenticated facility header
       await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+      await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page', { timeout: 10000 }).catch(() => {});
 
       onProgress?.({
         stage: 'NAVIGATING',
@@ -174,6 +158,21 @@ export class UserManagementExecutor {
 
       // Navigate to target users route after authentication (15s timeout)
       await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.waitForSelector('table tbody tr, [ng-repeat], [role="row"], .user-row', { timeout: 8000 }).catch(() => {});
+    } else {
+      try {
+        await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch (err: any) {
+        return {
+          success: false,
+          users: [],
+          totalScraped: 0,
+          liveStatus: 'CACHED',
+          errorCode: 'CLIENT_USER_SYNC_TIMEOUT',
+          errorMessage: `Connection timeout navigating to ${usersUrl}: ${err.message}`,
+          options: this.getDefaultOptions(),
+        };
+      }
     }
 
     // Check for Access Denied or Client Error Page
@@ -250,7 +249,13 @@ export class UserManagementExecutor {
             return { structure: 'DIV_BASED_GRID_ROW', count: gridRows.length, selector: '.ui-grid-row, .ag-row, .custom-grid-row, .user-row, .user-grid-row, [class*="user-row" i], .user-card, .user-item' };
           }
 
-          // Priority 4 & 5: Repeated containers aligned below the six visible headers
+          // Priority 4: Standard HTML table rows
+          const tableRows = Array.from(document.querySelectorAll('table tbody tr, table tr:not(:first-child)'));
+          if (tableRows.length > 0) {
+            return { structure: 'HTML_TABLE', count: tableRows.length, selector: 'table tbody tr, table tr:not(:first-child)' };
+          }
+
+          // Priority 5: Repeated containers aligned below the six visible headers
           const headerLabels = Array.from(document.querySelectorAll('th, .header, .col-header, [class*="header" i], dt')).map(h => (h.textContent || '').trim().toLowerCase());
           const hasUserHeaders = headerLabels.some(h => h.includes('user') || h.includes('name') || h.includes('mobile') || h.includes('status') || h.includes('s.no') || h.includes('action'));
           if (hasUserHeaders) {
@@ -259,12 +264,6 @@ export class UserManagementExecutor {
             if (candidateRows.length > 0) {
               return { structure: 'FLEX_GRID_CONTAINER', count: candidateRows.length, selector: '#menureplace .row, .content .row, .main-content .row, .row, [class*="row" i]' };
             }
-          }
-
-          // Priority 6: Standard HTML table rows
-          const tableRows = Array.from(document.querySelectorAll('table tbody tr, table tr:not(:first-child)'));
-          if (tableRows.length > 0) {
-            return { structure: 'HTML_TABLE', count: tableRows.length, selector: 'table tbody tr, table tr:not(:first-child)' };
           }
 
           return { structure: 'NONE', count: 0, selector: '' };
@@ -413,14 +412,18 @@ export class UserManagementExecutor {
           // Status detection: icon, class, label, tooltip, or accessibility text
           const statusCell = colStatus >= 0 && colStatus < cells.length ? r.querySelectorAll('td, [role="gridcell"], .cell')[colStatus] : r;
           const statusText = statusCell ? (statusCell.textContent || '').toUpperCase() : '';
-
-          const hasActiveIndicator =
-            statusCell.querySelectorAll('.glyphicon-ok, .fa-check, .fa-toggle-on, .text-success, .status-active, .badge-success, [title*="active" i], [aria-label*="active" i]').length > 0 ||
-            statusText.includes('ACTIVE') || statusText.includes('ENABLED') || statusText.includes('ON');
+          const statusHtml = statusCell ? (statusCell.innerHTML || '') : '';
 
           const hasInactiveIndicator =
-            statusCell.querySelectorAll('.glyphicon-remove, .fa-times, .fa-toggle-off, .text-danger, .status-inactive, .badge-danger, [title*="inactive" i], [aria-label*="inactive" i]').length > 0 ||
-            statusText.includes('INACTIVE') || statusText.includes('DISABLED') || statusText.includes('OFF') || statusText.includes('LOCKED') || statusText.includes('BLOCK');
+            statusCell.querySelectorAll('.glyphicon-remove, .glyphicon-remove-circle, .fa-times, .fa-toggle-off, .text-danger, .status-inactive, .badge-danger, [title*="inactive" i], [title*="deactive" i], [aria-label*="inactive" i], [aria-label*="deactive" i]').length > 0 ||
+            statusHtml.includes('glyphicon-remove') || statusHtml.includes('Deactive') || statusHtml.includes('/D"') || statusHtml.includes('color:red') ||
+            statusText.includes('INACTIVE') || statusText.includes('DEACTIVE') || statusText.includes('DISABLED') || statusText.includes('OFF') || statusText.includes('LOCKED') || statusText.includes('BLOCK');
+
+          const hasActiveIndicator = !hasInactiveIndicator && (
+            statusCell.querySelectorAll('.glyphicon-ok, .glyphicon-ok-sign, .fa-check, .fa-toggle-on, .text-success, .status-active, .badge-success, [title*="active" i], [aria-label*="active" i]').length > 0 ||
+            statusHtml.includes('glyphicon-ok') || statusHtml.includes('title="Active"') || statusHtml.includes('/A"') || statusHtml.includes('color:green') ||
+            statusText.includes('ACTIVE') || statusText.includes('ENABLED') || statusText.includes('ON')
+          );
 
           return {
             cells,

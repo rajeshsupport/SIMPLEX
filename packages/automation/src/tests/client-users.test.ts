@@ -306,8 +306,35 @@ async function runClientUsersTests() {
     assert.strictEqual(failSyncResult.errorCode, 'USER_SCREEN_STRUCTURE_NOT_RECOGNIZED', 'Error code must be preserved as USER_SCREEN_STRUCTURE_NOT_RECOGNIZED');
     console.log('✓ TEST 15 Passed');
 
+    // 16. Client-specific V9.3 / V9.4 Route Resolution
+    console.log('\n[TEST 16] Testing Client-Specific V9.3 & V9.4 Routes...');
+    const v93UsersUrl = resolveClientRoute({
+      baseUrl: 'https://staging.simplexworld.com',
+      applicationPath: '/MasterV9.3',
+      route: '/users',
+    });
+    assert.strictEqual(v93UsersUrl, 'https://staging.simplexworld.com/MasterV9.3/users', 'Must resolve exact client-specific V9.3 users route');
+
+    const v94UsersUrl = resolveClientRoute({
+      baseUrl: 'https://staging.simplexworld.com',
+      applicationPath: '/MasterV9.4',
+      route: '/users',
+    });
+    assert.strictEqual(v94UsersUrl, 'https://staging.simplexworld.com/MasterV9.4/users', 'Must resolve exact client-specific V9.4 users route');
+    console.log('✓ TEST 16 Passed');
+
+    // 17. Populated Screen Sync Never Classified As Empty
+    console.log('\n[TEST 17] Testing Populated Screen Sync...');
+    const populatedSyncResult = await UserManagementExecutor.syncUsersHeadless(page, {
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+    });
+    assert.strictEqual(populatedSyncResult.success, true, 'Populated screen must succeed');
+    assert.ok(populatedSyncResult.totalScraped > 0, 'Must extract positive count of users');
+    assert.strictEqual(populatedSyncResult.liveStatus, 'LIVE');
+    console.log('✓ TEST 17 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (15/15)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (17/17)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});
