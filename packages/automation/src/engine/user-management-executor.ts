@@ -1,5 +1,6 @@
 import { Page, Locator } from 'playwright';
 import { ClientUser, CreateClientUserDto, UpdateClientUserDto, ClientUserStatus } from '@hmc/shared';
+import { SelectorResolver } from './selector-resolver';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -126,12 +127,12 @@ export class UserManagementExecutor {
         };
       }
 
-      // Perform headless background login
-      const userInput = page.locator('#username, #txtUsername, [name="username"], [data-testid="input-username"], input[type="text"]').first();
-      const passInput = page.locator('#password, #txtPassword, [name="password"], [data-testid="input-password"], input[type="password"]').first();
-      const loginBtn = page.locator('#btnLogin, #btnSubmit, button[type="submit"], [data-testid="btn-login"]').first();
+      // Perform headless background login using SelectorResolver
+      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 6000);
+      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 6000);
+      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 6000);
 
-      if (!(await userInput.isVisible({ timeout: 5000 }).catch(() => false)) || !(await passInput.isVisible({ timeout: 5000 }).catch(() => false))) {
+      if (!userLoc || !passLoc || !submitLoc) {
         return {
           success: false,
           users: [],
@@ -143,30 +144,17 @@ export class UserManagementExecutor {
         };
       }
 
-      await userInput.fill(credentials.username);
-      await passInput.fill(credentials.password);
-      await loginBtn.click();
+      await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
+      await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
+      await submitLoc.locator.click();
 
-      // Wait for navigation away from login
-      try {
-        await page.waitForFunction(
-          () => !window.location.pathname.toLowerCase().includes('login') && document.querySelector('input[type="password"]') === null,
-          { timeout: 10000 }
-        );
-      } catch {
-        return {
-          success: false,
-          users: [],
-          totalScraped: 0,
-          liveStatus: 'CACHED',
-          errorCode: 'CLIENT_BACKGROUND_LOGIN_FAILED',
-          errorMessage: 'Background authentication failed or credentials were rejected by client portal.',
-          options: this.getDefaultOptions(),
-        };
-      }
+      // Wait for login navigation / loginCheck
+      await page.waitForTimeout(3000);
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
 
       // Navigate to target users route after authentication
-      await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(2000);
     }
 
     // Check for Access Denied or Client Error Page
@@ -194,24 +182,28 @@ export class UserManagementExecutor {
     }
 
     // Wait for the user table or explicit empty state
-    const tableLocator = page.locator('table, [data-testid="users-table"], #usersTable, .user-grid').first();
+    const tableLocator = page.locator('table, [data-testid="users-table"], #usersTable, .user-grid, table tbody tr, table tr').first();
     const hasTable = await tableLocator.waitFor({ state: 'visible', timeout: 6000 }).then(() => true).catch(() => false);
 
     const isExplicitEmpty = await page.evaluate(() => {
       const text = document.body ? document.body.innerText.toLowerCase() : '';
-      return text.includes('no users found') || text.includes('no records available') || text.includes('no data');
+      return text.includes('no users found') || text.includes('no records available') || text.includes('no data') || text.includes('0 records');
     });
 
     if (!hasTable && !isExplicitEmpty) {
-      return {
-        success: false,
-        users: [],
-        totalScraped: 0,
-        liveStatus: 'CACHED',
-        errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
-        errorMessage: 'User table could not be identified on client users route.',
-        options: this.getDefaultOptions(),
-      };
+      // If table is not directly found, check if there are any rows in document
+      const anyRows = await page.$$('tr').then(r => r.length > 0).catch(() => false);
+      if (!anyRows) {
+        return {
+          success: false,
+          users: [],
+          totalScraped: 0,
+          liveStatus: 'CACHED',
+          errorCode: 'CLIENT_USER_TABLE_NOT_FOUND',
+          errorMessage: 'User table could not be identified on client users route.',
+          options: this.getDefaultOptions(),
+        };
+      }
     }
 
     const scrapedUsersMap = new Map<string, ScrapedClientUser>();
@@ -226,42 +218,63 @@ export class UserManagementExecutor {
     });
 
     while (currentPage <= maxPages) {
-      // Scrape current page rows
+      // Scrape current page rows with header awareness
       const pageRowsData = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll('table tbody tr, [data-testid="user-row"], .user-table-row'));
+        // Detect column indices from headers
+        const headers = Array.from(document.querySelectorAll('table thead th, table tr:first-child th, table tr:first-child td')).map(h => (h.textContent || '').trim().toLowerCase());
+        
+        let colFullName = -1;
+        let colUsername = -1;
+        let colMobile = -1;
+        let colEmail = -1;
+        let colNationality = -1;
+        let colRole = -1;
+        let colProfileRole = -1;
+        let colStatus = -1;
+
+        headers.forEach((h, idx) => {
+          if (h.includes('user name') || h.includes('full name')) colFullName = idx;
+          else if (h === 'name' || h.includes('user id') || h.includes('username') || h.includes('login')) colUsername = idx;
+          else if (h.includes('mobile') || h.includes('phone') || h.includes('contact')) colMobile = idx;
+          else if (h.includes('email') || h.includes('mail')) colEmail = idx;
+          else if (h.includes('national') || h.includes('country')) colNationality = idx;
+          else if (h.includes('profile role') || h.includes('designation')) colProfileRole = idx;
+          else if (h.includes('role') || h.includes('group') || h.includes('type')) colRole = idx;
+          else if (h.includes('status') || h.includes('state')) colStatus = idx;
+        });
+
+        const rows = Array.from(document.querySelectorAll('table tbody tr, [data-testid="user-row"], .user-table-row, table tr:not(:first-child)'));
         return rows.map((r) => {
           const cells = Array.from(r.querySelectorAll('td')).map((c) => (c.textContent || '').trim());
           const hasSig = r.querySelectorAll('img[src*="sig" i], a[href*="sig" i], .has-signature').length > 0;
           const hasStmp = r.querySelectorAll('img[src*="stamp" i], a[href*="stamp" i], .has-stamp').length > 0;
           const hasProf = r.querySelectorAll('img[src*="profile" i], img[src*="user" i], .user-avatar').length > 0;
-          return { cells, hasSig, hasStmp, hasProf };
+          
+          // Check cell status classes or icons
+          const statusCell = colStatus >= 0 && colStatus < cells.length ? r.querySelectorAll('td')[colStatus] : null;
+          const hasActiveIcon = statusCell ? statusCell.querySelectorAll('.glyphicon-ok, .fa-check, .text-success, .status-active, .badge-success').length > 0 : false;
+          const hasInactiveIcon = statusCell ? statusCell.querySelectorAll('.glyphicon-remove, .fa-times, .text-danger, .status-inactive, .badge-danger').length > 0 : false;
+
+          return { cells, hasSig, hasStmp, hasProf, colFullName, colUsername, colMobile, colEmail, colNationality, colRole, colProfileRole, colStatus, hasActiveIcon, hasInactiveIcon };
         });
       });
 
       const pageUsers: ScrapedClientUser[] = [];
 
       for (let i = 0; i < pageRowsData.length; i++) {
-        const { cells: texts, hasSig, hasStmp, hasProf } = pageRowsData[i];
+        const row = pageRowsData[i];
+        const texts = row.cells;
         if (texts.length < 3) continue;
 
-        // Screenshot Mapping:
-        // Col 1: S.No (e.g. "1")
-        // Col 2: User Name -> mapped to Full Name (e.g. "Dr. Sarah Al-Mansoor")
-        // Col 3: Name      -> mapped to Username  (e.g. "dr_sarah")
-        // Col 4: Mobile No -> Mobile Number       (e.g. "0501234567")
-        // Col 5: Email     -> Email               (e.g. "sarah@hospital.com")
-        // Col 6: Nationality -> Nationality       (e.g. "Saudi Arabia")
-        // Col 7: Role      -> Role                (e.g. "Physician")
-        // Col 8: Profile Role -> Profile Role     (e.g. "Clinical Specialist")
-        // Col 9: Status    -> Status badge        (e.g. "Active")
-        let fullName = texts[1] || '';
-        let username = texts[2] || '';
-        let mobileNumber = texts[3] || '';
-        let email = texts[4] || '';
-        let nationality = texts[5] || '';
-        let role = texts[6] || '';
-        let profileRole = texts[7] || '';
-        let rawStatus = (texts[8] || '').toUpperCase();
+        // Use header mapped indices or fall back to positional indices
+        let fullName = (row.colFullName >= 0 ? texts[row.colFullName] : texts[1]) || '';
+        let username = (row.colUsername >= 0 ? texts[row.colUsername] : texts[2]) || '';
+        let mobileNumber = (row.colMobile >= 0 ? texts[row.colMobile] : texts[3]) || '';
+        let email = (row.colEmail >= 0 ? texts[row.colEmail] : texts[4]) || '';
+        let nationality = (row.colNationality >= 0 ? texts[row.colNationality] : texts[5]) || '';
+        let role = (row.colRole >= 0 ? texts[row.colRole] : texts[6]) || '';
+        let profileRole = (row.colProfileRole >= 0 ? texts[row.colProfileRole] : texts[7]) || '';
+        let rawStatus = ((row.colStatus >= 0 ? texts[row.colStatus] : texts[8]) || '').toUpperCase();
 
         if (!username && email.includes('@')) {
           username = email.split('@')[0];
@@ -271,10 +284,12 @@ export class UserManagementExecutor {
 
         if (!username) continue;
 
-        const status: ClientUserStatus =
-          rawStatus.includes('INACTIVE') || rawStatus.includes('DISABLED') || rawStatus.includes('OFF')
-            ? 'INACTIVE'
-            : 'ACTIVE';
+        let status: ClientUserStatus = 'ACTIVE';
+        if (row.hasInactiveIcon || rawStatus.includes('INACTIVE') || rawStatus.includes('DISABLED') || rawStatus.includes('OFF') || rawStatus.includes('LOCKED') || rawStatus.includes('BLOCK')) {
+          status = 'INACTIVE';
+        } else if (row.hasActiveIcon || rawStatus.includes('ACTIVE') || rawStatus.includes('ENABLED') || rawStatus.includes('ON')) {
+          status = 'ACTIVE';
+        }
 
         const nameParts = fullName.split(' ').filter(Boolean);
         const firstName = nameParts[0] || username;
@@ -294,9 +309,9 @@ export class UserManagementExecutor {
           role: role || undefined,
           profileRole: profileRole || undefined,
           status,
-          hasSignature: hasSig,
-          hasStamp: hasStmp,
-          hasProfileImage: hasProf,
+          hasSignature: row.hasSig,
+          hasStamp: row.hasStmp,
+          hasProfileImage: row.hasProf,
           remoteCreatedAt: undefined,
           remoteUpdatedAt: undefined,
         };
@@ -316,7 +331,7 @@ export class UserManagementExecutor {
 
       // Look for Next page control
       const nextButton = page.locator(
-        'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a'
+        'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i]'
       ).first();
 
       const isNextCount = await nextButton.count();
@@ -325,7 +340,7 @@ export class UserManagementExecutor {
         const isAriaDisabled = await nextButton.getAttribute('aria-disabled');
         if (!isDisabled && isAriaDisabled !== 'true') {
           await nextButton.click().catch(() => {});
-          await page.waitForTimeout(150);
+          await page.waitForTimeout(200);
           currentPage++;
           continue;
         }
