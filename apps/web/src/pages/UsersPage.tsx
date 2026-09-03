@@ -1,400 +1,1414 @@
-import React, { useEffect, useState } from 'react';
-import { Users, Plus, KeyRound, Unlock, Shield, Search } from 'lucide-react';
+import React, { useEffect, useState, useRef } from 'react';
+import {
+  Users,
+  Plus,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Edit2,
+  Power,
+  RefreshCw,
+  Search,
+  Loader2,
+  Upload,
+  Download,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
+  FileSpreadsheet,
+  Building2,
+  Phone,
+  Mail,
+  Globe,
+  Shield,
+  Copy,
+  Clock,
+  UserCheck,
+  UserX,
+  ExternalLink,
+} from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { Modal } from '../components/Modal.js';
-import { UserSummary, RoleSummary, ClientWithCredentialInfo, PERMISSIONS } from '@hmc/shared';
+import { EnvironmentBadge } from '../components/EnvironmentBadge.js';
+import {
+  ClientUser,
+  ClientUserListResponse,
+  CreateClientUserDto,
+  UpdateClientUserDto,
+  ClientWithCredentialInfo,
+  ExcelUserImportPreviewResult,
+  ExcelUserImportExecutionSummary,
+  PERMISSIONS,
+} from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
 
 export const UsersPage: React.FC = () => {
-  const [users, setUsers] = useState<UserSummary[]>([]);
-  const [roles, setRoles] = useState<RoleSummary[]>([]);
   const [clients, setClients] = useState<ClientWithCredentialInfo[]>([]);
+  const [selectedClientId, setSelectedClientId] = useState<string>('');
+  const [users, setUsers] = useState<ClientUser[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  // Filters
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [roleFilter, setRoleFilter] = useState<string>('ALL');
+  const [page, setPage] = useState(1);
+  const limit = 20;
 
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
-  const [selectedUser, setSelectedUser] = useState<UserSummary | null>(null);
-
-  const [createForm, setCreateForm] = useState({
-    username: '',
-    email: '',
-    fullName: '',
-    password: '',
-    roleIds: [] as string[],
-    assignedClientIds: [] as string[],
+  // Options
+  const [clientOptions, setClientOptions] = useState<{
+    nationalities: string[];
+    roles: string[];
+    profileRoles: string[];
+  }>({
+    nationalities: ['Saudi Arabia', 'United Arab Emirates', 'United States', 'United Kingdom', 'India', 'Egypt', 'Jordan', 'Pakistan', 'Philippines', 'Other'],
+    roles: ['Physician', 'Nurse', 'Admin', 'Pharmacist', 'Lab Technician', 'Operator', 'Super User'],
+    profileRoles: ['Clinical Specialist', 'General Practitioner', 'Head Nurse', 'Chief Pharmacist', 'System Administrator', 'Billing Specialist'],
   });
 
-  const [newPassword, setNewPassword] = useState('');
+  // Modals state
+  const [isViewModalOpen, setIsViewModalOpen] = useState(false);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+
+  const [selectedUser, setSelectedUser] = useState<ClientUser | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+
+  // Forms
+  const [createForm, setCreateForm] = useState<CreateClientUserDto>({
+    clientId: '',
+    username: '',
+    firstName: '',
+    middleName: '',
+    lastName: '',
+    nickName: '',
+    email: '',
+    mobileNumber: '',
+    nationality: 'Saudi Arabia',
+    role: 'Physician',
+    profileRole: 'Clinical Specialist',
+    barcodeNumber: '',
+    signatureBase64: '',
+    signatureFilename: '',
+    stampBase64: '',
+    stampFilename: '',
+    profileBase64: '',
+    profileFilename: '',
+    status: 'ACTIVE',
+    overrideDuplicateName: false,
+  });
+
+  const [editForm, setEditForm] = useState<UpdateClientUserDto>({
+    firstName: '',
+    middleName: '',
+    lastName: '',
+    nickName: '',
+    email: '',
+    mobileNumber: '',
+    nationality: '',
+    role: '',
+    profileRole: '',
+    barcodeNumber: '',
+    status: 'ACTIVE',
+  });
+
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [potentialDuplicate, setPotentialDuplicate] = useState<{
+    username: string;
+    fullName: string;
+    mobileNumber?: string;
+    status: string;
+  } | null>(null);
+
+  // Temporary password capture state (one-time reveal)
+  const [tempPassword, setTempPassword] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const [passwordCountdown, setPasswordCountdown] = useState<number>(60);
+  const [copied, setCopied] = useState(false);
+  const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Excel Import state
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<ExcelUserImportPreviewResult | null>(null);
+  const [importExecution, setImportExecution] = useState<ExcelUserImportExecutionSummary | null>(null);
+  const [importing, setImporting] = useState(false);
+
   const { hasPermission } = useAuth();
 
-  const loadData = async () => {
+  // Load clients on mount
+  useEffect(() => {
+    const loadClients = async () => {
+      try {
+        const data = await ApiClient.request<ClientWithCredentialInfo[]>('/clients');
+        setClients(data || []);
+        if (data && data.length > 0 && !selectedClientId) {
+          setSelectedClientId(data[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to load clients', err);
+      }
+    };
+    loadClients();
+  }, []);
+
+  // Load users when client or filters change
+  const loadUsers = async () => {
+    if (!selectedClientId) return;
     try {
       setLoading(true);
-      const [usersData, rolesData, clientsData] = await Promise.all([
-        ApiClient.request<UserSummary[]>('/users'),
-        ApiClient.request<RoleSummary[]>('/rbac/roles'),
-        ApiClient.request<ClientWithCredentialInfo[]>('/clients'),
-      ]);
-      setUsers(usersData || []);
-      setRoles(rolesData || []);
-      setClients(clientsData || []);
-    } catch (err) {
-      console.error('Failed to load users data', err);
+      const res = await ApiClient.request<ClientUserListResponse>(
+        `/client-users?clientId=${selectedClientId}&search=${encodeURIComponent(search)}&status=${statusFilter}&role=${encodeURIComponent(roleFilter)}&page=${page}&limit=${limit}`
+      );
+      setUsers(res.users || []);
+      setTotalCount(res.totalCount || 0);
+      setLastSyncedAt(res.lastSyncedAt || null);
+      if (res.liveClientOptions) {
+        setClientOptions(res.liveClientOptions);
+      }
+    } catch (err: any) {
+      console.error('Failed to load client users', err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadData();
-  }, []);
+    loadUsers();
+  }, [selectedClientId, search, statusFilter, roleFilter, page]);
 
+  // Sync Users
+  const handleSyncUsers = async () => {
+    if (!selectedClientId || syncing) return;
+    try {
+      setSyncing(true);
+      setActionMessage({ type: 'info', text: 'Connecting to client and scraping live user directory…' });
+      const res = await ApiClient.request<ClientUserListResponse>('/client-users/sync', {
+        method: 'POST',
+        body: JSON.stringify({ clientId: selectedClientId }),
+      });
+      setUsers(res.users || []);
+      setTotalCount(res.totalCount || 0);
+      setLastSyncedAt(res.lastSyncedAt || new Date().toISOString());
+      setActionMessage({ type: 'success', text: `✓ Synchronized ${res.totalCount} users successfully from client.` });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: `Sync failed: ${err.message}` });
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setActionMessage(null), 5000);
+    }
+  };
+
+  // Create User
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (createForm.roleIds.length === 0) {
-      alert('Please assign at least one role');
-      return;
-    }
+    setCreateError(null);
+    setPotentialDuplicate(null);
 
     try {
-      await ApiClient.request('/users', {
+      const payload: CreateClientUserDto = {
+        ...createForm,
+        clientId: selectedClientId,
+      };
+
+      const res = await ApiClient.request<ClientUser>('/client-users', {
         method: 'POST',
-        body: JSON.stringify(createForm),
+        body: JSON.stringify(payload),
       });
+
       setIsCreateModalOpen(false);
-      setCreateForm({
-        username: '',
-        email: '',
-        fullName: '',
-        password: '',
-        roleIds: [],
-        assignedClientIds: [],
-      });
-      await loadData();
+      setActionMessage({ type: 'success', text: `✓ User '${res.username}' created and verified on client.` });
+      await loadUsers();
     } catch (err: any) {
-      alert(`Error creating user: ${err.message}`);
+      if (err.response?.code === 'POTENTIAL_DUPLICATE_NAME') {
+        setCreateError(err.message || 'Possible duplicate name detected.');
+        setPotentialDuplicate(err.response.potentialDuplicateOf);
+      } else if (err.response?.code === 'DUPLICATE_USERNAME') {
+        setCreateError(err.message || 'Username already exists.');
+      } else {
+        setCreateError(err.message || 'Failed to create user on client.');
+      }
     }
   };
 
-  const handleUnlockUser = async (user: UserSummary) => {
-    try {
-      await ApiClient.request(`/users/${user.id}/unlock`, { method: 'POST' });
-      await loadData();
-      alert(`User ${user.username} unlocked successfully.`);
-    } catch (err: any) {
-      alert(`Unlock failed: ${err.message}`);
-    }
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
+  // Edit User
+  const handleEditUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedUser) return;
     try {
-      await ApiClient.request('/auth/admin-reset-password', {
-        method: 'POST',
-        body: JSON.stringify({
-          userId: selectedUser.id,
-          newPassword,
-          requirePasswordChangeOnLogin: true,
-        }),
+      await ApiClient.request(`/client-users/${selectedUser.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(editForm),
       });
-      setIsResetModalOpen(false);
-      setNewPassword('');
-      alert(`Password for ${selectedUser.username} has been reset.`);
+      setIsEditModalOpen(false);
+      setActionMessage({ type: 'success', text: `✓ User '${selectedUser.username}' updated successfully.` });
+      await loadUsers();
+    } catch (err: any) {
+      alert(`Update failed: ${err.message}`);
+    }
+  };
+
+  // Status Change
+  const handleStatusChange = async () => {
+    if (!selectedUser) return;
+    const nextStatus = selectedUser.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    try {
+      await ApiClient.request(`/client-users/${selectedUser.id}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      setIsStatusModalOpen(false);
+      setActionMessage({ type: 'success', text: `✓ User '${selectedUser.username}' set to ${nextStatus}.` });
+      await loadUsers();
+    } catch (err: any) {
+      alert(`Status update failed: ${err.message}`);
+    }
+  };
+
+  // Password Reset
+  const handleResetPassword = async () => {
+    if (!selectedUser) return;
+    try {
+      const res = await ApiClient.request<{ temporaryPassword?: string; message: string }>(
+        `/client-users/${selectedUser.id}/reset-password`,
+        { method: 'POST' }
+      );
+      setTempPassword(res.temporaryPassword || 'TempPass@1234');
+      setShowPassword(false);
+      setPasswordCountdown(60);
+      setIsResetModalOpen(true);
+
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = setInterval(() => {
+        setPasswordCountdown((prev) => {
+          if (prev <= 1) {
+            if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+            setTempPassword(null);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
     } catch (err: any) {
       alert(`Password reset failed: ${err.message}`);
     }
   };
 
-  const filteredUsers = users.filter(
-    (u) =>
-      u.username.toLowerCase().includes(search.toLowerCase()) ||
-      u.email.toLowerCase().includes(search.toLowerCase()) ||
-      u.fullName.toLowerCase().includes(search.toLowerCase())
-  );
+  // Excel Export
+  const handleExportExcel = () => {
+    if (!selectedClientId) return;
+    window.open(`/api/v1/client-users/export-excel?clientId=${selectedClientId}`, '_blank');
+  };
+
+  // Excel Import Template
+  const handleDownloadTemplate = () => {
+    window.open(`/api/v1/client-users/import-template`, '_blank');
+  };
+
+  // Excel Import Preview
+  const handleImportFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportFile(file);
+    setImportPreview(null);
+    setImportExecution(null);
+
+    const formData = new FormData();
+    formData.append('clientId', selectedClientId);
+    formData.append('file', file);
+
+    try {
+      setImporting(true);
+      const res = await fetch(`/api/v1/client-users/import-preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ApiClient.getAccessToken()}`,
+        },
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Validation failed');
+      setImportPreview(data);
+    } catch (err: any) {
+      alert(`Import Validation Error: ${err.message}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // Excel Import Execute
+  const handleImportExecute = async () => {
+    if (!importPreview || !selectedClientId) return;
+    try {
+      setImporting(true);
+      const res = await ApiClient.request<ExcelUserImportExecutionSummary>('/client-users/import-execute', {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId: selectedClientId,
+          rows: importPreview.rows,
+        }),
+      });
+      setImportExecution(res);
+      setActionMessage({ type: 'success', text: `✓ Import complete: ${res.succeededRows} succeeded, ${res.failedRows} failed, ${res.skippedRows} skipped.` });
+      await loadUsers();
+    } catch (err: any) {
+      alert(`Import execution failed: ${err.message}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // Helper for file to base64
+  const handleFileToBase64 = (file: File, callback: (base64: string, filename: string) => void) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      callback(reader.result as string, file.name);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const selectedClient = clients.find((c) => c.id === selectedClientId);
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      {/* Header & Client Selector */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-white tracking-tight">Console Application Users</h2>
-          <p className="text-xs text-slate-400">Manage operator accounts, assigned roles, and client-level access control</p>
+          <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+            <Users className="w-6 h-6 text-sky-400" />
+            Central Client User Directory
+          </h1>
+          <p className="text-xs text-slate-400 mt-1">
+            Real-time management, automated directory synchronization, and Excel operations via isolated browser agent
+          </p>
         </div>
 
-        {hasPermission(PERMISSIONS.APPLICATION_USER_MANAGE) && (
-          <button
-            onClick={() => setIsCreateModalOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-sm font-semibold shadow-lg shadow-sky-900/30 transition-colors"
+        {/* Client Selector Dropdown */}
+        <div className="flex items-center gap-3">
+          <label className="text-xs font-medium text-slate-400 whitespace-nowrap">Target Client:</label>
+          <select
+            value={selectedClientId}
+            onChange={(e) => {
+              setSelectedClientId(e.target.value);
+              setPage(1);
+            }}
+            className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-semibold text-sky-300 focus:outline-none focus:border-sky-500 shadow-md min-w-[280px]"
           >
-            <Plus className="w-4 h-4" />
-            Create User
-          </button>
-        )}
+            {clients.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.clientCode} — {c.clientName} — {c.environment}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
-      {/* Search Bar */}
-      <div className="flex items-center gap-3 bg-surface p-3.5 rounded-xl border border-surface-border">
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-          <input
-            type="text"
-            placeholder="Search by username, full name, or email..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-1.5 bg-slate-900 border border-slate-700/80 rounded-lg text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500"
-          />
+      {/* Selected Client Info Card */}
+      {selectedClient && (
+        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-md flex flex-wrap items-center justify-between gap-4 text-xs">
+          <div className="flex items-center gap-6">
+            <div>
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Client Code</span>
+              <span className="font-mono font-bold text-white text-sm">{selectedClient.clientCode}</span>
+            </div>
+            <div>
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Hospital / Instance</span>
+              <span className="font-semibold text-slate-200">{selectedClient.clientName}</span>
+            </div>
+            <div>
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Environment</span>
+              <EnvironmentBadge environment={selectedClient.environment} />
+            </div>
+            <div>
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Client Endpoint</span>
+              <span className="font-mono text-slate-400">{selectedClient.baseUrl}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <div className="text-right">
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Directory Snapshot</span>
+              <span className="text-slate-300 font-mono">
+                {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : 'Not synchronized yet'}
+              </span>
+            </div>
+
+            <button
+              onClick={handleSyncUsers}
+              disabled={syncing}
+              className="flex items-center gap-2 px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-semibold shadow-lg shadow-sky-950/50 transition-all disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Syncing...' : 'Sync Users'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {actionMessage && (
+        <div
+          className={`p-3 rounded-lg border text-xs font-medium ${
+            actionMessage.type === 'success'
+              ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+              : actionMessage.type === 'error'
+              ? 'bg-red-950/60 border-red-800 text-red-300'
+              : 'bg-sky-950/60 border-sky-800 text-sky-300'
+          }`}
+        >
+          {actionMessage.text}
+        </div>
+      )}
+
+      {/* Toolbar & Filters */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-900 p-4 rounded-xl border border-slate-800">
+        <div className="flex flex-1 items-center gap-3">
+          <div className="relative flex-1 max-w-md">
+            <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="Search by username, full name, email, or mobile..."
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              className="w-full pl-9 pr-4 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+            />
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {['ALL', 'ACTIVE', 'INACTIVE'].map((st) => (
+              <button
+                key={st}
+                onClick={() => {
+                  setStatusFilter(st);
+                  setPage(1);
+                }}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                  statusFilter === st
+                    ? 'bg-sky-600 text-white'
+                    : 'bg-slate-950 border border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                {st}
+              </button>
+            ))}
+          </div>
+
+          <select
+            value={roleFilter}
+            onChange={(e) => {
+              setRoleFilter(e.target.value);
+              setPage(1);
+            }}
+            className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-sky-500"
+          >
+            <option value="ALL">All Roles</option>
+            {clientOptions.roles.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {hasPermission(PERMISSIONS.CLIENT_USERS_IMPORT) && (
+            <button
+              onClick={() => setIsImportModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              Import Excel
+            </button>
+          )}
+
+          {hasPermission(PERMISSIONS.CLIENT_USERS_EXPORT) && (
+            <button
+              onClick={handleExportExcel}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export Excel
+            </button>
+          )}
+
+          {hasPermission(PERMISSIONS.CLIENT_USERS_CREATE) && (
+            <button
+              onClick={() => {
+                setCreateError(null);
+                setPotentialDuplicate(null);
+                setCreateForm({
+                  clientId: selectedClientId,
+                  username: '',
+                  firstName: '',
+                  middleName: '',
+                  lastName: '',
+                  nickName: '',
+                  email: '',
+                  mobileNumber: '',
+                  nationality: 'Saudi Arabia',
+                  role: 'Physician',
+                  profileRole: 'Clinical Specialist',
+                  barcodeNumber: '',
+                  signatureBase64: '',
+                  signatureFilename: '',
+                  stampBase64: '',
+                  stampFilename: '',
+                  profileBase64: '',
+                  profileFilename: '',
+                  status: 'ACTIVE',
+                  overrideDuplicateName: false,
+                });
+                setIsCreateModalOpen(true);
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Create User
+            </button>
+          )}
         </div>
       </div>
 
       {/* Users Table */}
-      <div className="bg-surface border border-surface-border rounded-xl overflow-hidden shadow-sm">
-        <table className="w-full text-left border-collapse text-xs">
-          <thead>
-            <tr className="bg-slate-900/80 border-b border-surface-border text-slate-400 uppercase tracking-wider font-semibold">
-              <th className="py-3 px-4">User Details</th>
-              <th className="py-3 px-4">Status</th>
-              <th className="py-3 px-4">Roles</th>
-              <th className="py-3 px-4">Client Access Scope</th>
-              <th className="py-3 px-4">Last Login</th>
-              <th className="py-3 px-4 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-surface-border">
-            {loading ? (
+      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs text-slate-300">
+            <thead className="bg-slate-950 text-slate-400 text-[11px] uppercase font-semibold border-b border-slate-800">
               <tr>
-                <td colSpan={6} className="py-8 text-center text-slate-500">Loading user accounts...</td>
+                <th className="px-4 py-3">S.No</th>
+                <th className="px-4 py-3">Full Name</th>
+                <th className="px-4 py-3">Username</th>
+                <th className="px-4 py-3">Mobile Number</th>
+                <th className="px-4 py-3">Email</th>
+                <th className="px-4 py-3">Nationality</th>
+                <th className="px-4 py-3">Role</th>
+                <th className="px-4 py-3">Profile Role</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Created Date/Time</th>
+                <th className="px-4 py-3">Updated Date/Time</th>
+                <th className="px-4 py-3">Last Synced</th>
+                <th className="px-4 py-3 text-right">Actions</th>
               </tr>
-            ) : filteredUsers.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="py-8 text-center text-slate-500">No users found.</td>
-              </tr>
-            ) : (
-              filteredUsers.map((user) => (
-                <tr key={user.id} className="hover:bg-slate-900/40 transition-colors">
-                  <td className="py-3.5 px-4">
-                    <div className="font-semibold text-white">{user.fullName}</div>
-                    <div className="text-[11px] font-mono text-sky-400">{user.username}</div>
-                    <div className="text-[11px] text-slate-400">{user.email}</div>
-                  </td>
-
-                  <td className="py-3.5 px-4">
-                    <span
-                      className={`px-2.5 py-0.5 rounded-full font-semibold text-[11px] ${
-                        user.status === 'ACTIVE'
-                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                          : user.status === 'LOCKED'
-                          ? 'bg-red-950 text-red-400 border border-red-800'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      {user.status}
-                    </span>
-                  </td>
-
-                  <td className="py-3.5 px-4">
-                    <div className="flex flex-wrap gap-1">
-                      {user.roles.map((r) => (
-                        <span key={r.id} className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[10px]">
-                          {r.name}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-
-                  <td className="py-3.5 px-4 font-mono text-[11px] text-slate-400">
-                    {user.roles.some((r) => r.name === 'Super Admin') ? (
-                      <span className="text-emerald-400 font-semibold">ALL CLIENTS (Universal)</span>
-                    ) : user.assignedClientIds.length > 0 ? (
-                      <span>{user.assignedClientIds.length} Assigned Client(s)</span>
-                    ) : (
-                      <span className="text-slate-500">None</span>
-                    )}
-                  </td>
-
-                  <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">
-                    {user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : 'Never'}
-                  </td>
-
-                  <td className="py-3.5 px-4 text-right">
-                    <div className="flex items-center justify-end gap-1.5">
-                      {user.status === 'LOCKED' && (
-                        <button
-                          onClick={() => handleUnlockUser(user)}
-                          title="Unlock Locked Account"
-                          className="p-1.5 text-emerald-400 hover:bg-emerald-950/50 rounded-lg transition-colors"
-                        >
-                          <Unlock className="w-4 h-4" />
-                        </button>
-                      )}
-
-                      <button
-                        onClick={() => {
-                          setSelectedUser(user);
-                          setIsResetModalOpen(true);
-                        }}
-                        title="Admin Password Reset"
-                        className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition-colors"
-                      >
-                        <KeyRound className="w-4 h-4" />
-                      </button>
-                    </div>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {loading ? (
+                <tr>
+                  <td colSpan={13} className="px-4 py-8 text-center text-slate-500">
+                    <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-sky-500" />
+                    Loading client users...
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : users.length === 0 ? (
+                <tr>
+                  <td colSpan={13} className="px-4 py-8 text-center text-slate-500">
+                    No users found matching criteria. Click "Sync Users" to pull the live directory.
+                  </td>
+                </tr>
+              ) : (
+                users.map((u, idx) => {
+                  const sNo = (page - 1) * limit + idx + 1;
+                  const isActive = u.status === 'ACTIVE';
+
+                  return (
+                    <tr key={u.id} className="hover:bg-slate-850/50 transition-colors">
+                      <td className="px-4 py-3 font-mono text-slate-500">{sNo}</td>
+                      <td className="px-4 py-3 font-semibold text-white">{u.fullName}</td>
+                      <td className="px-4 py-3 font-mono text-sky-400">{u.username}</td>
+                      <td className="px-4 py-3 font-mono">{u.mobileNumber || '—'}</td>
+                      <td className="px-4 py-3 text-slate-400">{u.email || '—'}</td>
+                      <td className="px-4 py-3">{u.nationality || '—'}</td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 bg-slate-800 text-slate-300 rounded text-[10px] font-medium border border-slate-700">
+                          {u.role || 'Unassigned'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-400">{u.profileRole || '—'}</td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                            isActive
+                              ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
+                              : 'bg-red-950 text-red-400 border-red-800'
+                          }`}
+                        >
+                          {u.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-500">{u.remoteCreatedAt || 'Not available'}</td>
+                      <td className="px-4 py-3 text-slate-500">{u.remoteUpdatedAt || 'Not available'}</td>
+                      <td className="px-4 py-3 font-mono text-[10px] text-slate-500">
+                        {new Date(u.lastSyncedAt).toLocaleTimeString()}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          {/* View Details */}
+                          <button
+                            onClick={() => {
+                              setSelectedUser(u);
+                              setIsViewModalOpen(true);
+                            }}
+                            title="View User Details"
+                            className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Edit User */}
+                          {hasPermission(PERMISSIONS.CLIENT_USERS_EDIT) && (
+                            <button
+                              onClick={() => {
+                                setSelectedUser(u);
+                                setEditForm({
+                                  firstName: u.firstName,
+                                  middleName: u.middleName || '',
+                                  lastName: u.lastName,
+                                  nickName: u.nickName || '',
+                                  email: u.email || '',
+                                  mobileNumber: u.mobileNumber || '',
+                                  nationality: u.nationality || 'Saudi Arabia',
+                                  role: u.role || '',
+                                  profileRole: u.profileRole || '',
+                                  barcodeNumber: u.barcodeNumber || '',
+                                  status: u.status,
+                                });
+                                setIsEditModalOpen(true);
+                              }}
+                              title="Edit User"
+                              className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-800 rounded-lg transition-colors"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          {/* Activate / Deactivate Toggle */}
+                          {hasPermission(PERMISSIONS.CLIENT_USERS_STATUS_CHANGE) && (
+                            <button
+                              onClick={() => {
+                                setSelectedUser(u);
+                                setIsStatusModalOpen(true);
+                              }}
+                              title={isActive ? 'Deactivate User' : 'Activate User'}
+                              className={`p-1.5 rounded-lg transition-colors ${
+                                isActive
+                                  ? 'text-emerald-400 hover:text-red-400 hover:bg-red-950/30'
+                                  : 'text-red-400 hover:text-emerald-400 hover:bg-emerald-950/30'
+                              }`}
+                            >
+                              <Power className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          {/* Reset Password */}
+                          {hasPermission(PERMISSIONS.CLIENT_USER_PASSWORD_RESET) && (
+                            <button
+                              onClick={() => {
+                                setSelectedUser(u);
+                                handleResetPassword();
+                              }}
+                              title="Reset Password on Client"
+                              className="p-1.5 text-slate-400 hover:text-yellow-400 hover:bg-slate-800 rounded-lg transition-colors"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination Bar */}
+        {totalCount > limit && (
+          <div className="flex items-center justify-between p-3 border-t border-slate-800 bg-slate-950 text-xs text-slate-400">
+            <div>
+              Showing {(page - 1) * limit + 1} to {Math.min(page * limit, totalCount)} of {totalCount} users
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                disabled={page <= 1}
+                onClick={() => setPage((p) => p - 1)}
+                className="px-2.5 py-1 bg-slate-900 border border-slate-800 rounded hover:bg-slate-800 disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <span className="font-mono text-white">Page {page}</span>
+              <button
+                disabled={page * limit >= totalCount}
+                onClick={() => setPage((p) => p + 1)}
+                className="px-2.5 py-1 bg-slate-900 border border-slate-800 rounded hover:bg-slate-800 disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Create User Modal */}
-      <Modal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        title="Create Console Application User"
-      >
-        <form onSubmit={handleCreateUser} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+      {/* Modal: View User Details */}
+      <Modal isOpen={isViewModalOpen} onClose={() => setIsViewModalOpen(false)} title={`User Details: ${selectedUser?.username}`}>
+        {selectedUser && (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 bg-slate-950 p-3 rounded-lg border border-slate-800">
+              <div>
+                <span className="text-slate-500 block">Username</span>
+                <span className="font-mono font-bold text-sky-400">{selectedUser.username}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Status</span>
+                <span
+                  className={`font-bold ${
+                    selectedUser.status === 'ACTIVE' ? 'text-emerald-400' : 'text-red-400'
+                  }`}
+                >
+                  {selectedUser.status}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">First Name</span>
+                <span className="text-white">{selectedUser.firstName}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Last Name</span>
+                <span className="text-white">{selectedUser.lastName}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Full Name</span>
+                <span className="text-white">{selectedUser.fullName}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Nick Name</span>
+                <span className="text-slate-300">{selectedUser.nickName || '—'}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Mobile Number</span>
+                <span className="font-mono text-slate-300">{selectedUser.mobileNumber || '—'}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Email</span>
+                <span className="text-slate-300">{selectedUser.email || '—'}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Nationality</span>
+                <span className="text-slate-300">{selectedUser.nationality || '—'}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Role</span>
+                <span className="text-slate-300">{selectedUser.role || '—'}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Profile Role</span>
+                <span className="text-slate-300">{selectedUser.profileRole || '—'}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block">Barcode Number</span>
+                <span className="font-mono text-slate-300">{selectedUser.barcodeNumber || '—'}</span>
+              </div>
+            </div>
+
+            {/* Asset Previews */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="p-2 bg-slate-950 border border-slate-800 rounded text-center">
+                <span className="text-[10px] text-slate-500 block mb-1">Signature</span>
+                {selectedUser.hasSignature ? (
+                  <span className="text-emerald-400 font-semibold">✓ Attached</span>
+                ) : (
+                  <span className="text-slate-600">None</span>
+                )}
+              </div>
+              <div className="p-2 bg-slate-950 border border-slate-800 rounded text-center">
+                <span className="text-[10px] text-slate-500 block mb-1">Stamp</span>
+                {selectedUser.hasStamp ? (
+                  <span className="text-emerald-400 font-semibold">✓ Attached</span>
+                ) : (
+                  <span className="text-slate-600">None</span>
+                )}
+              </div>
+              <div className="p-2 bg-slate-950 border border-slate-800 rounded text-center">
+                <span className="text-[10px] text-slate-500 block mb-1">Profile Photo</span>
+                {selectedUser.hasProfileImage ? (
+                  <span className="text-emerald-400 font-semibold">✓ Attached</span>
+                ) : (
+                  <span className="text-slate-600">None</span>
+                )}
+              </div>
+            </div>
+
+            <div className="text-[11px] text-slate-500 border-t border-slate-800 pt-3">
+              Source Client: <span className="text-slate-300 font-medium">{selectedUser.clientName}</span> ({selectedUser.clientCode}) • Last Synced: <span className="font-mono">{new Date(selectedUser.lastSyncedAt).toLocaleString()}</span>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Create User */}
+      <Modal isOpen={isCreateModalOpen} onClose={() => setIsCreateModalOpen(false)} title="Create User on Client Portal">
+        <form onSubmit={handleCreateUser} className="space-y-4 text-xs">
+          {createError && (
+            <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200">
+              <div className="font-bold flex items-center gap-1.5 mb-1">
+                <AlertTriangle className="w-4 h-4 text-red-400" />
+                Validation Warning
+              </div>
+              {createError}
+
+              {potentialDuplicate && (
+                <div className="mt-2 p-2 bg-slate-900/90 rounded border border-red-800/50 text-[11px]">
+                  <div>Matching User: <strong className="text-white">{potentialDuplicate.fullName}</strong> ({potentialDuplicate.username})</div>
+                  <div>Mobile: {potentialDuplicate.mobileNumber || 'N/A'} • Status: {potentialDuplicate.status}</div>
+
+                  <label className="flex items-center gap-2 mt-2 text-amber-300 font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={createForm.overrideDuplicateName}
+                      onChange={(e) => setCreateForm({ ...createForm, overrideDuplicateName: e.target.checked })}
+                    />
+                    <span>Authorize Duplicate Name Override (Recorded in Audit Log)</span>
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Username</label>
+              <label className="block text-slate-400 mb-1">User Name *</label>
               <input
                 type="text"
                 required
+                placeholder="e.g. jdoe"
                 value={createForm.username}
-                onChange={(e) => setCreateForm({ ...createForm, username: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
+                onChange={(e) => setCreateForm({ ...createForm, username: e.target.value.toLowerCase().trim() })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white focus:outline-none focus:border-sky-500 font-mono"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Email</label>
+              <label className="block text-slate-400 mb-1">Password</label>
               <input
-                type="email"
-                required
-                value={createForm.email}
-                onChange={(e) => setCreateForm({ ...createForm, email: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
+                type="text"
+                disabled
+                value="[Remote-Controlled Fixed Policy]"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-500 cursor-not-allowed font-mono text-[11px]"
               />
             </div>
           </div>
 
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="block text-slate-400 mb-1">First Name *</label>
+              <input
+                type="text"
+                required
+                value={createForm.firstName}
+                onChange={(e) => setCreateForm({ ...createForm, firstName: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white focus:outline-none focus:border-sky-500"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Middle Name</label>
+              <input
+                type="text"
+                value={createForm.middleName}
+                onChange={(e) => setCreateForm({ ...createForm, middleName: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white focus:outline-none focus:border-sky-500"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Last Name *</label>
+              <input
+                type="text"
+                required
+                value={createForm.lastName}
+                onChange={(e) => setCreateForm({ ...createForm, lastName: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white focus:outline-none focus:border-sky-500"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="block text-slate-400 mb-1">Nick Name</label>
+              <input
+                type="text"
+                value={createForm.nickName}
+                onChange={(e) => setCreateForm({ ...createForm, nickName: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Email</label>
+              <input
+                type="email"
+                value={createForm.email}
+                onChange={(e) => setCreateForm({ ...createForm, email: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Mobile No *</label>
+              <input
+                type="tel"
+                required
+                value={createForm.mobileNumber}
+                onChange={(e) => setCreateForm({ ...createForm, mobileNumber: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white font-mono"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="block text-slate-400 mb-1">Nationality *</label>
+              <select
+                value={createForm.nationality}
+                onChange={(e) => setCreateForm({ ...createForm, nationality: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              >
+                {clientOptions.nationalities.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Role</label>
+              <select
+                value={createForm.role}
+                onChange={(e) => setCreateForm({ ...createForm, role: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              >
+                {clientOptions.roles.map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Profile Role</label>
+              <select
+                value={createForm.profileRole}
+                onChange={(e) => setCreateForm({ ...createForm, profileRole: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              >
+                {clientOptions.profileRoles.map((pr) => (
+                  <option key={pr} value={pr}>{pr}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Full Name</label>
+            <label className="block text-slate-400 mb-1">Barcode No</label>
             <input
               type="text"
-              required
-              value={createForm.fullName}
-              onChange={(e) => setCreateForm({ ...createForm, fullName: e.target.value })}
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
+              value={createForm.barcodeNumber}
+              onChange={(e) => setCreateForm({ ...createForm, barcodeNumber: e.target.value })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white font-mono"
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Initial Password</label>
-            <input
-              type="password"
-              required
-              value={createForm.password}
-              onChange={(e) => setCreateForm({ ...createForm, password: e.target.value })}
-              placeholder="Min 10 chars with Upper, Lower, Number, Symbol"
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Assign Roles</label>
-            <div className="space-y-1 max-h-32 overflow-y-auto border border-slate-700 p-2 rounded-lg bg-slate-900">
-              {roles.map((r) => (
-                <label key={r.id} className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={createForm.roleIds.includes(r.id)}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setCreateForm({ ...createForm, roleIds: [...createForm.roleIds, r.id] });
-                      } else {
-                        setCreateForm({ ...createForm, roleIds: createForm.roleIds.filter((id) => id !== r.id) });
-                      }
-                    }}
-                  />
-                  <span>{r.name}</span>
-                </label>
-              ))}
+          {/* File Uploads */}
+          <div className="grid grid-cols-3 gap-3 pt-2 border-t border-slate-800">
+            <div>
+              <label className="block text-slate-400 mb-1">Signature</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleFileToBase64(f, (b64, name) => setCreateForm({ ...createForm, signatureBase64: b64, signatureFilename: name }));
+                }}
+                className="text-[11px] text-slate-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-slate-800 file:text-slate-300"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Stamp</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleFileToBase64(f, (b64, name) => setCreateForm({ ...createForm, stampBase64: b64, stampFilename: name }));
+                }}
+                className="text-[11px] text-slate-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-slate-800 file:text-slate-300"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Profile Photo</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleFileToBase64(f, (b64, name) => setCreateForm({ ...createForm, profileBase64: b64, profileFilename: name }));
+                }}
+                className="text-[11px] text-slate-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-slate-800 file:text-slate-300"
+              />
             </div>
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">Assign Client Access</label>
-            <div className="space-y-1 max-h-32 overflow-y-auto border border-slate-700 p-2 rounded-lg bg-slate-900">
-              {clients.map((c) => (
-                <label key={c.id} className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={createForm.assignedClientIds.includes(c.id)}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setCreateForm({ ...createForm, assignedClientIds: [...createForm.assignedClientIds, c.id] });
-                      } else {
-                        setCreateForm({ ...createForm, assignedClientIds: createForm.assignedClientIds.filter((id) => id !== c.id) });
-                      }
-                    }}
-                  />
-                  <span>[{c.clientCode}] {c.clientName}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-3 pt-4 border-t border-surface-border">
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
             <button
               type="button"
               onClick={() => setIsCreateModalOpen(false)}
-              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs hover:bg-slate-700"
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
             >
               Cancel
             </button>
-            <button type="submit" className="px-4 py-2 bg-sky-600 text-white rounded-lg text-xs font-semibold hover:bg-sky-500">
-              Create User
+            <button
+              type="submit"
+              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow-lg shadow-sky-950/50"
+            >
+              Create User on Client
             </button>
           </div>
         </form>
       </Modal>
 
-      {/* Admin Reset Password Modal */}
-      <Modal
-        isOpen={isResetModalOpen}
-        onClose={() => setIsResetModalOpen(false)}
-        title={`Reset Password: ${selectedUser?.username}`}
-      >
-        <form onSubmit={handleResetPassword} className="space-y-4">
-          <p className="text-xs text-slate-300">
-            Set a new temporary password for this user. The account will be unlocked and forced to change password upon next login.
-          </p>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1">New Password</label>
-            <input
-              type="password"
-              required
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="Enter new password"
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
-            />
+      {/* Modal: Edit User */}
+      <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title={`Edit User: ${selectedUser?.username}`}>
+        <form onSubmit={handleEditUser} className="space-y-4 text-xs">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-400 mb-1">First Name *</label>
+              <input
+                type="text"
+                required
+                value={editForm.firstName}
+                onChange={(e) => setEditForm({ ...editForm, firstName: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Last Name *</label>
+              <input
+                type="text"
+                required
+                value={editForm.lastName}
+                onChange={(e) => setEditForm({ ...editForm, lastName: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              />
+            </div>
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-surface-border">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-400 mb-1">Mobile Number</label>
+              <input
+                type="tel"
+                value={editForm.mobileNumber}
+                onChange={(e) => setEditForm({ ...editForm, mobileNumber: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Email</label>
+              <input
+                type="email"
+                value={editForm.email}
+                onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-400 mb-1">Role</label>
+              <select
+                value={editForm.role}
+                onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              >
+                {clientOptions.roles.map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Profile Role</label>
+              <select
+                value={editForm.profileRole}
+                onChange={(e) => setEditForm({ ...editForm, profileRole: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+              >
+                {clientOptions.profileRoles.map((pr) => (
+                  <option key={pr} value={pr}>{pr}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
             <button
               type="button"
-              onClick={() => setIsResetModalOpen(false)}
-              className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs hover:bg-slate-700"
+              onClick={() => setIsEditModalOpen(false)}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
             >
               Cancel
             </button>
-            <button type="submit" className="px-4 py-2 bg-amber-600 text-white rounded-lg text-xs font-semibold hover:bg-amber-500">
-              Reset Password
+            <button
+              type="submit"
+              className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded font-semibold shadow"
+            >
+              Save Changes
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Modal: Activate/Deactivate Confirmation */}
+      <Modal isOpen={isStatusModalOpen} onClose={() => setIsStatusModalOpen(false)} title="Confirm Status Change">
+        {selectedUser && (
+          <div className="space-y-4 text-xs">
+            <p className="text-slate-300">
+              {selectedUser.status === 'ACTIVE'
+                ? `Deactivate ${selectedUser.username} for ${selectedUser.clientName}?`
+                : `Activate ${selectedUser.username} for ${selectedUser.clientName}?`}
+            </p>
+            <p className="text-slate-500 text-[11px]">
+              This will execute the real status toggle on the remote client application via the desktop agent and verify the persisted state.
+            </p>
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setIsStatusModalOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleStatusChange}
+                className={`px-4 py-2 rounded font-semibold text-white shadow ${
+                  selectedUser.status === 'ACTIVE'
+                    ? 'bg-red-600 hover:bg-red-500'
+                    : 'bg-emerald-600 hover:bg-emerald-500'
+                }`}
+              >
+                Confirm {selectedUser.status === 'ACTIVE' ? 'Deactivation' : 'Activation'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Password Reset One-Time Reveal */}
+      <Modal isOpen={isResetModalOpen} onClose={() => setIsResetModalOpen(false)} title={`Password Reset: ${selectedUser?.username}`}>
+        <div className="space-y-4 text-xs">
+          <div className="p-3 bg-amber-950/60 border border-amber-800 rounded-lg text-amber-200">
+            <div className="font-bold flex items-center gap-1.5 mb-1">
+              <Shield className="w-4 h-4 text-amber-400" />
+              One-Time Temporary Password Security Policy
+            </div>
+            <p className="text-[11px]">
+              This temporary password was generated on the client and delivered once. It is not stored in the database or logs. Copy and provide it securely to the user. They must change it upon first login.
+            </p>
+          </div>
+
+          {tempPassword ? (
+            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-[10px] uppercase font-semibold">Temporary Password</span>
+                <span className="text-amber-400 font-mono text-[11px] flex items-center gap-1">
+                  <Clock className="w-3 h-3" /> Auto-clears in {passwordCountdown}s
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between bg-slate-900 px-3 py-2 rounded border border-slate-700">
+                <span className="font-mono text-base tracking-wider text-white">
+                  {showPassword ? tempPassword : '••••••••••••'}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="p-1 text-slate-400 hover:text-white transition-colors"
+                    title={showPassword ? 'Hide' : 'Reveal'}
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(tempPassword);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded text-xs font-semibold transition-colors"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    {copied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-4 text-slate-500">
+              Temporary password has expired and was purged from memory.
+            </div>
+          )}
+
+          <div className="flex justify-end pt-3 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => {
+                setIsResetModalOpen(false);
+                setTempPassword(null);
+              }}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+            >
+              Close & Clear
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: Excel Import */}
+      <Modal isOpen={isImportModalOpen} onClose={() => setIsImportModalOpen(false)} title="Import Users via Excel (.xlsx)">
+        <div className="space-y-4 text-xs">
+          <div className="flex items-center justify-between bg-slate-950 p-3 rounded-lg border border-slate-800">
+            <div>
+              <div className="font-semibold text-white">Need the official template?</div>
+              <div className="text-slate-500 text-[11px]">Download standard spreadsheet with validation rules</div>
+            </div>
+            <button
+              type="button"
+              onClick={handleDownloadTemplate}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-semibold border border-slate-700 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Download Template
+            </button>
+          </div>
+
+          {/* File Upload Selector */}
+          <div>
+            <label className="block text-slate-400 mb-1 font-semibold">Select Excel File (.xlsx)</label>
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={handleImportFileChange}
+              className="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:bg-sky-600 file:text-white file:font-semibold hover:file:bg-sky-500 cursor-pointer"
+            />
+          </div>
+
+          {/* Dry Run Preview Grid */}
+          {importPreview && (
+            <div className="space-y-3 pt-2 border-t border-slate-800">
+              <div className="flex items-center justify-between">
+                <div className="font-bold text-white">
+                  Dry-Run Preview ({importPreview.totalRows} rows)
+                </div>
+                <div className="flex items-center gap-3 text-[11px]">
+                  <span className="text-emerald-400 font-semibold">{importPreview.readyRows} Ready</span>
+                  <span className="text-red-400 font-semibold">{importPreview.errorRows} Warnings/Errors</span>
+                </div>
+              </div>
+
+              <div className="max-h-60 overflow-y-auto border border-slate-800 rounded bg-slate-950">
+                <table className="w-full text-left text-[11px]">
+                  <thead className="bg-slate-900 text-slate-400 uppercase font-semibold sticky top-0">
+                    <tr>
+                      <th className="p-2">Row</th>
+                      <th className="p-2">Action</th>
+                      <th className="p-2">Username</th>
+                      <th className="p-2">Full Name</th>
+                      <th className="p-2">Status / Classification</th>
+                      <th className="p-2">Validation Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {importPreview.rows.map((r) => {
+                      const isReady = r.classification.startsWith('READY_');
+                      return (
+                        <tr key={r.rowNumber} className="hover:bg-slate-900/50">
+                          <td className="p-2 font-mono text-slate-500">{r.rowNumber}</td>
+                          <td className="p-2 font-semibold text-sky-400">{r.action}</td>
+                          <td className="p-2 font-mono text-white">{r.username}</td>
+                          <td className="p-2">{r.firstName} {r.lastName}</td>
+                          <td className="p-2">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                isReady
+                                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                  : r.classification === 'DUPLICATE_USERNAME'
+                                  ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                  : 'bg-red-950 text-red-300 border border-red-800'
+                              }`}
+                            >
+                              {r.classification}
+                            </span>
+                          </td>
+                          <td className="p-2 text-slate-400">
+                            {r.validationErrors.length > 0 ? (
+                              <span className="text-red-400">{r.validationErrors.join('; ')}</span>
+                            ) : (
+                              <span className="text-emerald-500">Passed dry-run checks</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Execution Summary */}
+              {importExecution && (
+                <div className="p-3 bg-slate-900 border border-slate-700 rounded-lg space-y-2">
+                  <div className="font-bold text-white flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-emerald-400" />
+                    Import Execution Complete
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                    <div className="p-2 bg-slate-950 rounded">
+                      <span className="block text-slate-500 text-[10px]">Succeeded</span>
+                      <span className="text-emerald-400 font-bold">{importExecution.succeededRows}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded">
+                      <span className="block text-slate-500 text-[10px]">Failed</span>
+                      <span className="text-red-400 font-bold">{importExecution.failedRows}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded">
+                      <span className="block text-slate-500 text-[10px]">Skipped</span>
+                      <span className="text-amber-400 font-bold">{importExecution.skippedRows}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsImportModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+                >
+                  Close
+                </button>
+                {!importExecution && (
+                  <button
+                    type="button"
+                    disabled={importing || importPreview.readyRows === 0}
+                    onClick={handleImportExecute}
+                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow disabled:opacity-50"
+                  >
+                    {importing ? 'Executing on Client...' : `Confirm Import (${importPreview.readyRows} Ready Rows)`}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </Modal>
     </div>
   );
