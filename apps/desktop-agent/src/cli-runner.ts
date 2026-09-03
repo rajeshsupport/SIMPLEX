@@ -19,10 +19,13 @@ async function startAgentRunner() {
   const worker = new AutomationWorker(agentClient);
 
   console.log(`[AGENT] Connecting to API at ${apiBaseUrl}...`);
-  const paired = await agentClient.pair('default_operator', sharedSecret);
-  if (!paired) {
-    console.error('[AGENT] Failed to pair with API. Check API status and AGENT_SHARED_SECRET.');
-    process.exit(1);
+  let paired = false;
+  while (!paired) {
+    paired = await agentClient.pair('default_operator', sharedSecret);
+    if (!paired) {
+      console.log('[AGENT] API not ready yet. Retrying connection in 1.5s...');
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
   }
 
   console.log(`[AGENT] Successfully paired! Agent ID: ${agentClient.getStatus().agentId}`);

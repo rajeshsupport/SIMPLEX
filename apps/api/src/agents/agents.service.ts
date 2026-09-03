@@ -57,8 +57,8 @@ export class AgentsService {
 
     const now = Date.now();
     return agents.map((a) => {
-      // Mark as OFFLINE if heartbeat is older than 5s (5s lease expiry, 2s detection window)
-      const isStale = !a.lastHeartbeatAt || now - new Date(a.lastHeartbeatAt).getTime() > 5000;
+      // Mark as OFFLINE if heartbeat is older than 15s
+      const isStale = !a.lastHeartbeatAt || now - new Date(a.lastHeartbeatAt).getTime() > 15000;
       const status = isStale ? 'OFFLINE' : a.status;
 
       return {
@@ -195,9 +195,9 @@ export class AgentsService {
 
     // Check available online desktop agents
     const allAgents = await this.getAllAgents();
-    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE');
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
     if (onlineAgents.length === 0) {
-      throw new BadRequestException('Desktop browser agent is not running.');
+      throw new BadRequestException('Desktop browser agent is not running. Start the agent or run npm start.');
     }
 
     let targetAgentId = agentId;
