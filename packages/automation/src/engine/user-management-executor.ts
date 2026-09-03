@@ -70,10 +70,11 @@ export interface SyncUsersResult {
 export interface MutationResult {
   success: boolean;
   username: string;
-  message: string;
+  message?: string;
   status?: ClientUserStatus;
   temporaryPassword?: string;
   errorCode?: string;
+  errorMessage?: string;
 }
 
 export class UserManagementExecutor {
@@ -825,8 +826,17 @@ export class UserManagementExecutor {
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
     const row = page.locator(`tr:has-text("${username}")`).first();
-    const resetBtn = row.locator('button:has-text("Reset"), button.btn-reset-password, [data-testid="btn-reset-password"]').first();
+    const isRowVisible = await row.isVisible().catch(() => false);
+    if (!isRowVisible) {
+      return {
+        success: false,
+        username,
+        errorCode: 'USER_NOT_FOUND',
+        errorMessage: `Target user '${username}' not found on client users list.`,
+      };
+    }
 
+    const resetBtn = row.locator('button:has-text("Reset"), button.btn-reset-password, [data-testid="btn-reset-password"]').first();
     let tempPasswordCaptured: string | undefined = undefined;
 
     page.on('dialog', async (dialog) => {
@@ -841,10 +851,41 @@ export class UserManagementExecutor {
     const isResetVisible = await resetBtn.isVisible().catch(() => false);
     if (isResetVisible) {
       await resetBtn.click();
-      // Wait briefly for network fetch + alert
       for (let i = 0; i < 20; i++) {
         if (tempPasswordCaptured) break;
         await page.waitForTimeout(100);
+      }
+    } else {
+      // Check for Simplex Edit User screen password reset link
+      const editLink = row.locator('a[href*="editUsers"], a[href*="editUser"], a[title*="Edit" i]').first();
+      const isEditVisible = await editLink.isVisible().catch(() => false);
+      if (isEditVisible) {
+        const editHref = await editLink.getAttribute('href');
+        if (editHref) {
+          await page.goto(editHref.startsWith('http') ? editHref : new URL(editHref, usersListUrl).toString(), {
+            waitUntil: 'domcontentloaded',
+            timeout: 10000,
+          });
+          const editResetBtn = page.locator('a:has-text("Password Reset"), button:has-text("Password Reset")').first();
+          if (await editResetBtn.isVisible().catch(() => false)) {
+            await editResetBtn.click();
+            await page.waitForTimeout(1500);
+          } else {
+            return {
+              success: false,
+              username,
+              errorCode: 'RESET_BUTTON_NOT_FOUND',
+              errorMessage: `Password reset button not found on Edit screen for user '${username}'.`,
+            };
+          }
+        }
+      } else {
+        return {
+          success: false,
+          username,
+          errorCode: 'RESET_ACTION_UNAVAILABLE',
+          errorMessage: `Password reset action unavailable for user '${username}'.`,
+        };
       }
     }
 
@@ -859,7 +900,7 @@ export class UserManagementExecutor {
       temporaryPassword: tempPasswordCaptured,
       message: tempPasswordCaptured
         ? `Password reset successful. Temporary password generated.`
-        : `Password reset triggered successfully on client.`,
+        : `Password reset completed according to client policy.`,
     };
   }
 }

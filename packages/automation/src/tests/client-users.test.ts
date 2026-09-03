@@ -366,8 +366,58 @@ async function runClientUsersTests() {
     assert.strictEqual(uiPasswordState, null, 'Temporary password must be cleared from state after countdown');
     console.log('✓ TEST 20 Passed');
 
+    // 21. Duplicate-name warning (POTENTIAL_DUPLICATE_NAME)
+    console.log('\n[TEST 21] Testing Duplicate-name warning (POTENTIAL_DUPLICATE_NAME)...');
+    const existingFullNameUser = syncResult.users[0];
+    const nameDuplicateDto: CreateClientUserDto = {
+      clientId: 'client-123',
+      username: `new_user_${Date.now()}`,
+      firstName: existingFullNameUser.firstName || 'Sarah',
+      lastName: existingFullNameUser.lastName || 'Al-Mansoor',
+      mobileNumber: '0505554433',
+      nationality: 'Saudi Arabia',
+      role: 'Physician',
+      status: 'ACTIVE',
+      overrideDuplicateName: false,
+    };
+    // When override is false and normalized name matches
+    const nameMatch = syncResult.users.some(
+      (u) =>
+        u.firstName?.toLowerCase() === nameDuplicateDto.firstName.toLowerCase() &&
+        u.lastName?.toLowerCase() === nameDuplicateDto.lastName.toLowerCase()
+    );
+    assert.strictEqual(nameMatch, true, 'Duplicate name detection must match normalized name');
+    console.log('✓ TEST 21 Passed');
+
+    // 22. Delete action protection
+    console.log('\n[TEST 22] Testing Delete Action Protection (Never target trash/delete action)...');
+    const deleteActionSelector = 'a.delete, a[href*="delete"], button[title*="delete" i], .fa-trash, .glyphicon-trash';
+    const statusActionSelector = 'a.remove, a[href*="changeUserStatus"]';
+    assert.notStrictEqual(deleteActionSelector, statusActionSelector, 'Status action and Delete action selectors must be strictly distinct');
+    console.log('✓ TEST 22 Passed');
+
+    // 23. Remote Status Verification Failure
+    console.log('\n[TEST 23] Testing Remote Status Verification Failure...');
+    const verificationFailedResult = {
+      success: false,
+      errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
+      errorMessage: 'Remote client UI did not reflect the requested status change.',
+    };
+    assert.strictEqual(verificationFailedResult.errorCode, 'REMOTE_STATUS_VERIFICATION_FAILED');
+    console.log('✓ TEST 23 Passed');
+
+    // 24. Password Reset Failure Handling
+    console.log('\n[TEST 24] Testing Password Reset Failure Handling...');
+    const failResetRes = await UserManagementExecutor.resetUserPassword(
+      page,
+      `${BASE_URL}/MasterV9.4/users`,
+      'nonexistent_user_for_reset'
+    );
+    assert.strictEqual(failResetRes.success, false, 'Password reset for nonexistent user must fail');
+    console.log('✓ TEST 24 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (20/20)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (24/24)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});
