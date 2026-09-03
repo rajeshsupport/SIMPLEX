@@ -1144,27 +1144,16 @@ export const UsersPage: React.FC = () => {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-slate-400 mb-1">User Name *</label>
-              <input
-                type="text"
-                required
-                placeholder="e.g. jdoe"
-                value={createForm.username}
-                onChange={(e) => setCreateForm({ ...createForm, username: e.target.value.toLowerCase().trim() })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white focus:outline-none focus:border-sky-500 font-mono"
-              />
-            </div>
-            <div>
-              <label className="block text-slate-400 mb-1">Password</label>
-              <input
-                type="text"
-                disabled
-                value="[Remote-Controlled Fixed Policy]"
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-500 cursor-not-allowed font-mono text-[11px]"
-              />
-            </div>
+          <div>
+            <label className="block text-slate-400 mb-1">User Name *</label>
+            <input
+              type="text"
+              required
+              placeholder="e.g. jdoe"
+              value={createForm.username}
+              onChange={(e) => setCreateForm({ ...createForm, username: e.target.value.toLowerCase().trim() })}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white focus:outline-none focus:border-sky-500 font-mono"
+            />
           </div>
 
           <div className="grid grid-cols-3 gap-3">

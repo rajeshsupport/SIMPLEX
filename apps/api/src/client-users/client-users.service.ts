@@ -583,6 +583,30 @@ export class ClientUsersService {
       throw new ForbiddenException('Not authorized for this client');
     }
 
+    // Securely discard any password-related properties from older clients/requests
+    const sanitizedDto: CreateClientUserDto = {
+      clientId: dto.clientId,
+      username: dto.username,
+      firstName: dto.firstName,
+      middleName: dto.middleName,
+      lastName: dto.lastName,
+      nickName: dto.nickName,
+      email: dto.email,
+      mobileNumber: dto.mobileNumber,
+      nationality: dto.nationality,
+      role: dto.role,
+      profileRole: dto.profileRole,
+      barcodeNumber: dto.barcodeNumber,
+      signatureBase64: dto.signatureBase64,
+      signatureFilename: dto.signatureFilename,
+      stampBase64: dto.stampBase64,
+      stampFilename: dto.stampFilename,
+      profileBase64: dto.profileBase64,
+      profileFilename: dto.profileFilename,
+      status: dto.status,
+      overrideDuplicateName: dto.overrideDuplicateName,
+    };
+
     // Production mutation safeguard
     if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
       throw new ForbiddenException({
@@ -592,32 +616,32 @@ export class ClientUsersService {
     }
 
     // Acquire mutation lock
-    const releaseLock = this.acquireMutationLock(dto.clientId, dto.username);
+    const releaseLock = this.acquireMutationLock(sanitizedDto.clientId, sanitizedDto.username);
 
     try {
       // 1. Exact Username Duplicate Check
-      const normalizedUsername = dto.username.trim().toLowerCase();
+      const normalizedUsername = sanitizedDto.username.trim().toLowerCase();
       const existingByUsername = await this.snapshotRepo.findOne({
-        where: { clientId: dto.clientId, username: dto.username.trim() },
+        where: { clientId: sanitizedDto.clientId, username: sanitizedDto.username.trim() },
       });
 
       if (existingByUsername) {
         throw new BadRequestException({
           code: 'DUPLICATE_USERNAME',
-          message: `User already exists: the username '${dto.username}' is already registered for this client.`,
+          message: `User already exists: the username '${sanitizedDto.username}' is already registered for this client.`,
         });
       }
 
       // 2. Same First Name & Last Name Duplicate Check
-      const normFirst = dto.firstName.trim().toLowerCase();
-      const normLast = dto.lastName.trim().toLowerCase();
+      const normFirst = sanitizedDto.firstName.trim().toLowerCase();
+      const normLast = sanitizedDto.lastName.trim().toLowerCase();
       const existingByName = await this.snapshotRepo
         .createQueryBuilder('u')
-        .where('u.clientId = :clientId', { clientId: dto.clientId })
+        .where('u.clientId = :clientId', { clientId: sanitizedDto.clientId })
         .andWhere('LOWER(u.firstName) = :normFirst AND LOWER(u.lastName) = :normLast', { normFirst, normLast })
         .getOne();
 
-      if (existingByName && !dto.overrideDuplicateName) {
+      if (existingByName && !sanitizedDto.overrideDuplicateName) {
         throw new BadRequestException({
           code: 'POTENTIAL_DUPLICATE_NAME',
           message: `Possible duplicate user: another user already has the same first and last name (${existingByName.fullName}).`,
@@ -633,7 +657,7 @@ export class ClientUsersService {
       // 3. Dispatch Create Task via Desktop Agent or Headless Automation
       const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE');
       let credentials: { username: string; password: string } | undefined = undefined;
-      const cred = await this.credRepo.findOne({ where: { clientId: dto.clientId, isActive: true } });
+      const cred = await this.credRepo.findOne({ where: { clientId: sanitizedDto.clientId, isActive: true } });
       if (cred) {
         const username = EnvelopeEncryption.decrypt({
           cipherText: cred.encryptedUsername,
@@ -670,8 +694,8 @@ export class ClientUsersService {
           loginRoute: client.loginRoute,
           targetRoute: client.usersRoute || '/users',
           credentials,
-          payload: dto,
-          ...dto,
+          payload: sanitizedDto,
+          ...sanitizedDto,
         }),
       });
 
