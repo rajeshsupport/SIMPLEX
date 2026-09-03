@@ -996,34 +996,42 @@ export class UserManagementExecutor {
   ): Promise<{ authenticated: boolean; errorCode?: string; errorMessage?: string }> {
     const { targetUrl, loginUrl, credentials } = options;
 
+    const targetLoginUrl =
+      loginUrl || targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login');
+
+    // 1. Check if the session is ALREADY authenticated
+    let isAlreadyAuthenticated = false;
     try {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    } catch {
-      // If initial target navigation fails, try loginUrl if specified
-      if (loginUrl) {
-        try {
-          await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch (loginNavErr: any) {
-          return {
-            authenticated: false,
-            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: `Failed to connect to client application: ${loginNavErr.message}`,
-          };
-        }
+
+      // Wait a short time to check if an authenticated selector is present OR if redirected to /login
+      const authIndicator = await Promise.race([
+        page
+          .waitForSelector(
+            'table, #usersTable, [data-testid="users-table"], .header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, a[href*="logout" i], a[href*="signout" i], #addUserForm, .card, form',
+            { timeout: 3500 }
+          )
+          .then(() => 'AUTHENTICATED')
+          .catch(() => null),
+        page
+          .waitForSelector('#btnLogin, [data-testid="btn-login"], input[type="password"]', { timeout: 3500 })
+          .then(() => 'LOGIN_REQUIRED')
+          .catch(() => null),
+      ]);
+
+      const currentUrl = page.url();
+      if (authIndicator === 'AUTHENTICATED' && !currentUrl.includes('/login')) {
+        isAlreadyAuthenticated = true;
       }
+    } catch {
+      isAlreadyAuthenticated = false;
     }
 
-    const currentUrl = page.url();
-    const isLoginPage =
-      currentUrl.includes('/login') ||
-      ((await page.locator('#btnLogin, [data-testid="btn-login"], button:has-text("Sign In")').count()) > 0 &&
-        (await page.locator('input[type="password"]').count()) > 0);
-
-    if (!isLoginPage) {
+    if (isAlreadyAuthenticated) {
       return { authenticated: true };
     }
 
-    // Login is required
+    // 2. Authentication is required -> Perform auto-login
     if (!credentials || !credentials.username || !credentials.password) {
       return {
         authenticated: false,
@@ -1032,8 +1040,7 @@ export class UserManagementExecutor {
       };
     }
 
-    const targetLoginUrl = loginUrl || targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login');
-    if (!currentUrl.includes('/login')) {
+    if (!page.url().includes('/login')) {
       try {
         await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
       } catch (err: any) {
@@ -1065,7 +1072,7 @@ export class UserManagementExecutor {
       await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
 
       // Check for error messages
-      const errorBanner = page.locator('.error, .alert-danger, [data-testid="error-message"], .text-danger:has-text("invalid"), .text-danger:has-text("incorrect")').first();
+      const errorBanner = page.locator('.error, .alert-danger, [data-testid="error-message"], .text-danger:has-text("invalid"), .text-danger:has-text("incorrect"), .toast-error').first();
       if (await errorBanner.isVisible().catch(() => false)) {
         const errMsg = (await errorBanner.textContent().catch(() => '')) || 'Invalid credentials';
         return {
@@ -1075,7 +1082,7 @@ export class UserManagementExecutor {
         };
       }
 
-      await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav', { timeout: 10000 });
+      await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, table, a[href*="logout" i]', { timeout: 10000 });
     } catch {
       if (page.url().includes('/login') || ((await page.locator('#btnLogin, [data-testid="btn-login"]').count()) > 0 && (await page.locator('input[type="password"]').count()) > 0)) {
         return {
@@ -1092,6 +1099,17 @@ export class UserManagementExecutor {
         authenticated: false,
         errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
         errorMessage: 'Client auto-login failed: still on login page after credentials submission.',
+      };
+    }
+
+    // 3. Navigate to targetUrl after successful authentication
+    try {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (targetNavErr: any) {
+      return {
+        authenticated: false,
+        errorCode: 'CLIENT_USERS_SCREEN_FAILED',
+        errorMessage: `Failed to open client application after login: ${targetNavErr.message}`,
       };
     }
 
@@ -1125,12 +1143,19 @@ export class UserManagementExecutor {
 
     // 1. Wait for users table or grid structure
     const tableVisible = await page
-      .waitForSelector('table, [data-testid="users-table"], .grid-container, [data-testid="hmc-users-screen"]', {
-        timeout: 10000,
+      .waitForSelector('table, [data-testid="users-table"], .grid-container, [data-testid="hmc-users-screen"], #usersTable, .table-responsive', {
+        timeout: 20000,
       })
       .catch(() => null);
 
     if (!tableVisible) {
+      if (page.url().includes('/login')) {
+        return {
+          success: false,
+          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+          errorMessage: 'Session redirected to login page while accessing users screen.',
+        };
+      }
       return {
         success: false,
         errorCode: 'CLIENT_USERS_SCREEN_FAILED',
