@@ -84,6 +84,7 @@ export class AgentClient {
       errorMessage?: string;
       step?: AutomationRunStepTelemetry;
       totalDurationMs?: number;
+      resultData?: any;
     }
   ): Promise<void> {
     try {

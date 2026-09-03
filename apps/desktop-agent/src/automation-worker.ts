@@ -1,5 +1,5 @@
 import { BrowserContext, Page } from 'playwright';
-import { BrowserProfileManager, WorkflowExecutor } from '@hmc/automation';
+import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor } from '@hmc/automation';
 import { AgentTaskAssignment, AutomationRunStepTelemetry } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
@@ -92,7 +92,85 @@ export class AutomationWorker {
         page = context.pages()[0] || (await context.newPage());
       }
 
-      // 3. Prepare workflow variables
+      // 3. User Management Tasks Dispatcher
+      const usersListUrl = task.targetRoute
+        ? `${task.clientBaseUrl}${task.targetRoute}`
+        : `${task.clientBaseUrl}/MasterV9.4/users`;
+
+      if (task.taskType === 'SYNC_CLIENT_USERS') {
+        onProgress?.(`Synchronizing users from ${usersListUrl}...`);
+        const syncRes = await UserManagementExecutor.syncUsers(page, usersListUrl);
+        const totalDurationMs = Date.now() - startTime;
+        onProgress?.(`✓ Scraped ${syncRes.totalScraped} users.`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'COMPLETED',
+          totalDurationMs,
+          resultData: syncRes,
+        });
+        return;
+      }
+
+      if (task.taskType === 'CREATE_CLIENT_USER') {
+        const addUsersUrl = `${task.clientBaseUrl}/MasterV9.4/addUsers`;
+        onProgress?.(`Creating client user '${task.payload.username}' on ${addUsersUrl}...`);
+        const createRes = await UserManagementExecutor.createUser(page, addUsersUrl, usersListUrl, task.payload as any);
+        const totalDurationMs = Date.now() - startTime;
+        if (createRes.success) {
+          onProgress?.(`✓ Created client user ${createRes.username}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: createRes,
+          });
+        } else {
+          onProgress?.(`✗ Failed to create user: ${createRes.message}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: createRes.message,
+            totalDurationMs,
+            resultData: createRes,
+          });
+        }
+        return;
+      }
+
+      if (task.taskType === 'EDIT_CLIENT_USER') {
+        onProgress?.(`Updating client user '${task.payload.username}'...`);
+        const editRes = await UserManagementExecutor.editUser(page, usersListUrl, task.payload.username, task.payload as any);
+        const totalDurationMs = Date.now() - startTime;
+        if (editRes.success) {
+          await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: editRes });
+        } else {
+          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: editRes.message, totalDurationMs, resultData: editRes });
+        }
+        return;
+      }
+
+      if (task.taskType === 'SET_CLIENT_USER_STATUS') {
+        onProgress?.(`Setting status for '${task.payload.username}' to ${task.payload.status}...`);
+        const statusRes = await UserManagementExecutor.setUserStatus(page, usersListUrl, task.payload.username, task.payload.status);
+        const totalDurationMs = Date.now() - startTime;
+        if (statusRes.success) {
+          await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: statusRes });
+        } else {
+          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: statusRes.message, totalDurationMs, resultData: statusRes });
+        }
+        return;
+      }
+
+      if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
+        onProgress?.(`Resetting password for '${task.payload.username}'...`);
+        const resetRes = await UserManagementExecutor.resetUserPassword(page, usersListUrl, task.payload.username);
+        const totalDurationMs = Date.now() - startTime;
+        if (resetRes.success) {
+          await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: resetRes });
+        } else {
+          await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: resetRes.message, totalDurationMs, resultData: resetRes });
+        }
+        return;
+      }
+
+      // 4. Default Workflow Execution (Login, Service Creation, etc.)
       const variables: Record<string, any> = {
         loginUrl: `${task.clientBaseUrl}${task.loginRoute}`,
         servicesUrl: `${task.clientBaseUrl}/hmc/services`,
@@ -102,7 +180,6 @@ export class AutomationWorker {
         ...task.payload,
       };
 
-      // 4. Execute workflow steps with session reuse and error mapping
       const result = await WorkflowExecutor.executeWorkflow(
         page,
         task.workflowVersion,
