@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Like, In } from 'typeorm';
@@ -33,6 +34,8 @@ import { AgentsService } from '../agents/agents.service.js';
 
 @Injectable()
 export class ClientUsersService {
+  private readonly logger = new Logger(ClientUsersService.name);
+
   constructor(
     @InjectRepository(ClientUserSnapshot)
     private snapshotRepo: Repository<ClientUserSnapshot>,
@@ -647,42 +650,54 @@ export class ClientUsersService {
         credentials = { username, password };
       }
 
-      if (onlineAgents.length > 0) {
-        const correlationId = crypto.randomUUID();
-        const run = this.runRepo.create({
-          clientId: client.id,
-          desktopAgentId: onlineAgents[0].id,
-          triggeredByUserId: user.sub,
-          runType: 'CREATE_USER',
-          status: 'PENDING',
-          parametersJson: JSON.stringify({
-            taskType: 'CREATE_CLIENT_USER',
-            userId: user.sub,
-            clientBaseUrl: client.baseUrl,
-            loginRoute: client.loginRoute,
-            targetRoute: client.usersRoute || '/MasterV9.3/users',
-            credentials,
-            payload: dto,
-          }),
-        });
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException('Mutation failed: Automation agent is offline.');
+      }
 
-        const savedRun = await this.runRepo.save(run);
+      const correlationId = crypto.randomUUID();
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'CREATE_CLIENT_USER',
+        status: 'QUEUED',
+        correlationId,
+        parametersJson: JSON.stringify({
+          taskType: 'CREATE_CLIENT_USER',
+          userId: user.sub,
+          clientBaseUrl: client.baseUrl,
+          clientAppPath: client.applicationPath,
+          loginRoute: client.loginRoute,
+          targetRoute: client.usersRoute || '/users',
+          credentials,
+          payload: dto,
+          ...dto,
+        }),
+      });
 
-        // Wait for completion (up to 15s)
-        const startTime = Date.now();
-        let completedRun: AutomationRun | null = null;
-        while (Date.now() - startTime < 15000) {
-          await new Promise((r) => setTimeout(r, 300));
-          const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
-          if (r && (r.status === 'COMPLETED' || r.status === 'FAILED')) {
-            completedRun = r;
-            break;
-          }
+      const savedRun = await this.runRepo.save(run);
+
+      // Wait for completion (up to 30s)
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+      while (Date.now() - startTime < 30000) {
+        await new Promise((r) => setTimeout(r, 400));
+        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        if (r && ['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'].includes(r.status)) {
+          completedRun = r;
+          break;
         }
+      }
 
-        if (!completedRun || completedRun.status === 'FAILED') {
-          throw new BadRequestException(completedRun?.errorMessage || 'User creation failed on client.');
-        }
+      if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status)) {
+        throw new BadRequestException(completedRun?.errorMessage || 'User creation failed on client portal.');
+      }
+
+      // Automatically trigger post-mutation pull sync
+      try {
+        await this.syncClientUsers(client.id, user);
+      } catch (syncErr: any) {
+        this.logger.warn(`Post-creation automatic sync failed: ${syncErr.message}`);
       }
 
       // Save snapshot

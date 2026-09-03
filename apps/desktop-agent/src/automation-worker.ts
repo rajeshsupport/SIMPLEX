@@ -200,13 +200,37 @@ export class AutomationWorker {
         page = context.pages()[0] || (await context.newPage());
       }
 
-      const usersListUrl = buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute, '/users');
-      const loginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
+      const appPath = task.clientAppPath || task.payload?.applicationPath;
+      const usersListUrl = resolveClientRoute({
+        baseUrl: task.clientBaseUrl,
+        applicationPath: appPath,
+        route: task.targetRoute,
+        fallbackRoute: '/users',
+      });
+      const loginUrl = resolveClientRoute({
+        baseUrl: task.clientBaseUrl,
+        applicationPath: appPath,
+        route: task.loginRoute,
+        fallbackRoute: '/login',
+      });
 
-      if (task.taskType === 'CREATE_CLIENT_USER') {
-        const addUsersUrl = buildAbsoluteUrl(task.clientBaseUrl, undefined, '/addUsers');
-        onProgress?.(`Creating client user '${task.payload.username}' on ${addUsersUrl}...`);
-        const createRes = await UserManagementExecutor.createUser(page, addUsersUrl, usersListUrl, task.payload as any);
+      if (task.taskType === 'CREATE_CLIENT_USER' || task.taskType === 'CREATE_USER') {
+        const payloadData = task.payload?.payload || task.payload;
+        const addUsersUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.payload?.addUsersRoute,
+          fallbackRoute: '/addUsers',
+        });
+        const username = payloadData?.username || task.payload?.username || 'user';
+        onProgress?.(`Creating client user '${username}' on ${addUsersUrl}...`);
+        const createRes = await UserManagementExecutor.createUser(page, {
+          addUsersUrl,
+          usersListUrl,
+          dto: payloadData as any,
+          loginUrl,
+          credentials: task.credentials,
+        });
         const totalDurationMs = Date.now() - startTime;
         if (createRes.success) {
           onProgress?.(`✓ Created client user ${createRes.username}`);
@@ -216,10 +240,10 @@ export class AutomationWorker {
             resultData: createRes,
           });
         } else {
-          onProgress?.(`✗ Failed to create user: ${createRes.message}`);
+          onProgress?.(`✗ Failed to create user: ${createRes.message || createRes.errorMessage}`);
           await this.agentClient.sendTelemetry(task.runId, {
             status: 'FAILED',
-            errorMessage: createRes.message,
+            errorMessage: createRes.message || createRes.errorMessage || 'User creation failed on client portal.',
             totalDurationMs,
             resultData: createRes,
           });

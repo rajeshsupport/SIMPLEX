@@ -589,10 +589,26 @@ export class UserManagementExecutor {
    */
   public static async createUser(
     page: Page,
-    addUsersUrl: string,
-    usersListUrl: string,
-    dto: CreateClientUserDto
+    arg1:
+      | string
+      | {
+          addUsersUrl: string;
+          usersListUrl: string;
+          dto: CreateClientUserDto;
+          loginUrl?: string;
+          credentials?: { username: string; password?: string };
+        },
+    arg2?: string | CreateClientUserDto,
+    arg3?: CreateClientUserDto
   ): Promise<MutationResult> {
+    const isObj = typeof arg1 === 'object';
+    const addUsersUrl = isObj ? arg1.addUsersUrl : (arg1 as string);
+    const usersListUrl = isObj ? arg1.usersListUrl : (arg2 as string);
+    const dto = isObj ? arg1.dto : ((arg3 || arg2) as CreateClientUserDto);
+    const loginUrl = isObj ? arg1.loginUrl : undefined;
+    const credentials = isObj ? arg1.credentials : undefined;
+
+    await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
     await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
     // 1. Locate fields
