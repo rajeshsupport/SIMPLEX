@@ -231,16 +231,12 @@ export function createFixtureApp(): express.Express {
           <table id="usersTable" data-testid="users-table">
             <thead>
               <tr>
-                <th>S.No</th>
-                <th>Full Name</th>
-                <th>Username</th>
-                <th>Mobile Number</th>
-                <th>Email</th>
-                <th>Nationality</th>
-                <th>Role</th>
-                <th>Profile Role</th>
+                <th>S.NO</th>
+                <th>User Name</th>
+                <th>Name</th>
+                <th>Mobile No</th>
                 <th>Status</th>
-                <th>Actions</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -249,18 +245,21 @@ export function createFixtureApp(): express.Express {
                   (u, idx) => `
                 <tr data-testid="user-row-${u.username}">
                   <td>${idx + 1}</td>
-                  <td>${u.fullName}</td>
                   <td>${u.username}</td>
+                  <td>${u.fullName}</td>
                   <td>${u.mobileNumber}</td>
-                  <td>${u.email}</td>
-                  <td>${u.nationality}</td>
-                  <td>${u.role}</td>
-                  <td>${u.profileRole}</td>
-                  <td><span class="${u.status === 'ACTIVE' ? 'badge-active' : 'badge-inactive'}">${u.status}</span></td>
-                  <td>
-                    <button class="btn-action btn-edit" data-testid="btn-edit-user" onclick="alert('Edit ${u.username}')">Edit</button>
-                    <button class="btn-action btn-status" data-testid="btn-toggle-status" onclick="toggleStatus('${u.username}')">Toggle</button>
-                    <button class="btn-action btn-reset-password" data-testid="btn-reset-password" onclick="resetPassword('${u.username}')">Reset</button>
+                  <td class="status-cell">
+                    <a href="javascript:void(0)" class="status-toggle ${u.status === 'ACTIVE' ? 'status-active' : 'status-inactive'}" title="${u.status === 'ACTIVE' ? 'Active' : 'Inactive'}" onclick="toggleStatus('${u.username}')" data-testid="btn-toggle-status">
+                      ${u.status === 'ACTIVE'
+                        ? '<span class="status-icon icon-active text-green" style="color: #10b981; font-size: 16px; font-weight: bold;" title="Active">✔</span>'
+                        : '<span class="status-icon icon-inactive text-red" style="color: #ef4444; font-size: 16px; font-weight: bold;" title="Inactive">✖</span>'
+                      }
+                    </a>
+                  </td>
+                  <td class="action-cell">
+                    <a href="javascript:void(0)" class="btn-action btn-edit" title="Edit" onclick="alert('Edit ${u.username}')"><i class="fa fa-pencil"></i> Edit</a>
+                    <a href="javascript:void(0)" class="btn-action btn-reset-password" title="Reset Password" onclick="resetPassword('${u.username}')"><i class="fa fa-key"></i> Reset</a>
+                    <a href="javascript:void(0)" class="btn-action btn-delete action-delete" title="Delete" onclick="alert('Delete ${u.username}')"><i class="fa fa-trash"></i> Delete</a>
                   </td>
                 </tr>
               `

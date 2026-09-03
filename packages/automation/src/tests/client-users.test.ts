@@ -353,8 +353,8 @@ async function runClientUsersTests() {
     );
     assert.strictEqual(nonExistentRes.success, false, 'Non-existent user status update must fail');
     assert.ok(
-      ['USER_NOT_FOUND', 'SELECTOR_NOT_FOUND'].includes(nonExistentRes.errorCode || ''),
-      `Must return USER_NOT_FOUND or SELECTOR_NOT_FOUND, got ${nonExistentRes.errorCode}`
+      ['REMOTE_USER_NOT_FOUND', 'USER_NOT_FOUND', 'SELECTOR_NOT_FOUND'].includes(nonExistentRes.errorCode || ''),
+      `Must return REMOTE_USER_NOT_FOUND, USER_NOT_FOUND or SELECTOR_NOT_FOUND, got ${nonExistentRes.errorCode}`
     );
     console.log('✓ TEST 19 Passed');
 

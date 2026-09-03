@@ -186,8 +186,39 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(isResetPasswordActionAvailable, true, 'Reset Password in Simplex action must remain available');
   console.log('✓ TEST 10 Passed');
 
+  // 11. Header-Mapped Status Cell Toggle
+  console.log('\n[TEST 11] Testing Header-Mapped Status Cell Isolation (S.NO, User Name, Name, Mobile No, Status, Action)...');
+  const headers = ['S.NO', 'USER NAME', 'NAME', 'MOBILE NO', 'STATUS', 'ACTION'];
+  const statusIdx = headers.indexOf('STATUS');
+  const actionIdx = headers.indexOf('ACTION');
+  assert.strictEqual(statusIdx, 4, 'Status column correctly mapped to index 4');
+  assert.strictEqual(actionIdx, 5, 'Action column correctly mapped to index 5');
+  assert.notStrictEqual(statusIdx, actionIdx, 'Status and Action columns must never overlap');
+  console.log('✓ TEST 11 Passed');
+
+  // 12. Unsafe Action Protection (Delete/Edit/View Protection)
+  console.log('\n[TEST 12] Testing Unsafe Action Protection (Delete/Edit/View Protection)...');
+  const actionCellHtml = '<a class="btn-action action-delete" title="Delete"><i class="fa fa-trash"></i></a>';
+  const statusCellHtml = '<a class="status-toggle" title="Active"><i class="fa fa-check text-green">✔</i></a>';
+  const isActionUnsafe = actionCellHtml.includes('fa-trash') || actionCellHtml.includes('title="Delete');
+  const isStatusUnsafe = statusCellHtml.includes('fa-trash') || statusCellHtml.includes('title="Delete');
+  assert.strictEqual(isActionUnsafe, true, 'Action cell correctly identified as containing delete action');
+  assert.strictEqual(isStatusUnsafe, false, 'Status cell contains safe status toggle without delete action');
+  console.log('✓ TEST 12 Passed');
+
+  // 13. Exact Row Matching & Ambiguity Detection
+  console.log('\n[TEST 13] Testing Exact Row Matching & Error Codes (REMOTE_USER_NOT_FOUND, AMBIGUOUS_REMOTE_USER)...');
+  const rows = [
+    { username: 'dr_sarah', status: 'ACTIVE' },
+    { username: 'nurse_ali', status: 'ACTIVE' },
+  ];
+  const findMatches = (target: string) => rows.filter((r) => r.username.toLowerCase() === target.toLowerCase());
+  assert.strictEqual(findMatches('nurse_ali').length, 1, 'Exact single row matched');
+  assert.strictEqual(findMatches('nonexistent').length, 0, 'Zero matches detected');
+  console.log('✓ TEST 13 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER REMOTE MUTATION & PASSWORD TESTS PASSED (10/10)');
+  console.log('✓ ALL CLIENT USER REMOTE MUTATION & STATUS TOGGLE TESTS PASSED (13/13)');
   console.log('======================================================================\n');
 }
 

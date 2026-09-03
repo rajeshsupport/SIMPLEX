@@ -392,8 +392,8 @@ export class UserManagementExecutor {
 
         headers.forEach((h, idx) => {
           if (h.includes('s.no') || h === 'sno' || h === '#' || h.includes('sl.no')) colSNo = idx;
-          else if (h.includes('user name') || h.includes('full name')) colFullName = idx;
-          else if (h === 'name' || h.includes('user id') || h.includes('username') || h.includes('login')) colUsername = idx;
+          else if (h === 'user name' || h.includes('username') || h.includes('login') || h.includes('user id') || h === 'user') colUsername = idx;
+          else if (h === 'name' || h.includes('full name') || h.includes('fullname')) colFullName = idx;
           else if (h.includes('mobile') || h.includes('phone') || h.includes('contact')) colMobile = idx;
           else if (h.includes('email') || h.includes('mail')) colEmail = idx;
           else if (h.includes('national') || h.includes('country')) colNationality = idx;
@@ -401,6 +401,9 @@ export class UserManagementExecutor {
           else if (h.includes('role') || h.includes('group') || h.includes('type')) colRole = idx;
           else if (h.includes('status') || h.includes('state')) colStatus = idx;
         });
+
+        if (colUsername === -1 && colFullName !== -1) colUsername = colFullName;
+        if (colFullName === -1 && colUsername !== -1) colFullName = colUsername;
 
         return rows.map((r) => {
           const cells = Array.from(r.querySelectorAll('td, [role="gridcell"], [role="cell"], .cell, .grid-cell, .col, div[class*="col-"]'))
@@ -877,7 +880,7 @@ export class UserManagementExecutor {
   }
 
   /**
-   * Toggles the active/inactive status of a user on the client and verifies the remote result.
+   * Toggles the active/inactive status of a user on the Simplex users grid and verifies the remote result.
    */
   public static async setUserStatus(
     page: Page,
@@ -895,27 +898,128 @@ export class UserManagementExecutor {
   ): Promise<MutationResult> {
     const isObj = typeof arg1 === 'object';
     const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
-    const username = isObj ? arg1.username : (arg2 as string);
+    const username = (isObj ? arg1.username : (arg2 as string)).trim();
     const targetStatus = isObj ? arg1.targetStatus : ((arg3 || arg2) as ClientUserStatus);
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
 
     await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
+    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.waitForSelector('table', { timeout: 10000 }).catch(() => {});
 
-    const row = page.locator(`tr:has-text("${username}")`).first();
-    const isRowVisible = await row.isVisible().catch(() => false);
-    if (!isRowVisible) {
+    // Try using search input if present on the users screen
+    const searchInput = page.locator('input[type="search"], input[name="search"], input[placeholder*="search" i], #userSearch').first();
+    if (await searchInput.isVisible().catch(() => false)) {
+      await searchInput.fill(username);
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
+    // 1. Detect column positions from visible headers (S.NO, User Name, Name, Mobile No, Status, Action)
+    const headerTexts: string[] = await page.$$eval('table thead tr th', (ths) =>
+      ths.map((th) => (th.textContent || '').trim().toUpperCase())
+    );
+
+    let usernameColIdx = headerTexts.findIndex((h) => h.includes('USER NAME') || h === 'USERNAME' || h === 'USER');
+    let nameColIdx = headerTexts.findIndex((h) => h === 'NAME' || h.includes('FULL NAME'));
+    let statusColIdx = headerTexts.findIndex((h) => h === 'STATUS' || h.includes('STATUS'));
+
+    if (usernameColIdx === -1 && nameColIdx !== -1) usernameColIdx = nameColIdx;
+    if (usernameColIdx === -1) usernameColIdx = 2; // fallback
+    if (statusColIdx === -1) statusColIdx = headerTexts.length > 2 ? headerTexts.length - 2 : 8;
+
+    // 2. Locate matching rows
+    const rows = await page.$$('table tbody tr');
+    const matchingRowIndices: number[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const cells = await row.$$('td');
+      if (cells.length === 0) continue;
+
+      const cellTexts = await Promise.all(cells.map((c) => c.textContent()));
+      const uText = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
+      const nText = (nameColIdx !== -1 ? (cellTexts[nameColIdx] || '') : '').trim().toLowerCase();
+      const allText = cellTexts.map((t) => (t || '').trim().toLowerCase());
+
+      const normTarget = username.toLowerCase();
+      if (uText === normTarget || nText === normTarget || allText.includes(normTarget)) {
+        matchingRowIndices.push(i);
+      }
+    }
+
+    if (matchingRowIndices.length === 0) {
       return {
         success: false,
         username,
-        errorCode: 'USER_NOT_FOUND',
+        errorCode: 'REMOTE_USER_NOT_FOUND',
         errorMessage: `Target user '${username}' not found on client users list.`,
       };
     }
 
-    // Read current remote status
-    const initialRowText = (await row.innerText().catch(() => '')).toUpperCase();
-    const initialStatus: ClientUserStatus = initialRowText.includes('INACTIVE') ? 'INACTIVE' : 'ACTIVE';
+    if (matchingRowIndices.length > 1) {
+      return {
+        success: false,
+        username,
+        errorCode: 'AMBIGUOUS_REMOTE_USER',
+        errorMessage: `Multiple matching user rows (${matchingRowIndices.length}) found for '${username}' on client users list.`,
+      };
+    }
+
+    const targetRowIndex = matchingRowIndices[0];
+    const targetRowHandle = rows[targetRowIndex];
+    const targetCells = await targetRowHandle.$$('td');
+
+    if (!targetCells[statusColIdx]) {
+      return {
+        success: false,
+        username,
+        errorCode: 'REMOTE_STATUS_CONTROL_NOT_FOUND',
+        errorMessage: `Status column cell for user '${username}' not found in table.`,
+      };
+    }
+
+    const statusCell = targetCells[statusColIdx];
+
+    // Helper to evaluate status from cell
+    const evaluateCellStatus = async (cellHandle: any): Promise<ClientUserStatus> => {
+      return await cellHandle.evaluate((el: HTMLElement) => {
+        const text = (el.innerText || el.textContent || '').toUpperCase();
+        const html = el.innerHTML.toUpperCase();
+        const hasCheck =
+          html.includes('FA-CHECK') ||
+          html.includes('GLYPHICON-OK') ||
+          html.includes('BADGE-ACTIVE') ||
+          html.includes('STATUS-ACTIVE') ||
+          html.includes('TEXT-GREEN') ||
+          html.includes('TEXT-EMERALD') ||
+          html.includes('✔') ||
+          html.includes('✓') ||
+          html.includes('COLOR: #10B981') ||
+          html.includes('COLOR: RGB(16, 185, 129)') ||
+          html.includes('TITLE="ACTIVE"');
+        const hasCross =
+          html.includes('FA-TIMES') ||
+          html.includes('FA-CLOSE') ||
+          html.includes('GLYPHICON-REMOVE') ||
+          html.includes('BADGE-INACTIVE') ||
+          html.includes('STATUS-INACTIVE') ||
+          html.includes('TEXT-RED') ||
+          html.includes('✖') ||
+          html.includes('✗') ||
+          html.includes('COLOR: #EF4444') ||
+          html.includes('COLOR: RGB(239, 68, 68)') ||
+          html.includes('TITLE="INACTIVE"');
+
+        if (hasCross && !hasCheck) return 'INACTIVE';
+        if (hasCheck && !hasCross) return 'ACTIVE';
+        if (text.includes('INACTIVE')) return 'INACTIVE';
+        if (text.includes('ACTIVE')) return 'ACTIVE';
+        return hasCheck ? 'ACTIVE' : hasCross ? 'INACTIVE' : 'ACTIVE';
+      });
+    };
+
+    const initialStatus = await evaluateCellStatus(statusCell);
 
     if (initialStatus === targetStatus) {
       return {
@@ -926,20 +1030,41 @@ export class UserManagementExecutor {
       };
     }
 
-    // Locate status control action - strictly avoid delete/trash buttons
-    const toggleBtn = row
-      .locator(
-        'button.btn-status, button:has-text("Activate"), button:has-text("Deactivate"), button:has-text("Toggle"), [data-testid="btn-toggle-status"], input[type="checkbox"].status-toggle, a[title*="status" i], a[title*="activate" i], a[title*="deactivate" i]'
-      )
-      .first();
+    // 3. Locate clickable control inside the Status cell
+    // Verify control does NOT target Action column or Delete/Edit/View
+    const isUnsafeAction = await statusCell.evaluate((el: HTMLElement) => {
+      const html = el.innerHTML.toLowerCase();
+      return (
+        html.includes('fa-trash') ||
+        html.includes('glyphicon-trash') ||
+        html.includes('title="delete') ||
+        html.includes('class="delete') ||
+        html.includes('fa-pencil') ||
+        html.includes('title="edit') ||
+        html.includes('action-delete')
+      );
+    });
 
-    const isToggleVisible = await toggleBtn.isVisible().catch(() => false);
-    if (!isToggleVisible) {
+    if (isUnsafeAction) {
       return {
         success: false,
         username,
-        errorCode: 'SELECTOR_NOT_FOUND',
-        errorMessage: `Status action control for user '${username}' not found on client.`,
+        errorCode: 'UNSAFE_REMOTE_ACTION_BLOCKED',
+        errorMessage: `Unsafe action control detected in status cell for user '${username}'. Aborting.`,
+      };
+    }
+
+    // Find the clickable status icon or its nearest clickable parent inside the status cell
+    const clickTarget = await statusCell.$(
+      'a, button, [role="button"], [ng-click], [onclick], .status-control, .status-icon, i, span.badge-active, span.badge-inactive, svg'
+    );
+
+    if (!clickTarget) {
+      return {
+        success: false,
+        username,
+        errorCode: 'REMOTE_STATUS_CONTROL_NOT_ACTIONABLE',
+        errorMessage: `Status control in row for '${username}' is not actionable or clickable.`,
       };
     }
 
@@ -948,15 +1073,54 @@ export class UserManagementExecutor {
       await dialog.accept().catch(() => {});
     });
 
-    // Click actual status action once
-    await toggleBtn.click();
+    // Click actual status icon / control exactly once
+    await clickTarget.click({ timeout: 5000 }).catch(async () => {
+      await statusCell.click({ timeout: 5000 });
+    });
+
     await page.waitForTimeout(1000);
 
-    // Reload users list and verify remote status
+    // 4. Reload and Re-read exact user row to verify remote status changed
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    const updatedRow = page.locator(`tr:has-text("${username}")`).first();
-    const updatedRowText = (await updatedRow.innerText().catch(() => '')).toUpperCase();
-    const verifiedStatus: ClientUserStatus = updatedRowText.includes('INACTIVE') ? 'INACTIVE' : 'ACTIVE';
+    await page.waitForSelector('table', { timeout: 10000 }).catch(() => {});
+
+    // Search again if needed
+    const reloadSearchInput = page.locator('input[type="search"], input[name="search"], input[placeholder*="search" i], #userSearch').first();
+    if (await reloadSearchInput.isVisible().catch(() => false)) {
+      await reloadSearchInput.fill(username);
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
+    const reloadedRows = await page.$$('table tbody tr');
+    let reloadedRowHandle: any = null;
+
+    for (const r of reloadedRows) {
+      const cells = await r.$$('td');
+      if (cells.length === 0) continue;
+      const cellTexts = await Promise.all(cells.map((c) => c.textContent()));
+      const uText = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
+      const nText = (nameColIdx !== -1 ? (cellTexts[nameColIdx] || '') : '').trim().toLowerCase();
+      const allText = cellTexts.map((t) => (t || '').trim().toLowerCase());
+      const normTarget = username.toLowerCase();
+      if (uText === normTarget || nText === normTarget || allText.includes(normTarget)) {
+        reloadedRowHandle = r;
+        break;
+      }
+    }
+
+    if (!reloadedRowHandle) {
+      return {
+        success: false,
+        username,
+        errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
+        errorMessage: `User '${username}' not found after status toggle reload.`,
+      };
+    }
+
+    const reloadedCells = await reloadedRowHandle.$$('td');
+    const reloadedStatusCell = reloadedCells[statusColIdx] || reloadedCells[reloadedCells.length - 2];
+    const verifiedStatus = await evaluateCellStatus(reloadedStatusCell);
 
     if (verifiedStatus === targetStatus) {
       return {
@@ -972,7 +1136,7 @@ export class UserManagementExecutor {
       username,
       status: initialStatus,
       errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-      errorMessage: `Remote status verification failed on client portal for user '${username}'. Expected ${targetStatus}, but remote status remained ${verifiedStatus}.`,
+      errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Expected ${targetStatus}, but remote status remained ${verifiedStatus}.`,
     };
   }
 
