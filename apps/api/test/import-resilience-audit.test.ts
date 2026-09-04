@@ -317,7 +317,11 @@ async function runImportAndAuditResilienceTests() {
     throw new Error('Inactive existing client user not classified as ALREADY_EXISTS with status');
   }
 
-  console.log('✓ TEST 7 PASSED: Dry-run correctly validated S.No uniqueness, live dropdown options, and ALREADY_EXISTS with ACTIVE/INACTIVE status.');
+  // Short mobile numbers (e.g., 2, 123, 00123) are valid
+  const r7_short = validateRow({ sNo: 7, username: 'short_mobile_user', firstName: 'Short', lastName: 'Number', mobileNumber: '00123', nationality: 'Saudi Arabia' }, seenSNoInFile, seenInFile, existingClientUsersMap);
+  if (r7_short.classification !== 'READY') throw new Error('Short mobile number was marked invalid');
+
+  console.log('✓ TEST 7 PASSED: Dry-run correctly validated S.No uniqueness, short mobile numbers (00123), live dropdown options, and ALREADY_EXISTS with ACTIVE/INACTIVE status.');
 
   // 8. Potential Duplicate Name Warning & Explicit Approval Toggle
   console.log('\n[TEST 8] Testing Potential Duplicate Name Warning & Operator Approval...');
@@ -612,8 +616,6 @@ async function runImportAndAuditResilienceTests() {
     'Mobile No *',
     'Nationality *',
     'Role',
-    'Profile Role',
-    'Barcode No',
   ];
 
   const templateRows = [
@@ -627,17 +629,15 @@ async function runImportAndAuditResilienceTests() {
       'Mobile No *': '0501234567',
       'Nationality *': natList[0] || 'Saudi Arabia',
       'Role': roleList[0] || 'Physician',
-      'Profile Role': profileRoleEntries[0]?.label || 'Cardiologist',
-      'Barcode No': 'BC-1001',
     },
   ];
 
   const wsUsers = XLSX.utils.json_to_sheet(templateRows, { header: expectedHeaders });
   wsUsers['!cols'] = [
-    { wch: 10 }, { wch: 20 }, { wch: 18 }, { wch: 16 }, { wch: 18 }, { wch: 28 }, { wch: 18 }, { wch: 24 }, { wch: 24 }, { wch: 26 }, { wch: 18 },
+    { wch: 10 }, { wch: 20 }, { wch: 18 }, { wch: 16 }, { wch: 18 }, { wch: 28 }, { wch: 18 }, { wch: 24 }, { wch: 24 },
   ];
   wsUsers['!views'] = [{ state: 'frozen', ySplit: 1 }];
-  wsUsers['!autofilter'] = { ref: 'A1:K2' };
+  wsUsers['!autofilter'] = { ref: 'A1:I2' };
 
   const addComment = (cellRef: string, text: string) => {
     if (!wsUsers[cellRef]) return;
@@ -650,18 +650,16 @@ async function runImportAndAuditResilienceTests() {
   addComment('G1', 'Required. Mobile number.');
   addComment('H1', 'Required. Nationality dropdown option.');
 
-  const maxOptionRows = Math.max(natList.length, roleList.length, profileRoleEntries.length, 1);
+  const maxOptionRows = Math.max(natList.length, roleList.length, 1);
   const dropdownRows = [];
   for (let i = 0; i < maxOptionRows; i++) {
     dropdownRows.push({
       'Nationality': natList[i] || '',
       'Role': roleList[i] || '',
-      'Profile Role': profileRoleEntries[i]?.label || '',
-      'Parent Role for Profile Role': profileRoleEntries[i]?.parentRole || '',
     });
   }
   const wsDropdown = XLSX.utils.json_to_sheet(dropdownRows, {
-    header: ['Nationality', 'Role', 'Profile Role', 'Parent Role for Profile Role'],
+    header: ['Nationality', 'Role'],
   });
 
   const wb = XLSX.utils.book_new();
@@ -725,8 +723,6 @@ async function runImportAndAuditResilienceTests() {
       'Mobile No *': '0501234567',
       'Nationality *': 'Saudi Arabia',
       'Role': 'Physician',
-      'Profile Role': 'Cardiologist',
-      'Barcode No': 'BC-1001',
     },
     {
       'S.No': 1,
@@ -738,8 +734,6 @@ async function runImportAndAuditResilienceTests() {
       'Mobile No *': '0551122334',
       'Nationality *': 'Saudi Arabia',
       'Role': 'Physician',
-      'Profile Role': 'Cardiologist',
-      'Barcode No': 'BC-2001',
     },
   ];
   const wsWithSample = XLSX.utils.json_to_sheet(testDataRows, { header: expectedHeaders });
@@ -779,8 +773,6 @@ async function runImportAndAuditResilienceTests() {
       'Mobile No *': '0509988776',
       'Nationality *': 'Saudi Arabia',
       'Role': 'Physician',
-      'Profile Role': 'Cardiologist',
-      'Barcode No': 'BC-3001',
     },
   ];
   const wsModified = XLSX.utils.json_to_sheet(modifiedRows, { header: expectedHeaders });

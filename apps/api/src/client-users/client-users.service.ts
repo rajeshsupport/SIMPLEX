@@ -41,6 +41,10 @@ import { AgentsService } from '../agents/agents.service.js';
 export class ClientUsersService implements OnModuleInit {
   private readonly logger = new Logger(ClientUsersService.name);
 
+  // Client-scoped single-flight map: SYNC_USERS:{clientId}
+  private syncFlightPromises = new Map<string, Promise<ClientUserListResponse>>();
+  private syncJobPromises = new Map<string, Promise<{ jobId: string; status: string; message: string }>>();
+
   constructor(
     @InjectRepository(ClientUserSnapshot)
     private snapshotRepo: Repository<ClientUserSnapshot>,
@@ -331,10 +335,16 @@ export class ClientUsersService implements OnModuleInit {
   }
 
   /**
-   * Initiates a background headless user sync job and returns the job ID immediately.
-   * Prevents duplicate in-flight sync jobs for the same client.
+   * Starts a client user sync job via the automation agent and returns immediately with the job ID.
    */
   async startSyncJob(clientId: string, user: JwtPayload): Promise<{ jobId: string; status: string; message: string }> {
+    if (!clientId) {
+      throw new BadRequestException({
+        code: 'CLIENT_ID_REQUIRED',
+        message: 'Target client ID is required.',
+      });
+    }
+
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
 
@@ -342,101 +352,117 @@ export class ClientUsersService implements OnModuleInit {
       throw new ForbiddenException('Not authorized for this client');
     }
 
-    // Clean up stale jobs before evaluating active status
-    await this.cleanupStaleSyncJobs(clientId);
+    const flightKey = `SYNC_USERS:${clientId}`;
+    if (this.syncJobPromises.has(flightKey)) {
+      return this.syncJobPromises.get(flightKey)!;
+    }
 
-    // Version & URL validation
-    const routes = this.resolveClientUserRoutes(client);
+    const execPromise = (async () => {
+      // Clean up stale jobs before evaluating active status
+      await this.cleanupStaleSyncJobs(clientId);
 
-    // Duplicate sync job prevention
-    const existingActive = await this.runRepo.findOne({
-      where: {
-        clientId,
-        runType: 'SYNC_CLIENT_USERS_HEADLESS',
-        status: In(['QUEUED', 'CLAIMED', 'AUTHENTICATING', 'NAVIGATING', 'EXTRACTING', 'PERSISTING', 'PENDING', 'RUNNING']),
-      },
-      order: { createdAt: 'DESC' },
-    });
+      // Version & URL validation
+      const routes = this.resolveClientUserRoutes(client);
 
-    if (existingActive) {
-      const elapsed = this.getRunElapsedMs(existingActive);
-      if (elapsed < 30000) {
-        return {
-          jobId: existingActive.id,
-          status: existingActive.status,
-          message: 'Connecting to automation agent…',
-        };
+      // Duplicate sync job prevention - reuse existing in-flight run
+      const existingActive = await this.runRepo.findOne({
+        where: {
+          clientId,
+          runType: 'SYNC_CLIENT_USERS_HEADLESS',
+          status: In(['QUEUED', 'CLAIMED', 'AUTHENTICATING', 'NAVIGATING', 'EXTRACTING', 'PERSISTING', 'PENDING', 'RUNNING']),
+        },
+        order: { createdAt: 'DESC' },
+      });
+
+      if (existingActive) {
+        const elapsed = this.getRunElapsedMs(existingActive);
+        if (elapsed < 45000) {
+          return {
+            jobId: existingActive.id,
+            status: existingActive.status,
+            message: 'Connecting to automation agent…',
+          };
+        }
       }
-    }
 
-    const allAgents = await this.agentsService.getAllAgents();
-    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE');
-    if (onlineAgents.length === 0) {
-      throw new BadRequestException({
-        code: 'DESKTOP_AGENT_OFFLINE',
-        message: 'Sync failed: Automation agent is offline.',
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException({
+          code: 'DESKTOP_AGENT_OFFLINE',
+          message: 'Sync failed: Automation agent is offline.',
+        });
+      }
+
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
+
+      const correlationId = crypto.randomUUID();
+      const now = new Date();
+
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'SYNC_CLIENT_USERS_HEADLESS',
+        status: 'QUEUED',
+        createdAt: now,
+        parametersJson: JSON.stringify({
+          taskType: 'SYNC_CLIENT_USERS_HEADLESS',
+          userId: user.sub,
+          clientBaseUrl: client.baseUrl,
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: routes.resolvedUsersUrl,
+          credentials,
+          createdEpochMs: Date.now(),
+        }),
       });
+
+      const savedRun = await this.runRepo.save(run);
+
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USERS_SYNC_REQUESTED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT',
+          entityId: clientId,
+          result: 'SUCCESS',
+          correlationId,
+          detailsJson: JSON.stringify({ clientCode: client.clientCode, runId: savedRun.id, executionMode: 'HEADLESS' }),
+        })
+      );
+
+      return {
+        jobId: savedRun.id,
+        status: 'QUEUED',
+        message: 'Connecting to automation agent…',
+      };
+    })();
+
+    this.syncJobPromises.set(flightKey, execPromise);
+    try {
+      return await execPromise;
+    } finally {
+      setTimeout(() => {
+        this.syncJobPromises.delete(flightKey);
+      }, 1000);
     }
-
-    let credentials: { username: string; password: string } | undefined = undefined;
-    const cred = await this.credRepo.findOne({ where: { clientId, isActive: true } });
-    if (cred) {
-      const username = EnvelopeEncryption.decrypt({
-        cipherText: cred.encryptedUsername,
-        iv: cred.usernameIv,
-        tag: cred.usernameTag,
-        keyVersion: cred.keyVersion,
-      });
-      const password = EnvelopeEncryption.decrypt({
-        cipherText: cred.encryptedPassword,
-        iv: cred.passwordIv,
-        tag: cred.passwordTag,
-        keyVersion: cred.keyVersion,
-      });
-      credentials = { username, password };
-    }
-
-    const correlationId = crypto.randomUUID();
-    const now = new Date();
-
-    const run = this.runRepo.create({
-      clientId: client.id,
-      desktopAgentId: onlineAgents[0].id,
-      triggeredByUserId: user.sub,
-      runType: 'SYNC_CLIENT_USERS_HEADLESS',
-      status: 'QUEUED',
-      createdAt: now,
-      parametersJson: JSON.stringify({
-        taskType: 'SYNC_CLIENT_USERS_HEADLESS',
-        userId: user.sub,
-        clientBaseUrl: client.baseUrl,
-        loginRoute: routes.resolvedLoginUrl,
-        targetRoute: routes.resolvedUsersUrl,
-        credentials,
-        createdEpochMs: Date.now(),
-      }),
-    });
-
-    const savedRun = await this.runRepo.save(run);
-
-    await this.auditRepo.save(
-      this.auditRepo.create({
-        action: 'CLIENT_USERS_SYNC_REQUESTED',
-        actorUserId: user.sub,
-        actorUsername: user.username,
-        entityType: 'CLIENT',
-        entityId: clientId,
-        result: 'SUCCESS',
-        correlationId,
-        detailsJson: JSON.stringify({ clientCode: client.clientCode, runId: savedRun.id, executionMode: 'HEADLESS' }),
-      })
-    );
-
-    return {
-      jobId: savedRun.id,
-      status: 'QUEUED',
-      message: 'Connecting to automation agent…',
-    };
   }
 
   /**
@@ -708,7 +734,7 @@ export class ClientUsersService implements OnModuleInit {
   }
 
   /**
-   * Synchronous / polling wrapper for syncClientUsers.
+   * Synchronous / polling wrapper for syncClientUsers with single-flight coalescing.
    */
   async syncClientUsers(clientId: string, user: JwtPayload): Promise<ClientUserListResponse> {
     if (!clientId || clientId.trim() === '') {
@@ -718,52 +744,66 @@ export class ClientUsersService implements OnModuleInit {
       });
     }
 
-    const { jobId } = await this.startSyncJob(clientId, user);
-
-    // Wait up to 15s for the job to complete
-    const startTime = Date.now();
-    let completedRun: AutomationRun | null = null;
-
-    while (Date.now() - startTime < 15000) {
-      await new Promise((r) => setTimeout(r, 300));
-      const r = await this.runRepo.findOne({ where: { id: jobId } });
-      if (r && (r.status === 'COMPLETED' || r.status === 'FAILED')) {
-        completedRun = r;
-        break;
-      }
+    const flightKey = `SYNC_USERS:${clientId}`;
+    if (this.syncFlightPromises.has(flightKey)) {
+      return this.syncFlightPromises.get(flightKey)!;
     }
 
-    let syncSummary: ClientUserSyncSummary | undefined = undefined;
-    if (completedRun && completedRun.status === 'COMPLETED' && completedRun.resultSummaryJson) {
-      try {
-        const resultData = JSON.parse(completedRun.resultSummaryJson);
-        if (resultData.users) {
-          syncSummary = await this.persistScrapedUsers(clientId, resultData.users, {
-            remoteRowsRead: resultData.remoteRowsRead,
-            remotePagesRead: resultData.remotePagesRead,
-            remoteDuplicatesRemoved: resultData.remoteDuplicatesRemoved,
-            remoteUniqueUsers: resultData.remoteUniqueUsers,
-          });
+    const syncPromise = (async () => {
+      const { jobId } = await this.startSyncJob(clientId, user);
+
+      // Wait up to 15s for the job to complete
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+
+      while (Date.now() - startTime < 15000) {
+        await new Promise((r) => setTimeout(r, 300));
+        const r = await this.runRepo.findOne({ where: { id: jobId } });
+        if (r && ['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'].includes(r.status)) {
+          completedRun = r;
+          break;
         }
-      } catch (err: any) {
-        if (err instanceof BadRequestException) throw err;
-        console.error('Error saving scraped snapshot users:', err);
       }
-    } else if (completedRun && completedRun.status === 'FAILED') {
-      let errorCode = 'CLIENT_USER_SYNC_FAILED';
-      try {
-        const parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
-        if (parsed.errorCode) errorCode = parsed.errorCode;
-      } catch {}
-      throw new BadRequestException({
-        code: errorCode,
-        message: completedRun.errorMessage || 'Background sync failed',
-      });
-    }
 
-    const response = await this.getClientUsers(clientId, {}, user);
-    if (syncSummary) response.syncSummary = syncSummary;
-    return response;
+      let syncSummary: ClientUserSyncSummary | undefined = undefined;
+      if (completedRun && (completedRun.status === 'COMPLETED' || completedRun.status === 'SUCCEEDED') && completedRun.resultSummaryJson) {
+        try {
+          const resultData = JSON.parse(completedRun.resultSummaryJson);
+          if (resultData.users) {
+            syncSummary = await this.persistScrapedUsers(clientId, resultData.users, {
+              remoteRowsRead: resultData.remoteRowsRead,
+              remotePagesRead: resultData.remotePagesRead,
+              remoteDuplicatesRemoved: resultData.remoteDuplicatesRemoved,
+              remoteUniqueUsers: resultData.remoteUniqueUsers,
+            });
+          }
+        } catch (err: any) {
+          if (err instanceof BadRequestException) throw err;
+          console.error('Error saving scraped snapshot users:', err);
+        }
+      } else if (completedRun && (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT')) {
+        let errorCode = 'CLIENT_USER_SYNC_FAILED';
+        try {
+          const parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
+          if (parsed.errorCode) errorCode = parsed.errorCode;
+        } catch {}
+        throw new BadRequestException({
+          code: errorCode,
+          message: completedRun.errorMessage || 'Background sync failed',
+        });
+      }
+
+      const response = await this.getClientUsers(clientId, { page: 1, limit: 100 }, user);
+      if (syncSummary) response.syncSummary = syncSummary;
+      return response;
+    })();
+
+    this.syncFlightPromises.set(flightKey, syncPromise);
+    try {
+      return await syncPromise;
+    } finally {
+      this.syncFlightPromises.delete(flightKey);
+    }
   }
 
   private static activeMutationLocks = new Map<string, number>();
@@ -825,6 +865,27 @@ export class ClientUsersService implements OnModuleInit {
         code: 'PRODUCTION_MUTATION_BLOCKED',
         message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
       });
+    }
+
+    // Check if role has dependent profile roles that require profileRole
+    try {
+      const formMeta = await this.getLiveFormOptions(dto.clientId, user, false).catch(() => null);
+      if (formMeta && formMeta.profileRoles && dto.role) {
+        const dependentProfileRoles = formMeta.profileRoles.filter((pr: any) => {
+          const parent = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
+          return parent && parent.toLowerCase().trim() === (dto.role || '').toLowerCase().trim();
+        });
+        if (dependentProfileRoles.length > 0 && !dto.profileRole) {
+          throw new BadRequestException({
+            code: 'REMOTE_REQUIRED_FIELD_UNSUPPORTED',
+            message: 'REMOTE_REQUIRED_FIELD_UNSUPPORTED — Selected Role requires Profile Role.',
+          });
+        }
+      }
+    } catch (err: any) {
+      if (err instanceof BadRequestException && (err.getResponse() as any)?.code === 'REMOTE_REQUIRED_FIELD_UNSUPPORTED') {
+        throw err;
+      }
     }
 
     // Acquire mutation lock
@@ -1899,7 +1960,7 @@ export class ClientUsersService implements OnModuleInit {
     const sampleRole = roleList[0] || 'Physician';
     const sampleProf = profList[0] || 'Clinical Specialist';
 
-    // 1. Sheet 1: Users (Headers in exact order, 1 SAMPLE row, no Password column)
+    // 1. Sheet 1: Users (Headers in exact order: 9 columns, 1 SAMPLE row, no Password/Profile Role/Barcode column)
     const headers = [
       'S.No',
       'User Name *',
@@ -1910,8 +1971,6 @@ export class ClientUsersService implements OnModuleInit {
       'Mobile No *',
       'Nationality *',
       'Role',
-      'Profile Role',
-      'Barcode No',
     ];
 
     const templateRows = [
@@ -1925,8 +1984,6 @@ export class ClientUsersService implements OnModuleInit {
         'Mobile No *': '0501234567',
         'Nationality *': sampleNat,
         'Role': sampleRole,
-        'Profile Role': sampleProf,
-        'Barcode No': 'BC-1001',
       },
     ];
 
@@ -1943,15 +2000,13 @@ export class ClientUsersService implements OnModuleInit {
       { wch: 18 }, // Mobile No *
       { wch: 24 }, // Nationality *
       { wch: 24 }, // Role
-      { wch: 26 }, // Profile Role
-      { wch: 18 }, // Barcode No
     ];
 
     // Freeze top row
     wsUsers['!views'] = [{ state: 'frozen', ySplit: 1 }];
 
     // Auto-filter
-    wsUsers['!autofilter'] = { ref: 'A1:K2' };
+    wsUsers['!autofilter'] = { ref: 'A1:I2' };
 
     // Cell comments explaining required formats
     const addComment = (cellRef: string, commentText: string) => {
@@ -1968,19 +2023,8 @@ export class ClientUsersService implements OnModuleInit {
     addComment('G1', 'Required. Valid mobile phone number.');
     addComment('H1', "Required. Must match a valid nationality from the 'Dropdown Options' sheet.");
     addComment('I1', "Optional. Must match a valid role from the 'Dropdown Options' sheet.");
-    addComment('J1', "Optional. Must match a valid profile role from the 'Dropdown Options' sheet.");
-    addComment('K1', 'Optional. Barcode identification number.');
 
-    // 2. Sheet 2: Dropdown Options (Column A: Nationality, Column B: Role, Column C: Profile Role, Column D: Parent Role for Profile Role)
-    const rawProfileRoles = formMeta.profileRoles || [];
-    const profileRoleEntries = rawProfileRoles
-      .map((pr: any) => {
-        const label = typeof pr === 'string' ? pr : pr?.label || pr?.value || '';
-        const parentRole = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
-        return { label: label.trim(), parentRole: parentRole.trim() };
-      })
-      .filter((e) => e.label && !e.label.toLowerCase().includes('select'));
-
+    // 2. Sheet 2: Dropdown Options (Column A: Nationality, Column B: Role)
     const nationalities = Array.from(
       new Set(
         (formMeta.nationalities || [])
@@ -1997,30 +2041,26 @@ export class ClientUsersService implements OnModuleInit {
       )
     );
 
-    const maxOptionRows = Math.max(nationalities.length, roles.length, profileRoleEntries.length, 1);
+    const maxOptionRows = Math.max(nationalities.length, roles.length, 1);
     const dropdownRows = [];
     for (let i = 0; i < maxOptionRows; i++) {
       dropdownRows.push({
         'Nationality': nationalities[i] || '',
         'Role': roles[i] || '',
-        'Profile Role': profileRoleEntries[i]?.label || '',
-        'Parent Role for Profile Role': profileRoleEntries[i]?.parentRole || '',
       });
     }
 
     const wsDropdown = XLSX.utils.json_to_sheet(dropdownRows, {
-      header: ['Nationality', 'Role', 'Profile Role', 'Parent Role for Profile Role'],
+      header: ['Nationality', 'Role'],
     });
 
     wsDropdown['!cols'] = [
       { wch: 25 }, // Nationality
       { wch: 25 }, // Role
-      { wch: 28 }, // Profile Role
-      { wch: 28 }, // Parent Role for Profile Role
     ];
 
     wsDropdown['!views'] = [{ state: 'frozen', ySplit: 1 }];
-    wsDropdown['!autofilter'] = { ref: `A1:D${Math.max(2, dropdownRows.length + 1)}` };
+    wsDropdown['!autofilter'] = { ref: `A1:B${Math.max(2, dropdownRows.length + 1)}` };
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
@@ -2062,7 +2102,7 @@ export class ClientUsersService implements OnModuleInit {
       });
     }
 
-    const rawRows: any[] = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' });
+    const rawRows: any[] = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '', raw: false });
     if (rawRows.length === 0) {
       throw new BadRequestException({
         code: 'INVALID_EXCEL_FORMAT',
@@ -2082,9 +2122,11 @@ export class ClientUsersService implements OnModuleInit {
 
     // Fetch live options for dropdown validation
     let liveOptions = { nationalities: [] as string[], roles: [] as string[], profileRoles: [] as string[] };
+    let rawProfileRoles: any[] = [];
     try {
       const meta = await this.getLiveFormOptions(clientId, user, false);
       const toLabel = (item: any) => (typeof item === 'string' ? item : item?.label || item?.value || '');
+      rawProfileRoles = meta.profileRoles || [];
       liveOptions = {
         nationalities: (meta.nationalities || []).map(toLabel).filter(Boolean),
         roles: (meta.roles || []).map(toLabel).filter(Boolean),
@@ -2205,13 +2247,6 @@ export class ClientUsersService implements OnModuleInit {
         errorCode = errorCode || 'INVALID_FIELD_FORMAT';
       }
 
-      // Mobile number format validation
-      if (mobileNumber && !/^[0-9+() -]{7,20}$/.test(mobileNumber)) {
-        validationErrors.push('Invalid mobile number format');
-        classification = 'INVALID';
-        errorCode = errorCode || 'INVALID_FIELD_FORMAT';
-      }
-
       // Email format validation
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         validationErrors.push('Invalid email format');
@@ -2230,6 +2265,20 @@ export class ClientUsersService implements OnModuleInit {
         classification = 'INVALID';
         errorCode = errorCode || 'REMOTE_DROPDOWN_OPTION_NOT_FOUND';
       }
+
+      // Check if role genuinely requires profile role
+      if (role && rawProfileRoles.length > 0) {
+        const dependentProfileRoles = rawProfileRoles.filter((pr: any) => {
+          const parent = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
+          return parent && parent.toLowerCase().trim() === role.toLowerCase().trim();
+        });
+        if (dependentProfileRoles.length > 0 && !profileRole) {
+          validationErrors.push('REMOTE_REQUIRED_FIELD_UNSUPPORTED — Selected Role requires Profile Role.');
+          classification = 'INVALID';
+          errorCode = errorCode || 'REMOTE_REQUIRED_FIELD_UNSUPPORTED';
+        }
+      }
+
       if (profileRole && normProfSet.size > 0 && !normProfSet.has(profileRole.toLowerCase())) {
         validationErrors.push(`Profile Role '${profileRole}' is not in the client's live options`);
         classification = 'INVALID';
@@ -2392,6 +2441,7 @@ export class ClientUsersService implements OnModuleInit {
         row.errorCode === 'REQUIRED_FIELD_MISSING' ||
         row.errorCode === 'INVALID_FIELD_FORMAT' ||
         row.errorCode === 'REMOTE_DROPDOWN_OPTION_NOT_FOUND' ||
+        row.errorCode === 'REMOTE_REQUIRED_FIELD_UNSUPPORTED' ||
         row.errorCode === 'DUPLICATE_USERNAME_IN_FILE'
       ) {
         invalidCount++;

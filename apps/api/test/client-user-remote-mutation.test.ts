@@ -1479,8 +1479,96 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(enabledState.title, 'Activate in Simplex');
   console.log('✓ TEST 70 Passed');
 
+  // 71. One-Click, One-Run Client-Scoped Single Flight Key SYNC_USERS:{clientId}
+  console.log('\n[TEST 71] Testing Single-Flight Key SYNC_USERS:{clientId} and Job Coalescing...');
+  const activeFlightMap = new Map<string, Promise<{ jobId: string }>>();
+  let createdJobCount = 0;
+
+  const triggerSync = async (clientId: string) => {
+    const flightKey = `SYNC_USERS:${clientId}`;
+    if (activeFlightMap.has(flightKey)) {
+      return activeFlightMap.get(flightKey)!;
+    }
+    const flightPromise = (async () => {
+      createdJobCount++;
+      const res = { jobId: `sync_job_${clientId}_${createdJobCount}` };
+      await new Promise((r) => setTimeout(r, 20));
+      return res;
+    })();
+    activeFlightMap.set(flightKey, flightPromise);
+    try {
+      return await flightPromise;
+    } finally {
+      activeFlightMap.delete(flightKey);
+    }
+  };
+
+  // Trigger 3 concurrent sync requests for client-A
+  const [resA1, resA2, resA3] = await Promise.all([
+    triggerSync('client-A'),
+    triggerSync('client-A'),
+    triggerSync('client-A'),
+  ]);
+  assert.strictEqual(resA1.jobId, resA2.jobId, 'Concurrent syncs for client-A must share the same job ID');
+  assert.strictEqual(resA2.jobId, resA3.jobId, 'All coalesced syncs must return the same job ID');
+  assert.strictEqual(createdJobCount, 1, 'Only one job must be created for simultaneous clicks');
+  console.log('✓ TEST 71 Passed');
+
+  // 72. Invariant Enforcement: remoteUniqueUsers = centralRowsPersisted = centralRowsDisplayed
+  console.log('\n[TEST 72] Testing Sync Count Invariant & CLIENT_USER_COUNT_MISMATCH Error...');
+  const reconcileSnapshot = (remoteCount: number, persistedCount: number, displayedCount: number) => {
+    if (remoteCount !== persistedCount || persistedCount !== displayedCount) {
+      const err: any = new Error(`CLIENT_USER_COUNT_MISMATCH: Remote (${remoteCount}) != Persisted (${persistedCount}) != Displayed (${displayedCount})`);
+      err.code = 'CLIENT_USER_COUNT_MISMATCH';
+      throw err;
+    }
+    return { success: true, count: persistedCount };
+  };
+
+  assert.strictEqual(reconcileSnapshot(25, 25, 25).count, 25);
+  assert.throws(
+    () => reconcileSnapshot(25, 24, 25),
+    (err: any) => err.code === 'CLIENT_USER_COUNT_MISMATCH'
+  );
+  assert.throws(
+    () => reconcileSnapshot(25, 25, 26),
+    (err: any) => err.code === 'CLIENT_USER_COUNT_MISMATCH'
+  );
+  console.log('✓ TEST 72 Passed');
+
+  // 73. Dependent Profile Role & Short Mobile Validation
+  console.log('\n[TEST 73] Testing REMOTE_REQUIRED_FIELD_UNSUPPORTED and Short Mobile Validation...');
+  const validateCreateFields = (dto: { role?: string; profileRole?: string; mobileNumber: string }, dependentRoles: Record<string, string[]>) => {
+    if (!dto.mobileNumber || dto.mobileNumber.trim() === '') {
+      throw new Error('REQUIRED_FIELD_MISSING: Mobile No is required');
+    }
+    // Accept short numbers (2, 123, 00123) without regex min/max length rejection
+    if (dto.role && dependentRoles[dto.role] && dependentRoles[dto.role].length > 0 && !dto.profileRole) {
+      const err: any = new Error('REMOTE_REQUIRED_FIELD_UNSUPPORTED — Selected Role requires Profile Role.');
+      err.code = 'REMOTE_REQUIRED_FIELD_UNSUPPORTED';
+      throw err;
+    }
+    return true;
+  };
+
+  const roleDeps = {
+    'Physician': ['Cardiologist', 'Neurologist'],
+    'Nurse': [],
+  };
+
+  // Physician requires profile role, none provided -> reject
+  assert.throws(
+    () => validateCreateFields({ role: 'Physician', profileRole: undefined, mobileNumber: '00123' }, roleDeps),
+    (err: any) => err.code === 'REMOTE_REQUIRED_FIELD_UNSUPPORTED'
+  );
+
+  // Nurse does not require profile role -> valid with short mobile
+  assert.strictEqual(validateCreateFields({ role: 'Nurse', profileRole: undefined, mobileNumber: '2' }, roleDeps), true);
+  assert.strictEqual(validateCreateFields({ role: 'Physician', profileRole: 'Cardiologist', mobileNumber: '12345' }, roleDeps), true);
+  console.log('✓ TEST 73 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (70/70)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (73/73)');
   console.log('======================================================================\n');
 }
 

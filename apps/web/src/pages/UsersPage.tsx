@@ -374,8 +374,18 @@ export const UsersPage: React.FC = () => {
       );
       // Discard stale responses
       if (currentReqId !== reqIdRef.current) return;
-      setUsers(res.users || []);
-      setTotalCount(res.totalCount || 0);
+      const rawUsers = res.users || [];
+      const seen = new Set<string>();
+      const dedupedUsers: ClientUser[] = [];
+      for (const u of rawUsers) {
+        const key = `${u.clientId || selectedClientId}:${(u.remoteUserId || u.username || '').toLowerCase().trim()}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          dedupedUsers.push(u);
+        }
+      }
+      setUsers(dedupedUsers);
+      setTotalCount(res.totalCount !== undefined ? res.totalCount : dedupedUsers.length);
       setLastSyncedAt(res.lastSyncedAt || null);
       if (res.liveClientOptions) {
         const toStrings = (arr: any[]): string[] => {
@@ -1978,7 +1988,7 @@ export const UsersPage: React.FC = () => {
           </div>
 
           {/* Live Dropdowns Scoped by Client */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-slate-400 mb-1">Nationality *</label>
               <select
@@ -2005,17 +2015,7 @@ export const UsersPage: React.FC = () => {
               <select
                 disabled={isLoadingOptions || !!optionsError || !formMetadata}
                 value={createForm.role}
-                onChange={(e) => {
-                  const newRole = e.target.value;
-                  let matchingProf = '';
-                  if (formMetadata?.profileRoles) {
-                    const prof = formMetadata.profileRoles.find(
-                      (p: any) => p.roleDependency && p.roleDependency.toLowerCase() === newRole.toLowerCase()
-                    );
-                    if (prof) matchingProf = typeof prof === 'string' ? prof : prof?.value || prof?.label || '';
-                  }
-                  setCreateForm({ ...createForm, role: newRole, profileRole: matchingProf });
-                }}
+                onChange={(e) => setCreateForm({ ...createForm, role: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <option value="">{isLoadingOptions ? 'Loading roles…' : '-- Select Role --'}</option>
@@ -2030,43 +2030,6 @@ export const UsersPage: React.FC = () => {
                 })}
               </select>
             </div>
-            <div>
-              <label className="block text-slate-400 mb-1">Profile Role</label>
-              <select
-                disabled={isLoadingOptions || !!optionsError || !formMetadata}
-                value={createForm.profileRole}
-                onChange={(e) => setCreateForm({ ...createForm, profileRole: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <option value="">{isLoadingOptions ? 'Loading profile roles…' : '-- Select Profile Role --'}</option>
-                {formMetadata?.profileRoles
-                  ?.filter(
-                    (pr: any) =>
-                      !pr.roleDependency ||
-                      !createForm.role ||
-                      pr.roleDependency.toLowerCase() === (createForm.role || '').toLowerCase()
-                  )
-                  .map((pr: any) => {
-                    const val = typeof pr === 'string' ? pr : (pr?.value || pr?.label || '');
-                    const lbl = typeof pr === 'string' ? pr : (pr?.label || pr?.value || '');
-                    return (
-                      <option key={val} value={val}>
-                        {lbl}
-                      </option>
-                    );
-                  })}
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-slate-400 mb-1">Barcode No</label>
-            <input
-              type="text"
-              value={createForm.barcodeNumber}
-              onChange={(e) => setCreateForm({ ...createForm, barcodeNumber: e.target.value })}
-              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white font-mono"
-            />
           </div>
 
           {/* File Uploads */}
