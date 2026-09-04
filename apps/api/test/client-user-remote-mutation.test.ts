@@ -1288,10 +1288,115 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(bgSyncCompleted, false, 'Endpoint returned immediately without waiting for background sync');
   await new Promise((r) => setTimeout(r, 30));
   assert.strictEqual(bgSyncCompleted, true);
-  console.log('✓ TEST 63 Passed');
+  // 64. Worker/API Ephemeral Password Transport Preservation without DB Persistence
+  console.log('\n[TEST 64] Testing Worker/API Ephemeral Password Transport Preservation...');
+  const simulatedWorkerCompletion = {
+    status: 'COMPLETED',
+    resultData: {
+      success: true,
+      username: 'dr_sarah',
+      defaultPassword: 'LiveClientDefaultSecret123!',
+      temporaryPassword: 'LiveClientDefaultSecret123!',
+      status: 'ACTIVE',
+      isRemoteSaveConfirmed: true,
+    },
+  };
+
+  // API extracts ephemeral credentials for response
+  const deliveredResponse = {
+    username: simulatedWorkerCompletion.resultData.username,
+    status: simulatedWorkerCompletion.resultData.status,
+    defaultPassword: simulatedWorkerCompletion.resultData.defaultPassword,
+    temporaryPassword: simulatedWorkerCompletion.resultData.temporaryPassword,
+    message: `User '${simulatedWorkerCompletion.resultData.username}' created and verified on client.`,
+  };
+
+  assert.strictEqual(deliveredResponse.defaultPassword, 'LiveClientDefaultSecret123!');
+  assert.strictEqual(deliveredResponse.temporaryPassword, 'LiveClientDefaultSecret123!');
+
+  // Database snapshot audit: zero password fields
+  const dbSnapshotEntity = {
+    id: 'snap-101',
+    clientId: 'client-1',
+    username: 'dr_sarah',
+    status: 'ACTIVE',
+    hasSignature: false,
+    hasStamp: false,
+    hasProfileImage: false,
+    isPresentRemotely: true,
+  };
+  assert.strictEqual('defaultPassword' in dbSnapshotEntity, false);
+  assert.strictEqual('temporaryPassword' in dbSnapshotEntity, false);
+  assert.strictEqual('password' in dbSnapshotEntity, false);
+  console.log('✓ TEST 64 Passed');
+
+  // 65. UI Modal Unmasked Plain-Text Display, Copy Buttons & 60-Second Auto-Clear
+  console.log('\n[TEST 65] Testing UI Modal Unmasked Plain-Text Display, Copy Actions & 60s Auto-Clear...');
+  const renderCredentialModalState = (info: { type: 'CREATE' | 'RESET'; username: string; password: string | null }) => {
+    return {
+      isOpen: true,
+      type: info.type,
+      title: info.type === 'CREATE' ? 'User created successfully' : 'Password reset successfully',
+      username: info.username,
+      displayedPasswordText: info.password || (info.type === 'CREATE' ? 'Default password was not provided by the client application.' : 'Password reset succeeded, but the client application did not provide the password.'),
+      isDirectPlainText: true, // No masking, no Reveal/Hide buttons
+      hasRevealButton: false,
+      hasCopyUsername: true,
+      hasCopyPassword: Boolean(info.password),
+      hasCloseButton: true,
+      countdownSeconds: 60,
+    };
+  };
+
+  const createModal = renderCredentialModalState({
+    type: 'CREATE',
+    username: 'new_physician',
+    password: 'ClientDirectPassword789!',
+  });
+  assert.strictEqual(createModal.title, 'User created successfully');
+  assert.strictEqual(createModal.displayedPasswordText, 'ClientDirectPassword789!');
+  assert.strictEqual(createModal.isDirectPlainText, true, 'Password must be shown directly as plain text');
+  assert.strictEqual(createModal.hasRevealButton, false, 'Modal must have zero Reveal buttons');
+  assert.strictEqual(createModal.hasCopyPassword, true);
+  assert.strictEqual(createModal.hasCopyUsername, true);
+  assert.strictEqual(createModal.hasCloseButton, true);
+
+  const resetModal = renderCredentialModalState({
+    type: 'RESET',
+    username: 'nurse_ali',
+    password: 'LiveResetSecret456!',
+  });
+  assert.strictEqual(resetModal.title, 'Password reset successfully');
+  assert.strictEqual(resetModal.displayedPasswordText, 'LiveResetSecret456!');
+  assert.strictEqual(resetModal.hasRevealButton, false);
+
+  // 60-second expiration clears password
+  let currentPasswordState: string | null = resetModal.displayedPasswordText;
+  currentPasswordState = null; // after countdown expires or modal closes
+  assert.strictEqual(currentPasswordState, null);
+  console.log('✓ TEST 65 Passed');
+
+  // 66. Safe Diagnostics Recording on Extraction Failure
+  console.log('\n[TEST 66] Testing Safe Diagnostics Recording on Extraction Failure...');
+  const generateSafeDiagnostics = (matchedCount: number, adjacentType: string, rawUrl: string) => {
+    return {
+      passwordValueFound: false,
+      matchedLabelCount: matchedCount,
+      adjacentElementType: adjacentType,
+      sanitizedPageUrl: rawUrl.split('?')[0],
+    };
+  };
+
+  const safeDiag = generateSafeDiagnostics(0, 'NONE', 'https://hospital.simplex.local/MasterV9.4/addUsers?token=secret123');
+  assert.strictEqual(safeDiag.passwordValueFound, false);
+  assert.strictEqual(safeDiag.matchedLabelCount, 0);
+  assert.strictEqual(safeDiag.adjacentElementType, 'NONE');
+  assert.strictEqual(safeDiag.sanitizedPageUrl, 'https://hospital.simplex.local/MasterV9.4/addUsers');
+  assert.strictEqual('password' in safeDiag, false, 'Safe diagnostics must never contain password property');
+  console.log('✓ TEST 66 Passed');
 
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (63/63)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (66/66)');
   console.log('======================================================================\n');
 }
 

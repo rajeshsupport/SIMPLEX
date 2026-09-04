@@ -890,6 +890,7 @@ export class ClientUsersService implements OnModuleInit {
         throw new BadRequestException('Mutation failed: Automation agent is offline.');
       }
 
+      const routes = this.resolveClientUserRoutes(client);
       const correlationId = crypto.randomUUID();
       const run = this.runRepo.create({
         clientId: client.id,
@@ -903,10 +904,14 @@ export class ClientUsersService implements OnModuleInit {
           userId: user.sub,
           clientBaseUrl: client.baseUrl,
           clientAppPath: client.applicationPath,
-          loginRoute: client.loginRoute,
-          targetRoute: client.usersRoute || '/users',
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: routes.resolvedUsersUrl,
+          addUsersRoute: routes.resolvedAddUsersUrl,
           credentials,
-          payload: sanitizedDto,
+          payload: {
+            ...sanitizedDto,
+            addUsersRoute: routes.resolvedAddUsersUrl,
+          },
           ...sanitizedDto,
         }),
       });

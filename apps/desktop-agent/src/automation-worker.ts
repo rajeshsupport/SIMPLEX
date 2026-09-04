@@ -289,7 +289,7 @@ export class AutomationWorker {
           const addUsersUrl = resolveClientRoute({
             baseUrl: task.clientBaseUrl,
             applicationPath: appPath,
-            route: task.payload?.addUsersRoute,
+            route: task.payload?.addUsersRoute || task.addUsersRoute,
             fallbackRoute: '/addUsers',
           });
           const username = payloadData?.username || task.payload?.username || 'user';

@@ -4,7 +4,6 @@ import {
   Plus,
   KeyRound,
   Eye,
-  EyeOff,
   Edit2,
   Power,
   RefreshCw,
@@ -149,7 +148,6 @@ export const UsersPage: React.FC = () => {
 
   const [isCredentialSuccessModalOpen, setIsCredentialSuccessModalOpen] = useState(false);
   const [credentialSuccessInfo, setCredentialSuccessInfo] = useState<CredentialSuccessInfo | null>(null);
-  const [showCredentialPassword, setShowCredentialPassword] = useState(false);
   const [credentialPasswordCountdown, setCredentialPasswordCountdown] = useState<number>(60);
   const [copiedCredentialUsername, setCopiedCredentialUsername] = useState(false);
   const [copiedCredentialPassword, setCopiedCredentialPassword] = useState(false);
@@ -161,7 +159,6 @@ export const UsersPage: React.FC = () => {
       credentialPasswordTimerRef.current = null;
     }
     setCredentialSuccessInfo(info);
-    setShowCredentialPassword(false);
     setCopiedCredentialUsername(false);
     setCopiedCredentialPassword(false);
     setCredentialPasswordCountdown(60);
@@ -191,7 +188,6 @@ export const UsersPage: React.FC = () => {
     }
     setCredentialSuccessInfo(null);
     setIsCredentialSuccessModalOpen(false);
-    setShowCredentialPassword(false);
     setCopiedCredentialUsername(false);
     setCopiedCredentialPassword(false);
     await loadUsers();
@@ -2182,36 +2178,26 @@ export const UsersPage: React.FC = () => {
               </div>
 
               {credentialSuccessInfo?.password ? (
-                <div className="flex items-center justify-between bg-slate-900 px-3 py-2.5 rounded-lg border border-slate-700/80">
-                  <span className="font-mono text-base tracking-wider text-white select-all" data-testid="credential-password">
-                    {showCredentialPassword ? credentialSuccessInfo.password : '••••••••••••'}
+                <div className="flex items-center justify-between bg-slate-900 px-3.5 py-3 rounded-lg border border-slate-700/80">
+                  <span className="font-mono text-base font-bold text-emerald-400 tracking-wider select-all" data-testid="credential-password">
+                    {credentialSuccessInfo.password}
                   </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowCredentialPassword(!showCredentialPassword)}
-                      className="flex items-center gap-1 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-xs font-medium transition-colors"
-                      title={showCredentialPassword ? 'Hide Password' : 'Reveal Password'}
-                    >
-                      {showCredentialPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                      <span>{showCredentialPassword ? 'Hide' : 'Reveal'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (credentialSuccessInfo?.password) {
-                          navigator.clipboard.writeText(credentialSuccessInfo.password);
-                          setCopiedCredentialPassword(true);
-                          setTimeout(() => setCopiedCredentialPassword(false), 2000);
-                        }
-                      }}
-                      className="flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold transition-colors"
-                      title="Copy Password"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      {copiedCredentialPassword ? 'Copied!' : 'Copy Password'}
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (credentialSuccessInfo?.password) {
+                        navigator.clipboard.writeText(credentialSuccessInfo.password);
+                        setCopiedCredentialPassword(true);
+                        setTimeout(() => setCopiedCredentialPassword(false), 2000);
+                      }
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold transition-colors"
+                    title="Copy Password"
+                    data-testid="btn-copy-password"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>{copiedCredentialPassword ? 'Copied!' : 'Copy Password'}</span>
+                  </button>
                 </div>
               ) : (
                 <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800 text-slate-400 text-xs italic">
@@ -2236,7 +2222,8 @@ export const UsersPage: React.FC = () => {
             <button
               type="button"
               onClick={closeCredentialSuccessModal}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-semibold text-xs"
+              className="px-5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg font-semibold text-xs transition-colors"
+              data-testid="btn-close-credential-modal"
             >
               Close
             </button>

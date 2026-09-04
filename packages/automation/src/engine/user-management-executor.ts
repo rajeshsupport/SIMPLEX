@@ -1041,106 +1041,248 @@ export class UserManagementExecutor {
    * Scans visible plain text / input values adjacent to the "Password" label across siblings,
    * table cells / rows, and nearest form-group containers.
    */
+  /**
+   * Captures the client-provided default password from the live Add User form.
+   * Scans visible plain text / input values adjacent to the "Password" label across siblings,
+   * text nodes, table cells / rows, description lists, and nearest form-group containers.
+   * Emits non-sensitive diagnostics without logging passwords.
+   */
   public static async captureLiveDefaultPassword(page: Page): Promise<string | undefined> {
     try {
-      const captured = await page.evaluate(() => {
+      const evaluationResult = await page.evaluate(() => {
         const cleanPass = (raw: string | null | undefined): string | null => {
           if (!raw) return null;
-          const t = raw.trim();
+          let t = raw.trim();
+          if (!t) return null;
+
+          // If text contains multiple lines (e.g. from select option lists), evaluate single lines
+          if (t.includes('\n')) {
+            const lines = t.split('\n').map((l) => l.trim()).filter(Boolean);
+            if (lines.length > 1) {
+              for (const line of lines) {
+                const cleaned = cleanPass(line);
+                if (cleaned) return cleaned;
+              }
+              return null;
+            }
+          }
+
+          // Strip common prefixes like "Password:", "Default Password -", etc.
+          t = t.replace(/^(?:default\s+|initial\s+|temporary\s+)?password\s*[:*=-]\s*/i, '').trim();
+          t = t.replace(/^[:*=\s-]+/g, '').replace(/[:*=\s-]+$/g, '').trim();
+
           if (!t) return null;
           const lower = t.toLowerCase();
-          // Exclude label headers and other field names themselves
-          if (
-            lower === 'password' ||
-            lower === 'password*' ||
-            lower === 'password:' ||
-            lower === 'default password' ||
-            lower === 'default password*' ||
-            lower === 'default password:' ||
-            lower === 'initial password' ||
-            lower === 'temporary password' ||
-            lower === 'new password' ||
-            lower === 'confirm password' ||
-            lower.includes('first name') ||
-            lower.includes('last name') ||
-            lower.includes('user name') ||
-            lower.includes('mobile') ||
-            lower.includes('email') ||
-            lower.includes('nationality') ||
-            lower.includes('role')
-          ) {
-            return null;
+
+          // Exclude label headers and common form field keywords themselves
+          const forbiddenLabels = [
+            'password',
+            'password*',
+            'password:',
+            'default password',
+            'default password*',
+            'default password:',
+            'initial password',
+            'temporary password',
+            'new password',
+            'confirm password',
+            'user name',
+            'user name *',
+            'username',
+            'first name',
+            'first name *',
+            'middle name',
+            'last name',
+            'last name *',
+            'nick name',
+            'mobile no',
+            'mobile no *',
+            'mobile number',
+            'email',
+            'nationality',
+            'nationality *',
+            'role',
+            'profile role',
+            'barcode no',
+            'signature',
+            'stamp',
+            'profile',
+            'status',
+            'save',
+            'submit',
+            'cancel',
+            'edit',
+            'reset',
+            'delete',
+            'action',
+            'actions',
+            'add user',
+            'user details',
+          ];
+
+          for (const kw of forbiddenLabels) {
+            if (lower === kw || lower.startsWith(`${kw} `) || lower.startsWith(`${kw}:`) || lower.startsWith(`${kw}*`)) {
+              return null;
+            }
           }
-          if (lower.startsWith('password:') || lower.startsWith('password *') || lower.startsWith('default password:')) {
-            const stripped = t.replace(/^(?:default\s+)?password\s*[:*]?\s*/i, '').trim();
-            if (stripped) return stripped;
-          }
+
           return t;
         };
 
+        const getInputValue = (elem: Element | null | undefined): string | null => {
+          if (!elem) return null;
+          const tag = (elem.tagName || '').toUpperCase();
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+            const inp = elem as HTMLInputElement;
+            return cleanPass(inp.value || inp.getAttribute('value') || inp.getAttribute('placeholder'));
+          }
+          return null;
+        };
+
+        let matchedLabelCount = 0;
+        let adjacentElementType: string | undefined = undefined;
+
         // 1. Locate exact label elements representing the Password field
-        const labelElements = Array.from(
-          document.querySelectorAll('label, .form-label, .control-label, dt, th, span.label, span.form-label, td > b, td > strong, p.label')
-        );
+        const candidateSelectors = 'label, .form-label, .control-label, dt, th, td, span, p, strong, b, em';
+        const allCandidates = Array.from(document.querySelectorAll(candidateSelectors));
+
+        const labelElements = allCandidates.filter((el) => {
+          const directText = (el.textContent || '').trim();
+          if (!directText || directText.length > 50) return false;
+          if (el.children.length > 3) return false;
+
+          const norm = directText.replace(/[*:#=-]/g, '').trim().toLowerCase();
+          return (
+            norm === 'password' ||
+            norm === 'default password' ||
+            norm === 'initial password' ||
+            norm === 'temporary password' ||
+            norm === 'defaultpassword' ||
+            norm === 'temp password'
+          );
+        });
+
+        matchedLabelCount = labelElements.length;
 
         for (const el of labelElements) {
-          const rawText = (el.textContent || '').trim();
-          const norm = rawText.replace(/[*:]/g, '').trim().toLowerCase();
-          if (norm === 'password' || norm === 'default password' || norm === 'initial password' || norm === 'temporary password') {
-            
-            // (a) Immediate sibling or next visible siblings
-            let sibling = el.nextElementSibling;
-            while (sibling) {
-              if (sibling instanceof HTMLInputElement || sibling instanceof HTMLTextAreaElement) {
-                const v = cleanPass(sibling.value || sibling.getAttribute('value'));
-                if (v) return v;
+          // (a) Check text nodes and immediate siblings
+          let siblingNode = el.nextSibling;
+          while (siblingNode) {
+            if (siblingNode.nodeType === 3) {
+              // TEXT_NODE
+              const v = cleanPass(siblingNode.textContent);
+              if (v) {
+                adjacentElementType = 'TEXT_NODE';
+                return { value: v, matchedLabelCount, adjacentElementType };
               }
-              const childInp = sibling.querySelector('input, textarea');
-              if (childInp instanceof HTMLInputElement || childInp instanceof HTMLTextAreaElement) {
-                const v = cleanPass(childInp.value || childInp.getAttribute('value'));
-                if (v) return v;
+            } else if (siblingNode.nodeType === 1) {
+              // ELEMENT_NODE
+              const elem = siblingNode as Element;
+              adjacentElementType = elem.tagName.toLowerCase();
+              const inpVal = getInputValue(elem) || getInputValue(elem.querySelector('input, textarea'));
+              if (inpVal) {
+                return { value: inpVal, matchedLabelCount, adjacentElementType: `${adjacentElementType}_INPUT` };
               }
-              const v = cleanPass(sibling.textContent);
-              if (v) return v;
-              sibling = sibling.nextElementSibling;
+              const textVal = cleanPass(elem.textContent);
+              if (textVal) {
+                return { value: textVal, matchedLabelCount, adjacentElementType };
+              }
+            }
+            siblingNode = siblingNode.nextSibling;
+          }
+
+          // (b) Same parent container (e.g. <div class="field"><label>Password</label><input value="..."/></div>)
+          const parent = el.parentElement;
+          if (parent && parent !== document.body && parent.tagName !== 'FORM') {
+            const inputs = Array.from(parent.querySelectorAll('input, textarea'));
+            for (const inp of inputs) {
+              const v = getInputValue(inp);
+              if (v) {
+                adjacentElementType = 'PARENT_INPUT';
+                return { value: v, matchedLabelCount, adjacentElementType };
+              }
             }
 
-            // (b) Same table row / form row (e.g. <tr><td><label>Password</label></td><td>Value</td></tr>)
-            const tr = el.closest('tr');
-            if (tr) {
-              const cells = Array.from(tr.querySelectorAll('td, th'));
-              const myCell = el.closest('td, th');
-              const myIdx = myCell ? cells.indexOf(myCell as HTMLElement) : -1;
-              for (let i = 0; i < cells.length; i++) {
-                if (i !== myIdx) {
-                  const inp = cells[i].querySelector('input, textarea');
-                  if (inp instanceof HTMLInputElement || inp instanceof HTMLTextAreaElement) {
-                    const v = cleanPass(inp.value || inp.getAttribute('value'));
-                    if (v) return v;
-                  }
-                  const v = cleanPass(cells[i].textContent);
-                  if (v) return v;
+            const nonLabelChildren = Array.from(
+              parent.querySelectorAll('span, strong, b, code, p, em, dd, .val, .value')
+            );
+            for (const child of nonLabelChildren) {
+              if (child !== el && !el.contains(child)) {
+                const v = cleanPass(child.textContent);
+                if (v) {
+                  adjacentElementType = `PARENT_${child.tagName.toLowerCase()}`;
+                  return { value: v, matchedLabelCount, adjacentElementType };
                 }
               }
             }
 
-            // (c) Nearest form-group container excluding the label
-            const container = el.closest('.form-group, .field, .form-row, .col, .grid > div, .row');
-            if (container && container !== document.body) {
-              const inputs = Array.from(container.querySelectorAll('input, textarea')) as (HTMLInputElement | HTMLTextAreaElement)[];
-              for (const inp of inputs) {
-                const v = cleanPass(inp.value || inp.getAttribute('value'));
-                if (v) return v;
+            const parentDirectText = cleanPass((parent.textContent || '').replace(el.textContent || '', ''));
+            if (parentDirectText) {
+              adjacentElementType = 'PARENT_TEXT';
+              return { value: parentDirectText, matchedLabelCount, adjacentElementType };
+            }
+          }
+
+          // (c) Same table row / cells (e.g. <tr><td>Password</td><td>Value</td></tr>)
+          const tr = el.closest('tr');
+          if (tr) {
+            const cells = Array.from(tr.querySelectorAll('td, th'));
+            const myCell = el.closest('td, th');
+            const myIdx = myCell ? cells.indexOf(myCell as HTMLElement) : -1;
+            for (let i = 0; i < cells.length; i++) {
+              if (i !== myIdx) {
+                const inpVal = getInputValue(cells[i].querySelector('input, textarea')) || getInputValue(cells[i]);
+                if (inpVal) {
+                  adjacentElementType = 'TABLE_CELL_INPUT';
+                  return { value: inpVal, matchedLabelCount, adjacentElementType };
+                }
+                const v = cleanPass(cells[i].textContent);
+                if (v) {
+                  adjacentElementType = 'TABLE_CELL_TEXT';
+                  return { value: v, matchedLabelCount, adjacentElementType };
+                }
               }
-              const valEls = Array.from(
-                container.querySelectorAll(
-                  '.val, .value, span:not(.label):not(.control-label):not(.form-label), strong, b, code, p:not(.label)'
-                )
-              );
-              for (const ve of valEls) {
-                if (ve !== el && !el.contains(ve)) {
-                  const v = cleanPass(ve.textContent);
-                  if (v) return v;
+            }
+          }
+
+          // (d) Description List (<dt>Password</dt><dd>Value</dd>)
+          const dl = el.closest('dl');
+          if (dl && el.tagName.toLowerCase() === 'dt') {
+            let nextDd = el.nextElementSibling;
+            while (nextDd && nextDd.tagName.toLowerCase() === 'dd') {
+              const v = cleanPass(nextDd.textContent);
+              if (v) {
+                adjacentElementType = 'DL_DD';
+                return { value: v, matchedLabelCount, adjacentElementType };
+              }
+              nextDd = nextDd.nextElementSibling;
+            }
+          }
+
+          // (e) Nearest scoped form-group container
+          const wrapper = el.closest(
+            '.form-group, .field, .form-row, .col, .grid > div, [class*="form-group"], [class*="field"], .form-item'
+          );
+          if (wrapper && wrapper !== document.body && wrapper.tagName !== 'FORM') {
+            const inputs = Array.from(wrapper.querySelectorAll('input, textarea'));
+            for (const inp of inputs) {
+              const v = getInputValue(inp);
+              if (v) {
+                adjacentElementType = 'WRAPPER_INPUT';
+                return { value: v, matchedLabelCount, adjacentElementType };
+              }
+            }
+            const valEls = Array.from(
+              wrapper.querySelectorAll(
+                '.val, .value, span:not(.label):not(.control-label):not(.form-label), strong, b, code, p:not(.label)'
+              )
+            );
+            for (const ve of valEls) {
+              if (ve !== el && !el.contains(ve)) {
+                const v = cleanPass(ve.textContent);
+                if (v) {
+                  adjacentElementType = `WRAPPER_${ve.tagName.toLowerCase()}`;
+                  return { value: v, matchedLabelCount, adjacentElementType };
                 }
               }
             }
@@ -1150,34 +1292,58 @@ export class UserManagementExecutor {
         // 2. Direct check on input[name*="pass" i], input[type="password"], or dedicated selectors
         const inputs = Array.from(
           document.querySelectorAll('input[name*="pass" i], input[id*="pass" i], input[data-testid*="pass" i]')
-        ) as HTMLInputElement[];
+        );
         for (const inp of inputs) {
-          const v = cleanPass(inp.value || inp.getAttribute('value'));
-          if (v) return v;
+          const v = getInputValue(inp);
+          if (v) {
+            adjacentElementType = 'DIRECT_INPUT';
+            return { value: v, matchedLabelCount, adjacentElementType };
+          }
         }
 
         const badge = document.querySelector(
-          '.default-password, [data-testid="default-password"], [data-testid="temporary-password"], #defaultPassword, #tempPassword, #lblDefaultPassword'
+          '.default-password, [data-testid="default-password"], [data-testid="temporary-password"], #defaultPassword, #tempPassword, #lblDefaultPassword, .password-val'
         );
         if (badge) {
-          const v = cleanPass(badge.textContent);
-          if (v) return v;
+          const v = cleanPass(badge.textContent) || getInputValue(badge);
+          if (v) {
+            adjacentElementType = 'DEDICATED_BADGE';
+            return { value: v, matchedLabelCount, adjacentElementType };
+          }
         }
 
         // 3. Regex on form container text
         const formEl = document.querySelector('form, #addUserForm, .card, .content');
         if (formEl && formEl.textContent) {
-          const m = formEl.textContent.match(/(?:default|temporary|initial|current)?\s*password\s*[:=-]\s*([^\s\n\r,;]+)/i);
+          const m = formEl.textContent.match(/(?:default|temporary|initial|current)?\s*password\s*[:=-]\s*([^\s\n\r,;<>]+)/i);
           if (m && m[1]) {
             const v = cleanPass(m[1]);
-            if (v) return v;
+            if (v) {
+              adjacentElementType = 'FORM_REGEX';
+              return { value: v, matchedLabelCount, adjacentElementType };
+            }
           }
         }
 
-        return null;
+        return { value: null, matchedLabelCount, adjacentElementType: adjacentElementType || 'NONE' };
       });
 
-      return captured || undefined;
+      const sanitizedPageUrl = (page.url() || '').split('?')[0];
+      const passwordValueFound = Boolean(evaluationResult?.value);
+
+      // Safe non-sensitive diagnostic telemetry (never logs raw password)
+      const safeDiagnostics = {
+        passwordValueFound,
+        matchedLabelCount: evaluationResult?.matchedLabelCount || 0,
+        adjacentElementType: evaluationResult?.adjacentElementType || 'NONE',
+        sanitizedPageUrl,
+      };
+
+      if (!passwordValueFound) {
+        console.info('[SAFE DIAGNOSTICS] Client default-password not found on Add User screen:', safeDiagnostics);
+      }
+
+      return evaluationResult?.value || undefined;
     } catch {
       return undefined;
     }
@@ -2875,9 +3041,7 @@ export class UserManagementExecutor {
         status: 'REMOTE_PASSWORD_RESET_CONFIRMED',
         temporaryPassword: deliveredPassword,
         defaultPassword: deliveredPassword,
-        message: deliveredPassword
-          ? `Password for '${username}' reset successfully. Password: ${deliveredPassword}`
-          : `Password reset completed in the selected Simplex client.`,
+        message: `Password for '${username}' reset successfully in the selected Simplex client.`,
       };
     }
 

@@ -1117,10 +1117,107 @@ async function runClientUsersTests() {
     assert.strictEqual(failedResetTest.success, false);
     assert.strictEqual(failedResetTest.errorCode, 'REMOTE_USER_NOT_FOUND');
     assert.strictEqual(failedResetTest.temporaryPassword, undefined, 'Failure must never expose a password');
-    console.log('✓ TEST 59 Passed');
+    // 60. Multi-Layout DOM Plain-Text Default Password Extraction
+    console.log('\n[TEST 60] Testing Multi-Layout DOM Plain-Text Password Extraction (Table, TextNode, DL, Span)...');
+    // (a) Table row format (<tr><td>Password:</td><td>Hospital@123</td></tr>)
+    await page.setContent(`
+      <html><body>
+        <table>
+          <tr><td>Password:</td><td>Hospital@123</td></tr>
+        </table>
+      </body></html>
+    `);
+    const passTable = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(passTable, 'Hospital@123', 'Must extract password from table row');
+
+    // (b) Text node adjacent (<div class="field"><label>Password</label> ClinicPass456</div>)
+    await page.setContent(`
+      <html><body>
+        <div class="field"><label>Password</label> ClinicPass456</div>
+      </body></html>
+    `);
+    const passTextNode = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(passTextNode, 'ClinicPass456', 'Must extract password from adjacent text node');
+
+    // (c) Description list (<dt>Password</dt><dd>DlPassword789</dd>)
+    await page.setContent(`
+      <html><body>
+        <dl>
+          <dt>Default Password</dt>
+          <dd>DlPassword789</dd>
+        </dl>
+      </body></html>
+    `);
+    const passDl = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(passDl, 'DlPassword789', 'Must extract password from description list');
+
+    // (d) Span sibling (<label>Password</label><span>SpanPass999</span>)
+    await page.setContent(`
+      <html><body>
+        <div class="form-group">
+          <label class="control-label">Password *</label>
+          <span class="password-val">SpanPass999</span>
+        </div>
+      </body></html>
+    `);
+    const passSpan = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(passSpan, 'SpanPass999', 'Must extract password from sibling span');
+    console.log('✓ TEST 60 Passed');
+
+    // 61. Rejection of Label Itself & Form Field Headers
+    console.log('\n[TEST 61] Testing Rejection of Label Itself & Common Form Field Headers...');
+    await page.setContent(`
+      <html><body>
+        <div class="field">
+          <label>Password</label>
+          <label>Password*</label>
+        </div>
+      </body></html>
+    `);
+    const rejectSelf = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(rejectSelf, undefined, 'Must reject label header as password value');
+
+    await page.setContent(`
+      <html><body>
+        <div class="field"><label>Password</label></div>
+        <div class="field"><label>First Name *</label></div>
+      </body></html>
+    `);
+    const rejectNextHeader = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(rejectNextHeader, undefined, 'Must reject next form field header');
+    console.log('✓ TEST 61 Passed');
+
+    // 62. Safe Non-Sensitive Diagnostics Recording (Zero Raw Password Telemetry)
+    console.log('\n[TEST 62] Testing Safe Diagnostics Generation (Zero Raw Password Telemetry)...');
+    await page.setContent(`<html><body><form id="emptyForm"></form></body></html>`);
+    const emptyRes = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(emptyRes, undefined);
+    console.log('✓ TEST 62 Passed');
+
+    // 63. Create User End-to-End Pipeline Delivers Live Captured Default Password
+    console.log('\n[TEST 63] Testing Create User Pipeline Delivers Live Captured Default Password...');
+    const liveCreateUserRes = await UserManagementExecutor.createUser(
+      page,
+      `${BASE_URL}/MasterV9.4/addUsers`,
+      `${BASE_URL}/MasterV9.4/users`,
+      {
+        clientId: 'test-client-1',
+        username: 'live_user_test_99',
+        firstName: 'Live',
+        lastName: 'User',
+        mobileNumber: '0501239999',
+        nationality: 'Saudi Arabia',
+        role: 'Physician',
+        profileRole: 'Clinical Specialist',
+      }
+    );
+    assert.strictEqual(liveCreateUserRes.success, true);
+    assert.strictEqual(liveCreateUserRes.defaultPassword, 'FixedDefaultPassword');
+    assert.strictEqual(liveCreateUserRes.temporaryPassword, 'FixedDefaultPassword');
+    console.log('✓ TEST 63 Passed');
 
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (59/59)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (63/63)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});
