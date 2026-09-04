@@ -67,12 +67,36 @@ export class SelectorResolver {
     '#dashboard',
     '.dashboard-container',
     '.main-dashboard',
+    '.header-user-name',
+    '#welpag',
+    '.header-cus',
+    '.header-logo',
+    '#page',
+    '.hmc-authenticated-layout',
+    '[data-testid="hmc-users-screen"]',
     'a[href*="logout" i]',
     'button:has-text("Logout" i)',
     'a:has-text("Logout" i)',
     'a[href*="signout" i]',
     'button:has-text("Sign Out" i)',
     '#hmc-app-header',
+  ];
+
+  public static readonly LOGIN_FORM_FALLBACKS = [
+    '#loginForm',
+    '#username',
+    '#userName',
+    '#pasWord',
+    '#password',
+    '#passWord',
+    '#loginPassword',
+    '#SignIn',
+    '#btnLogin',
+    'input[type="password"]',
+    'input[name="username" i]',
+    'input[name="password" i]',
+    '[data-testid="btn-login"]',
+    '[data-testid="input-password"]',
   ];
 
   public static readonly MFA_CONTAINER_FALLBACKS = [

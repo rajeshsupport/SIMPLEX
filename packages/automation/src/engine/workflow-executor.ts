@@ -622,13 +622,16 @@ export class WorkflowExecutor {
     }
   }
 
-  private static async checkSessionActive(page: Page, workflow: WorkflowVersionConfig): Promise<boolean> {
+  public static async checkSessionActive(page: Page, workflow?: WorkflowVersionConfig): Promise<boolean> {
     const currentUrl = page.url().toLowerCase();
+    if (currentUrl === 'about:blank' || currentUrl === '') {
+      return false;
+    }
 
     // 0. If login form, password input, or sign-in button is visible, session is definitely NOT active
     const isLoginFormVisible = await page
       .locator(
-        '#loginForm:visible, #username:visible, #pasWord:visible, input[name="username"]:visible, input[name="password"]:visible, input[type="password"]:visible, button#SignIn:visible, [data-testid="input-password"]:visible'
+        '#loginForm:visible, #username:visible, #userName:visible, #pasWord:visible, #password:visible, #passWord:visible, #loginPassword:visible, input[name="username" i]:visible, input[name="password" i]:visible, input[type="password"]:visible, button#SignIn:visible, #btnLogin:visible, [data-testid="btn-login"]:visible, [data-testid="input-password"]:visible'
       )
       .count()
       .catch(() => 0);
@@ -638,21 +641,13 @@ export class WorkflowExecutor {
     }
 
     // 1. URL pattern check (must NOT be at a /login route)
-    if (!currentUrl.includes('/login')) {
-      if (
-        currentUrl.includes('/dashboard') ||
-        currentUrl.includes('/home') ||
-        currentUrl.includes('/index') ||
-        currentUrl.includes('/main') ||
-        (currentUrl.includes('masterv9.3') && !currentUrl.includes('/login'))
-      ) {
-        return true;
-      }
+    if (currentUrl.includes('/login')) {
+      return false;
     }
 
-    // 2. Success conditions from workflow (only valid if not on /login route)
-    if (!currentUrl.includes('/login')) {
-      for (const cond of workflow.successConditions || []) {
+    // 2. Success conditions from workflow if specified
+    if (workflow?.successConditions && workflow.successConditions.length > 0) {
+      for (const cond of workflow.successConditions) {
         if (cond.type === 'URL_CONTAINS' && cond.expectedValue && currentUrl.includes(cond.expectedValue.toLowerCase())) {
           return true;
         }
@@ -661,10 +656,20 @@ export class WorkflowExecutor {
           if (found) return true;
         }
       }
+    }
 
-      // 3. Fallback dashboard selectors
-      const dashResult = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.DASHBOARD_FALLBACKS, 500);
-      if (dashResult) return true;
+    // 3. Fallback dashboard/header selectors
+    const dashResult = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.DASHBOARD_FALLBACKS, 500);
+    if (dashResult) return true;
+
+    // 4. URL path check if distinctly on post-login screen
+    if (
+      currentUrl.includes('/dashboard') ||
+      currentUrl.includes('/home') ||
+      currentUrl.includes('/users') ||
+      currentUrl.includes('/services')
+    ) {
+      return true;
     }
 
     return false;

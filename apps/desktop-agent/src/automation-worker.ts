@@ -354,13 +354,14 @@ export class AutomationWorker {
           if (pages.length > 0) {
             context = existingContext;
             page = pages[0];
-            await page.bringToFront();
-            onProgress?.(`Reusing existing active browser window for client [${task.clientId}]`);
+            await page.bringToFront().catch(() => {});
+            onProgress?.(`Existing client window focused.`);
           } else {
             // Context is warm, open fresh page in same context immediately (<50ms)
             context = existingContext;
             page = await existingContext.newPage();
-            onProgress?.(`Reopened page in warm browser context for client [${task.clientId}]`);
+            await page.bringToFront().catch(() => {});
+            onProgress?.(`Client window reopened and authenticated.`);
           }
         } catch {
           try {
@@ -374,13 +375,27 @@ export class AutomationWorker {
 
       // If no valid context is open, launch persistent context
       if (!context) {
-        context = await BrowserProfileManager.launchPersistentContext({
-          clientId: task.clientId,
-          userId: effectiveUserId,
-          isHeaded: task.options?.isHeaded ?? true,
-          namespace: 'interactive',
-          slowMo: 0,
-        });
+        onProgress?.(`Opening selected client…`);
+        try {
+          context = await BrowserProfileManager.launchPersistentContext({
+            clientId: task.clientId,
+            userId: effectiveUserId,
+            isHeaded: task.options?.isHeaded ?? true,
+            namespace: 'interactive',
+            slowMo: 0,
+          });
+        } catch (err: any) {
+          const isLockErr = err.message && (err.message.includes('lock') || err.message.includes('EBUSY') || err.message.includes('Process singleton'));
+          const errCode = isLockErr ? 'CLIENT_PROFILE_LOCKED' : 'CLIENT_WINDOW_LAUNCH_FAILED';
+          onProgress?.(`✗ Window launch failed: ${errCode}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: err.message || errCode,
+            totalDurationMs: Date.now() - startTime,
+            resultData: { success: false, errorCode: errCode, errorMessage: err.message },
+          });
+          return;
+        }
 
         this.activeProfileContexts.set(profileKey, context);
         context.on('close', () => {
@@ -389,15 +404,34 @@ export class AutomationWorker {
       }
 
       if (!context) {
-        throw new Error('Failed to initialize or launch browser context');
+        throw new Error('CLIENT_WINDOW_LAUNCH_FAILED');
       }
 
       if (!page) {
         page = context.pages()[0] || (await context.newPage());
+        await page.bringToFront().catch(() => {});
       }
 
       // Default Interactive / Workflow Execution (Login, Service Creation, etc.)
       const resolvedLoginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
+
+      onProgress?.(`Checking client session…`);
+      const isSessionActive = await WorkflowExecutor.checkSessionActive(page, task.workflowVersion);
+
+      if (isSessionActive && (task.taskType === 'INTERACTIVE_LOGIN' || task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION')) {
+        const totalDurationMs = Date.now() - startTime;
+        onProgress?.(`Login successful — client ready.`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'COMPLETED',
+          totalDurationMs,
+          resultData: { success: true, status: 'ALREADY_AUTHENTICATED' },
+        });
+        return;
+      }
+
+      if (!isSessionActive && (task.taskType === 'INTERACTIVE_LOGIN' || task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION')) {
+        onProgress?.(`Session expired — signing in again…`);
+      }
 
       const variables: Record<string, any> = {
         loginUrl: resolvedLoginUrl,
@@ -424,10 +458,11 @@ export class AutomationWorker {
       const totalDurationMs = Date.now() - startTime;
 
       if (result.success) {
-        onProgress?.(`✓ Task ${task.runId} completed successfully in ${totalDurationMs}ms.`);
+        onProgress?.(`Login successful — client ready.`);
         await this.agentClient.sendTelemetry(task.runId, {
           status: 'COMPLETED',
           totalDurationMs,
+          resultData: { success: true, status: 'REAUTHENTICATED' },
         });
 
         if (!task.options?.leaveBrowserOpen) {
@@ -438,15 +473,25 @@ export class AutomationWorker {
         onProgress?.(`! Task ${task.runId} requires manual security intervention: ${result.errorMessage}`);
         await this.agentClient.sendTelemetry(task.runId, {
           status: 'REQUIRES_MANUAL_INTERVENTION',
-          errorMessage: result.errorMessage || 'Manual security intervention required.',
+          errorMessage: result.errorMessage || 'Manual security verification is required in the opened browser window.',
           totalDurationMs,
         });
       } else {
-        onProgress?.(`✗ Task ${task.runId} failed: ${result.errorMessage}`);
+        const mappedCode =
+          result.classifiedCode === 'SELECTOR_NOT_FOUND'
+            ? 'CLIENT_LOGIN_FORM_NOT_FOUND'
+            : result.classifiedCode === 'LOGIN_TIMEOUT'
+            ? 'CLIENT_DASHBOARD_VERIFICATION_FAILED'
+            : result.classifiedCode === 'INVALID_CREDENTIALS'
+            ? 'CLIENT_AUTO_LOGIN_FAILED'
+            : result.classifiedCode || 'CLIENT_SESSION_REAUTHENTICATION_FAILED';
+
+        onProgress?.(`✗ Login failed: ${mappedCode}`);
         await this.agentClient.sendTelemetry(task.runId, {
           status: 'FAILED',
-          errorMessage: result.errorMessage || 'Automation execution failed',
+          errorMessage: result.errorMessage || mappedCode,
           totalDurationMs,
+          resultData: { success: false, errorCode: mappedCode, errorMessage: result.errorMessage },
         });
       }
     } catch (err: any) {

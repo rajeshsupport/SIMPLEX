@@ -267,12 +267,17 @@ export const ClientsPage: React.FC = () => {
   };
 
   const filteredClients = clients.filter((c) => {
-    const matchesSearch =
-      c.clientCode.toLowerCase().includes(search.toLowerCase()) ||
-      c.clientName.toLowerCase().includes(search.toLowerCase()) ||
-      c.baseUrl.toLowerCase().includes(search.toLowerCase());
+    const term = search.trim().toLowerCase();
 
-    const matchesEnv = selectedEnv === 'ALL' || c.environment === selectedEnv;
+    const matchesSearch =
+      !term ||
+      Boolean(c.clientCode && c.clientCode.toLowerCase().includes(term)) ||
+      Boolean(c.clientName && c.clientName.toLowerCase().includes(term)) ||
+      Boolean(c.baseUrl && c.baseUrl.toLowerCase().includes(term)) ||
+      Boolean(c.environment && c.environment.toLowerCase().includes(term)) ||
+      Boolean(c.applicationVersion && c.applicationVersion.toLowerCase().includes(term));
+
+    const matchesEnv = selectedEnv === 'ALL' || c.environment.toLowerCase() === selectedEnv.toLowerCase();
     return matchesSearch && matchesEnv;
   });
 
@@ -310,11 +315,20 @@ export const ClientsPage: React.FC = () => {
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
           <input
             type="text"
-            placeholder="Search by client code, hospital name, or base URL..."
+            placeholder="Search by client code, hospital name, environment, base URL, or version..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-sky-500"
+            className="w-full pl-9 pr-10 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-sky-500"
           />
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              className="absolute right-3 top-2.5 text-slate-400 hover:text-white p-0.5 rounded-full hover:bg-slate-800 transition-colors"
+              title="Clear search"
+            >
+              ✕
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
@@ -356,8 +370,21 @@ export const ClientsPage: React.FC = () => {
               </tr>
             ) : filteredClients.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
-                  No registered clients found matching criteria.
+                <td colSpan={5} className="px-6 py-12 text-center text-slate-500">
+                  <div className="max-w-sm mx-auto space-y-2">
+                    <p className="text-slate-400 font-medium">No matching clients found.</p>
+                    <p className="text-xs text-slate-600">
+                      No client instances matched your search filter criteria.
+                    </p>
+                    {search && (
+                      <button
+                        onClick={() => setSearch('')}
+                        className="mt-2 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition-colors"
+                      >
+                        Clear Search
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ) : (

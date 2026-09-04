@@ -201,7 +201,7 @@ export class AgentsService {
     const allAgents = await this.getAllAgents();
     const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
     if (onlineAgents.length === 0) {
-      throw new BadRequestException('Desktop browser agent is not running. Start the agent or run npm start.');
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Start the agent.');
     }
 
     let targetAgentId = agentId;
@@ -215,7 +215,7 @@ export class AgentsService {
       clientId: client.id,
       desktopAgentId: targetAgentId || null,
       triggeredByUserId: userId,
-      runType: 'INTERACTIVE_LOGIN',
+      runType: 'OPEN_INTERACTIVE_CLIENT_SESSION',
       status: 'PENDING',
       parametersJson: JSON.stringify({ isHeaded: true, leaveBrowserOpen: true, userId }),
     });
