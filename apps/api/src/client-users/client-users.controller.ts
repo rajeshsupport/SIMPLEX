@@ -164,12 +164,13 @@ export class ClientUsersController {
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_EXPORT)
   async exportExcel(
     @Query('clientId') clientId: string,
+    @Query('mode') mode: 'ALL_USERS' | 'ACTIVE_ONLY' = 'ALL_USERS',
     @CurrentUser() user: JwtPayload,
     @Res() res: Response
   ) {
-    const buffer = await this.clientUsersService.exportExcel(clientId, user);
+    const { buffer, filename } = await this.clientUsersService.exportExcel(clientId, mode, user);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="client_users_export_${Date.now()}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(buffer);
   }
 

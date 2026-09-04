@@ -201,6 +201,38 @@ export class ClientUsersService implements OnModuleInit {
 
     const [users, totalCount] = await qb.getManyAndCount();
 
+    const baseCountQb = this.snapshotRepo
+      .createQueryBuilder('u')
+      .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent', { clientId, isPresent: true });
+    if (latestSyncRunId) {
+      baseCountQb.andWhere('u.syncRunId = :latestSyncRunId', { latestSyncRunId });
+    }
+    const totalClientUsers = await baseCountQb.getCount();
+
+    const activeCountQb = this.snapshotRepo
+      .createQueryBuilder('u')
+      .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent AND u.status = :status', {
+        clientId,
+        isPresent: true,
+        status: 'ACTIVE',
+      });
+    if (latestSyncRunId) {
+      activeCountQb.andWhere('u.syncRunId = :latestSyncRunId', { latestSyncRunId });
+    }
+    const activeCount = await activeCountQb.getCount();
+
+    const inactiveCountQb = this.snapshotRepo
+      .createQueryBuilder('u')
+      .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent AND u.status = :status', {
+        clientId,
+        isPresent: true,
+        status: 'INACTIVE',
+      });
+    if (latestSyncRunId) {
+      inactiveCountQb.andWhere('u.syncRunId = :latestSyncRunId', { latestSyncRunId });
+    }
+    const inactiveCount = await inactiveCountQb.getCount();
+
     const latestSync = await this.snapshotRepo.findOne({
       where: { clientId, isPresentRemotely: true },
       order: { lastSyncedAt: 'DESC' },
@@ -214,6 +246,8 @@ export class ClientUsersService implements OnModuleInit {
     return {
       users: users.map((u) => this.mapToDto(u, client)),
       totalCount,
+      activeCount: totalClientUsers > 0 ? activeCount : users.filter((u) => u.status === 'ACTIVE').length,
+      inactiveCount: totalClientUsers > 0 ? inactiveCount : users.filter((u) => u.status === 'INACTIVE').length,
       lastSyncedAt: latestSync?.lastSyncedAt ? latestSync.lastSyncedAt.toISOString() : null,
       liveClientOptions: liveOptions
         ? {
@@ -1600,10 +1634,14 @@ export class ClientUsersService implements OnModuleInit {
 
   /**
    * Generates Excel workbook (.xlsx) containing latest synced users and metadata for the selected client only.
-   * Exports all current ACTIVE and INACTIVE users regardless of any UI filters.
-   * Enforces: Total Exported = Active + Inactive.
+   * Supports ALL_USERS (both ACTIVE and INACTIVE) or ACTIVE_ONLY modes.
+   * Enforces count invariants and exports multi-sheet workbook with comprehensive Export Metadata.
    */
-  async exportExcel(clientId: string, user: JwtPayload): Promise<Buffer> {
+  async exportExcel(
+    clientId: string,
+    mode: 'ALL_USERS' | 'ACTIVE_ONLY' = 'ALL_USERS',
+    user: JwtPayload
+  ): Promise<{ buffer: Buffer; filename: string }> {
     if (!clientId) throw new BadRequestException('Client ID is required for export');
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
@@ -1612,22 +1650,71 @@ export class ClientUsersService implements OnModuleInit {
       throw new ForbiddenException('Not authorized to export data for this client');
     }
 
-    const users = await this.snapshotRepo.find({
-      where: { clientId },
-      order: { fullName: 'ASC' },
-    });
+    // Query latest verified synced snapshot for this client
+    const latestSyncRecord = await this.snapshotRepo
+      .createQueryBuilder('u')
+      .select('u.syncRunId', 'syncRunId')
+      .addSelect('u.lastSyncedAt', 'lastSyncedAt')
+      .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent AND u.syncRunId IS NOT NULL', {
+        clientId,
+        isPresent: true,
+      })
+      .orderBy('u.lastSyncedAt', 'DESC')
+      .getRawOne();
 
-    const totalExported = users.length;
-    const activeCount = users.filter((u) => u.status === 'ACTIVE').length;
-    const inactiveCount = users.filter((u) => u.status === 'INACTIVE').length;
-    const routes = this.resolveClientUserRoutes(client);
+    const latestSyncRunId = latestSyncRecord?.syncRunId;
 
-    // Enforce invariant: Total Exported = Active + Inactive
-    if (totalExported !== activeCount + inactiveCount) {
-      throw new Error(`Integrity error: Total Exported (${totalExported}) != Active (${activeCount}) + Inactive (${inactiveCount})`);
+    const baseQb = this.snapshotRepo
+      .createQueryBuilder('u')
+      .where('u.clientId = :clientId AND u.isPresentRemotely = :isPresent', { clientId, isPresent: true });
+
+    if (latestSyncRunId) {
+      baseQb.andWhere('u.syncRunId = :latestSyncRunId', { latestSyncRunId });
     }
 
-    const userRows = users.map((u, idx) => ({
+    let allAvailableUsers = await baseQb.orderBy('u.fullName', 'ASC').getMany();
+
+    // Fallback: If no users found with isPresentRemotely: true, query all records for this clientId
+    if (allAvailableUsers.length === 0) {
+      allAvailableUsers = await this.snapshotRepo.find({
+        where: { clientId },
+        order: { fullName: 'ASC' },
+      });
+    }
+
+    const totalAvailable = allAvailableUsers.length;
+    const availableActive = allAvailableUsers.filter((u) => u.status === 'ACTIVE').length;
+    const availableInactive = allAvailableUsers.filter((u) => u.status === 'INACTIVE').length;
+
+    // Filter exported users based on mode
+    let exportedUsers: ClientUserSnapshot[];
+    if (mode === 'ACTIVE_ONLY') {
+      exportedUsers = allAvailableUsers.filter((u) => u.status === 'ACTIVE');
+      // Invariant check: exportedRecordCount = activeUsers, and every row status = ACTIVE
+      if (exportedUsers.length !== availableActive) {
+        throw new BadRequestException({
+          code: 'EXPORT_COUNT_MISMATCH',
+          message: `Active export count mismatch: exported (${exportedUsers.length}) != active available (${availableActive})`,
+        });
+      }
+      if (exportedUsers.some((u) => u.status !== 'ACTIVE')) {
+        throw new BadRequestException({
+          code: 'EXPORT_INTEGRITY_VIOLATION',
+          message: 'Active Users Only export contains non-active records.',
+        });
+      }
+    } else {
+      exportedUsers = allAvailableUsers;
+      // Invariant check: totalUsers = activeUsers + inactiveUsers
+      if (exportedUsers.length !== availableActive + availableInactive) {
+        throw new BadRequestException({
+          code: 'EXPORT_COUNT_MISMATCH',
+          message: `All users export count mismatch: total (${exportedUsers.length}) != active (${availableActive}) + inactive (${availableInactive})`,
+        });
+      }
+    }
+
+    const userRows = exportedUsers.map((u, idx) => ({
       'S.No': idx + 1,
       'Full Name': this.sanitizeCellValue(u.fullName),
       'Username': this.sanitizeCellValue(u.username),
@@ -1639,20 +1726,33 @@ export class ClientUsersService implements OnModuleInit {
       'Status': u.status,
       'Created Date/Time': u.remoteCreatedAt || 'N/A',
       'Updated Date/Time': u.remoteUpdatedAt || 'N/A',
-      'Last Synced': u.lastSyncedAt.toISOString(),
+      'Last Synced': u.lastSyncedAt?.toISOString() || new Date().toISOString(),
     }));
 
+    const routes = this.resolveClientUserRoutes(client);
+    const now = new Date();
+    const snapshotTimestamp = allAvailableUsers[0]?.lastSyncedAt?.toISOString() || now.toISOString();
+
     const metadataRows = [
-      { Property: 'Client Code / Name', Value: `${client.clientCode} (${client.clientName})` },
-      { Property: 'Environment', Value: client.environment },
+      { Property: 'Selected Client Code and Name', Value: `${client.clientCode} — ${client.clientName}` },
       { Property: 'Application Version', Value: client.applicationVersion || 'v9.4' },
+      { Property: 'Export Mode', Value: mode },
+      { Property: 'Total Available Users', Value: totalAvailable },
+      { Property: 'Available Active Users', Value: availableActive },
+      { Property: 'Available Inactive Users', Value: availableInactive },
+      { Property: 'Exported Record Count', Value: exportedUsers.length },
+      { Property: 'Snapshot Timestamp', Value: snapshotTimestamp },
+      { Property: 'Export Timestamp', Value: now.toISOString() },
+      { Property: 'Operator ID', Value: user.sub || user.username || 'OPERATOR' },
+      { Property: 'Environment', Value: client.environment },
       { Property: 'Resolved Users Route', Value: routes.resolvedUsersUrl },
-      { Property: 'Export Timestamp (UTC)', Value: new Date().toISOString() },
-      { Property: 'Snapshot Timestamp (UTC)', Value: users[0]?.lastSyncedAt?.toISOString() || new Date().toISOString() },
-      { Property: 'Total Exported Users', Value: totalExported },
-      { Property: 'Active Users Count', Value: activeCount },
-      { Property: 'Inactive Users Count', Value: inactiveCount },
-      { Property: 'Count Invariant Verification', Value: `Total Exported (${totalExported}) = Active (${activeCount}) + Inactive (${inactiveCount})` },
+      {
+        Property: 'Count Invariant Verification',
+        Value:
+          mode === 'ACTIVE_ONLY'
+            ? `Exported (${exportedUsers.length}) = Active Available (${availableActive}) [All Status = ACTIVE]`
+            : `Exported (${exportedUsers.length}) = Active (${availableActive}) + Inactive (${availableInactive})`,
+      },
     ];
 
     const wb = XLSX.utils.book_new();
@@ -1661,6 +1761,12 @@ export class ClientUsersService implements OnModuleInit {
 
     XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
     XLSX.utils.book_append_sheet(wb, wsMeta, 'Export Metadata');
+
+    const timestamp = Date.now();
+    const filename =
+      mode === 'ACTIVE_ONLY'
+        ? `${client.clientCode}_Active_Users_${timestamp}.xlsx`
+        : `${client.clientCode}_All_Users_${timestamp}.xlsx`;
 
     await this.auditRepo.save(
       this.auditRepo.create({
@@ -1671,14 +1777,18 @@ export class ClientUsersService implements OnModuleInit {
         entityId: clientId,
         detailsJson: JSON.stringify({
           clientCode: client.clientCode,
-          totalExported,
-          activeCount,
-          inactiveCount,
+          mode,
+          filename,
+          totalAvailable,
+          availableActive,
+          availableInactive,
+          exportedCount: exportedUsers.length,
         }),
       })
     );
 
-    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    return { buffer, filename };
   }
 
   /**

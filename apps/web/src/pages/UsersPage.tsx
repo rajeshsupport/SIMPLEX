@@ -77,6 +77,15 @@ export const UsersPage: React.FC = () => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportMode, setExportMode] = useState<'ALL_USERS' | 'ACTIVE_ONLY'>('ALL_USERS');
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportCounts, setExportCounts] = useState<{ total: number; active: number; inactive: number }>({
+    total: 0,
+    active: 0,
+    inactive: 0,
+  });
 
   const [selectedUser, setSelectedUser] = useState<ClientUser | null>(null);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
@@ -768,13 +777,90 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  // Excel Export Current Users
-  const handleExportExcel = () => {
+  // Excel Export Current Users Modal Handlers
+  const handleOpenExportModal = async () => {
     if (!selectedClientId) {
       setActionMessage({ type: 'error', text: 'Please select a client first.' });
       return;
     }
-    window.open(`/api/v1/client-users/export-excel?clientId=${encodeURIComponent(selectedClientId)}`, '_blank');
+    setExportMode('ALL_USERS');
+    setExportError(null);
+    setIsExportModalOpen(true);
+
+    try {
+      const res = await ApiClient.request<ClientUserListResponse>(
+        `/client-users?clientId=${encodeURIComponent(selectedClientId)}&page=1&limit=1`
+      );
+      const total = res.totalCount ?? 0;
+      const active = res.activeCount ?? 0;
+      const inactive = res.inactiveCount ?? (total >= active ? total - active : 0);
+      setExportCounts({
+        total,
+        active,
+        inactive,
+      });
+    } catch {
+      const active = users.filter((u) => u.status === 'ACTIVE').length;
+      const inactive = users.filter((u) => u.status === 'INACTIVE').length;
+      setExportCounts({
+        total: totalCount || active + inactive,
+        active,
+        inactive: totalCount && totalCount >= active ? totalCount - active : inactive,
+      });
+    }
+  };
+
+  const handleExecuteExport = async () => {
+    if (!selectedClientId || isExporting) return;
+    setIsExporting(true);
+    setExportError(null);
+
+    try {
+      const res = await fetch(
+        `/api/v1/client-users/export-excel?clientId=${encodeURIComponent(selectedClientId)}&mode=${exportMode}`,
+        {
+          headers: {
+            Authorization: `Bearer ${ApiClient.getAccessToken()}`,
+          },
+        }
+      );
+
+      if (!res.ok) {
+        let errMessage = 'Failed to generate export file.';
+        try {
+          const errJson = await res.json();
+          if (errJson.message) errMessage = errJson.message;
+        } catch {}
+        throw new Error(errMessage);
+      }
+
+      let filename = `${selectedClient?.clientCode || 'client'}_${exportMode === 'ACTIVE_ONLY' ? 'Active_Users' : 'All_Users'}_${Date.now()}.xlsx`;
+      const disposition = res.headers.get('Content-Disposition');
+      if (disposition && disposition.includes('filename=')) {
+        const match = disposition.match(/filename="?([^";]+)"?/);
+        if (match && match[1]) filename = match[1];
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+
+      setIsExportModalOpen(false);
+      setActionMessage({
+        type: 'success',
+        text: `✓ Successfully exported ${filename}`,
+      });
+    } catch (err: any) {
+      setExportError(err.message || 'Export failed. Please try again.');
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   // Dynamic Excel Import Template (scoped by selected client's live form options)
@@ -1209,7 +1295,7 @@ export const UsersPage: React.FC = () => {
 
           {canExport && (
             <button
-              onClick={handleExportExcel}
+              onClick={handleOpenExportModal}
               disabled={!selectedClientId}
               title="Export current verified user directory snapshot for the selected client"
               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700 disabled:opacity-50"
@@ -2231,7 +2317,151 @@ export const UsersPage: React.FC = () => {
         )}
       </Modal>
 
-      {/* Modal: Excel Import */}
+      {/* Modal: Export Users Selection */}
+      <Modal
+        isOpen={isExportModalOpen}
+        onClose={() => {
+          if (!isExporting) {
+            setIsExportModalOpen(false);
+            setExportError(null);
+          }
+        }}
+        title="Export Users"
+      >
+        <div className="space-y-4 text-xs">
+          {/* Selected Client Info */}
+          <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">Selected Client</span>
+            <span className="font-bold text-white text-sm">
+              {selectedClient?.clientCode} — {selectedClient?.clientName}
+            </span>
+          </div>
+
+          {/* Export Mode Selection */}
+          <div className="space-y-2.5">
+            <label className="block text-slate-400 font-semibold text-[11px] uppercase tracking-wider">
+              Select Export Option
+            </label>
+
+            {/* Option 1: All Users */}
+            <div
+              onClick={() => !isExporting && setExportMode('ALL_USERS')}
+              className={`p-3.5 rounded-lg border cursor-pointer transition-all ${
+                exportMode === 'ALL_USERS'
+                  ? 'bg-sky-950/40 border-sky-500 shadow-md ring-1 ring-sky-500/30'
+                  : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <input
+                    type="radio"
+                    name="exportMode"
+                    value="ALL_USERS"
+                    checked={exportMode === 'ALL_USERS'}
+                    onChange={() => setExportMode('ALL_USERS')}
+                    disabled={isExporting}
+                    className="text-sky-500 focus:ring-0 focus:ring-offset-0 bg-slate-900 border-slate-700 cursor-pointer"
+                  />
+                  <div>
+                    <div className="font-bold text-white text-xs">All Users</div>
+                    <div className="text-slate-400 text-[11px] mt-0.5">
+                      Export both ACTIVE and INACTIVE users.
+                    </div>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="px-2 py-0.5 bg-sky-900/60 text-sky-300 font-mono font-bold text-xs rounded border border-sky-700">
+                    {exportCounts.total}
+                  </span>
+                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                    {exportCounts.active} Active + {exportCounts.inactive} Inactive
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Option 2: Active Users Only */}
+            <div
+              onClick={() => !isExporting && setExportMode('ACTIVE_ONLY')}
+              className={`p-3.5 rounded-lg border cursor-pointer transition-all ${
+                exportMode === 'ACTIVE_ONLY'
+                  ? 'bg-sky-950/40 border-sky-500 shadow-md ring-1 ring-sky-500/30'
+                  : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <input
+                    type="radio"
+                    name="exportMode"
+                    value="ACTIVE_ONLY"
+                    checked={exportMode === 'ACTIVE_ONLY'}
+                    onChange={() => setExportMode('ACTIVE_ONLY')}
+                    disabled={isExporting}
+                    className="text-sky-500 focus:ring-0 focus:ring-offset-0 bg-slate-900 border-slate-700 cursor-pointer"
+                  />
+                  <div>
+                    <div className="font-bold text-white text-xs">Active Users Only</div>
+                    <div className="text-slate-400 text-[11px] mt-0.5">
+                      Export only users whose latest verified remote status is ACTIVE.
+                    </div>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="px-2 py-0.5 bg-emerald-900/60 text-emerald-300 font-mono font-bold text-xs rounded border border-emerald-700">
+                    {exportCounts.active}
+                  </span>
+                  <div className="text-[10px] text-emerald-500/80 font-mono mt-0.5">
+                    Active only
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Export Failure Error Banner */}
+          {exportError && (
+            <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+              <span>{exportError}</span>
+            </div>
+          )}
+
+          {/* Modal Action Buttons */}
+          <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+            <button
+              type="button"
+              disabled={isExporting}
+              onClick={() => {
+                setIsExportModalOpen(false);
+                setExportError(null);
+              }}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={isExporting || !selectedClientId}
+              onClick={handleExecuteExport}
+              className="flex items-center gap-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow disabled:opacity-50 transition-colors"
+            >
+              {isExporting ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Preparing export…
+                </>
+              ) : (
+                <>
+                  <Download className="w-3.5 h-3.5" />
+                  Export Excel
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Modal: Excel Import */}
       <Modal isOpen={isImportModalOpen} onClose={() => !importing && setIsImportModalOpen(false)} title={`Bulk User Excel Import: ${selectedClient?.clientCode || ''}`}>

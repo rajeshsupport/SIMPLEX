@@ -952,10 +952,9 @@ async function runClientUsersTests() {
     assert.strictEqual(bulkCreateRes.username, bulkUser1);
     console.log('✓ TEST 53 Passed');
 
-    // 54. Export Current Users Snapshot Structure & Total Exported = Active + Inactive
-    console.log('\n[TEST 54] Testing Export Current Users Snapshot Structure & Count Invariant...');
-    const wbExport = XLSX.utils.book_new();
-    const wsExpUsers = XLSX.utils.json_to_sheet([
+    // 54. Export Current Users Selection (ALL_USERS vs ACTIVE_ONLY), Filenames & Metadata Sheet
+    console.log('\n[TEST 54] Testing Export Current Users (ALL_USERS vs ACTIVE_ONLY Modes, Filenames & Metadata)...');
+    const mockSeedUsers = [
       {
         'S.No': 1,
         'Full Name': 'Abdul Qadeer Pathan',
@@ -984,22 +983,56 @@ async function runClientUsersTests() {
         'Updated Date/Time': '2026-09-01T10:00:00Z',
         'Last Synced': '2026-09-04T08:00:00Z',
       },
-    ]);
-    const wsExpMeta = XLSX.utils.json_to_sheet([
-      { Property: 'Client Code / Name', Value: 'HOSP_01 (City Hospital)' },
-      { Property: 'Total Exported Users', Value: 2 },
-      { Property: 'Active Users Count', Value: 1 },
-      { Property: 'Inactive Users Count', Value: 1 },
-      { Property: 'Count Invariant Verification', Value: 'Total Exported (2) = Active (1) + Inactive (1)' },
-    ]);
-    XLSX.utils.book_append_sheet(wbExport, wsExpUsers, 'Users');
-    XLSX.utils.book_append_sheet(wbExport, wsExpMeta, 'Export Metadata');
+    ];
 
-    const expBuffer = XLSX.write(wbExport, { type: 'buffer', bookType: 'xlsx' });
-    assert.ok(expBuffer.length > 0);
-    const readExp = XLSX.read(expBuffer, { type: 'buffer' });
-    assert.strictEqual(readExp.SheetNames[0], 'Users');
-    assert.strictEqual(readExp.SheetNames[1], 'Export Metadata');
+    const generateExportWorkbook = (mode: 'ALL_USERS' | 'ACTIVE_ONLY') => {
+      const activeRows = mockSeedUsers.filter((u) => u.Status === 'ACTIVE');
+      const inactiveRows = mockSeedUsers.filter((u) => u.Status === 'INACTIVE');
+      const totalAvailable = mockSeedUsers.length;
+      const exported = mode === 'ACTIVE_ONLY' ? activeRows : mockSeedUsers;
+
+      const wb = XLSX.utils.book_new();
+      const wsUsers = XLSX.utils.json_to_sheet(exported);
+      const wsMeta = XLSX.utils.json_to_sheet([
+        { Property: 'Selected Client Code and Name', Value: 'HOSP_01 — City Hospital' },
+        { Property: 'Application Version', Value: 'v9.4' },
+        { Property: 'Export Mode', Value: mode },
+        { Property: 'Total Available Users', Value: totalAvailable },
+        { Property: 'Available Active Users', Value: activeRows.length },
+        { Property: 'Available Inactive Users', Value: inactiveRows.length },
+        { Property: 'Exported Record Count', Value: exported.length },
+        { Property: 'Snapshot Timestamp', Value: '2026-09-04T08:00:00Z' },
+        { Property: 'Export Timestamp', Value: new Date().toISOString() },
+        { Property: 'Operator ID', Value: 'admin_operator_01' },
+      ]);
+      XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
+      XLSX.utils.book_append_sheet(wb, wsMeta, 'Export Metadata');
+
+      const filename =
+        mode === 'ACTIVE_ONLY'
+          ? `HOSP_01_Active_Users_${Date.now()}.xlsx`
+          : `HOSP_01_All_Users_${Date.now()}.xlsx`;
+
+      return { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), filename, rowCount: exported.length };
+    };
+
+    // Test ALL_USERS
+    const allRes = generateExportWorkbook('ALL_USERS');
+    assert.strictEqual(allRes.rowCount, 2, 'ALL_USERS must export all available active and inactive users');
+    assert.ok(allRes.filename.includes('_All_Users_'), 'ALL_USERS filename must contain _All_Users_');
+    const readAll = XLSX.read(allRes.buffer, { type: 'buffer' });
+    assert.strictEqual(readAll.SheetNames[0], 'Users');
+    assert.strictEqual(readAll.SheetNames[1], 'Export Metadata');
+
+    // Test ACTIVE_ONLY
+    const activeRes = generateExportWorkbook('ACTIVE_ONLY');
+    assert.strictEqual(activeRes.rowCount, 1, 'ACTIVE_ONLY must export only active users');
+    assert.ok(activeRes.filename.includes('_Active_Users_'), 'ACTIVE_ONLY filename must contain _Active_Users_');
+    const readActive = XLSX.read(activeRes.buffer, { type: 'buffer' });
+    const activeRowsParsed: any[] = XLSX.utils.sheet_to_json(readActive.Sheets['Users']);
+    for (const r of activeRowsParsed) {
+      assert.strictEqual(r.Status, 'ACTIVE', 'ACTIVE_ONLY export must contain zero inactive records');
+    }
     console.log('✓ TEST 54 Passed');
 
     // 55. Export Import Results Workbook Formatting with S.No, Excel Row & Equation

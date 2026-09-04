@@ -95,6 +95,8 @@ export interface ClientUserSyncSummary {
 export interface ClientUserListResponse {
   users: ClientUser[];
   totalCount: number;
+  activeCount?: number;
+  inactiveCount?: number;
   lastSyncedAt: string | null;
   syncSummary?: ClientUserSyncSummary;
   liveClientOptions?: {

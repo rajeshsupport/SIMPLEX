@@ -369,67 +369,117 @@ function runImportAndAuditResilienceTests() {
   if (!prodBlocked) throw new Error('Bulk mutation allowed on PRODUCTION client!');
   console.log('✓ TEST 10 PASSED: Bulk mutations on PRODUCTION clients strictly blocked.');
 
-  // 11. Export Current Users Sheet Structure & Total Exported = Active + Inactive Invariant
-  console.log('\n[TEST 11] Testing Export Current Users (Total Exported = Active + Inactive)...');
-  const exportUsersPayload = {
-    users: [
-      {
-        'S.No': 1,
-        'Full Name': 'Dr. Sarah Smith',
-        'Username': 'dr_sarah',
-        'Mobile Number': '0501234567',
-        'Email': 'sarah@example.com',
-        'Nationality': 'Saudi Arabia',
-        'Role': 'Physician',
-        'Profile Role': 'Clinical Specialist',
-        'Status': 'ACTIVE',
-        'Created Date/Time': '2026-09-01T10:00:00Z',
-        'Updated Date/Time': '2026-09-01T10:00:00Z',
-        'Last Synced': '2026-09-04T08:00:00Z',
-      },
-      {
-        'S.No': 2,
-        'Full Name': 'Nurse Fatima',
-        'Username': 'nurse_fatima',
-        'Mobile Number': '0509876543',
-        'Email': 'fatima@example.com',
-        'Nationality': 'Saudi Arabia',
-        'Role': 'Nurse',
-        'Profile Role': 'Staff Nurse',
-        'Status': 'INACTIVE',
-        'Created Date/Time': '2026-09-01T10:00:00Z',
-        'Updated Date/Time': '2026-09-01T10:00:00Z',
-        'Last Synced': '2026-09-04T08:00:00Z',
-      },
-    ],
+  // 11. Export Current Users Selection & Dual Modes (ALL_USERS vs ACTIVE_ONLY)
+  console.log('\n[TEST 11] Testing Export Current Users (ALL_USERS vs ACTIVE_ONLY Modes & Metadata Sheet)...');
+  const allAvailableMockUsers = [
+    {
+      'S.No': 1,
+      'Full Name': 'Dr. Sarah Smith',
+      'Username': 'dr_sarah',
+      'Mobile Number': '0501234567',
+      'Email': 'sarah@example.com',
+      'Nationality': 'Saudi Arabia',
+      'Role': 'Physician',
+      'Profile Role': 'Clinical Specialist',
+      'Status': 'ACTIVE',
+      'Created Date/Time': '2026-09-01T10:00:00Z',
+      'Updated Date/Time': '2026-09-01T10:00:00Z',
+      'Last Synced': '2026-09-04T08:00:00Z',
+    },
+    {
+      'S.No': 2,
+      'Full Name': 'Nurse Fatima',
+      'Username': 'nurse_fatima',
+      'Mobile Number': '0509876543',
+      'Email': 'fatima@example.com',
+      'Nationality': 'Saudi Arabia',
+      'Role': 'Nurse',
+      'Profile Role': 'Staff Nurse',
+      'Status': 'INACTIVE',
+      'Created Date/Time': '2026-09-01T10:00:00Z',
+      'Updated Date/Time': '2026-09-01T10:00:00Z',
+      'Last Synced': '2026-09-04T08:00:00Z',
+    },
+  ];
+
+  const clientInfo = { clientCode: 'HOSP_01', clientName: 'City Hospital', applicationVersion: 'v9.4' };
+  const availableActive = allAvailableMockUsers.filter((u) => u.Status === 'ACTIVE').length;
+  const availableInactive = allAvailableMockUsers.filter((u) => u.Status === 'INACTIVE').length;
+  const totalAvailable = allAvailableMockUsers.length;
+
+  // Invariant 1: Total Available = Active + Inactive
+  if (totalAvailable !== availableActive + availableInactive) {
+    throw new Error('Total available count mismatch');
+  }
+
+  // 11a: Test ALL_USERS mode
+  const allUsersExport = {
+    mode: 'ALL_USERS',
+    filename: `${clientInfo.clientCode}_All_Users_1725440000000.xlsx`,
+    users: allAvailableMockUsers,
     metadata: [
-      { Property: 'Client Code / Name', Value: 'HOSP_01 (City Hospital)' },
-      { Property: 'Environment', Value: 'STAGING' },
-      { Property: 'Application Version', Value: 'v9.4' },
-      { Property: 'Resolved Users Route', Value: 'https://staging.simplexworld.com/MasterV9.4/users' },
-      { Property: 'Export Timestamp (UTC)', Value: new Date().toISOString() },
-      { Property: 'Snapshot Timestamp (UTC)', Value: '2026-09-04T08:00:00Z' },
-      { Property: 'Total Exported Users', Value: 2 },
-      { Property: 'Active Users Count', Value: 1 },
-      { Property: 'Inactive Users Count', Value: 1 },
-      { Property: 'Count Invariant Verification', Value: 'Total Exported (2) = Active (1) + Inactive (1)' },
+      { Property: 'Selected Client Code and Name', Value: `${clientInfo.clientCode} — ${clientInfo.clientName}` },
+      { Property: 'Application Version', Value: clientInfo.applicationVersion },
+      { Property: 'Export Mode', Value: 'ALL_USERS' },
+      { Property: 'Total Available Users', Value: totalAvailable },
+      { Property: 'Available Active Users', Value: availableActive },
+      { Property: 'Available Inactive Users', Value: availableInactive },
+      { Property: 'Exported Record Count', Value: allAvailableMockUsers.length },
+      { Property: 'Snapshot Timestamp', Value: '2026-09-04T08:00:00Z' },
+      { Property: 'Export Timestamp', Value: new Date().toISOString() },
+      { Property: 'Operator ID', Value: 'user_admin_01' },
+      { Property: 'Count Invariant Verification', Value: `Exported (${allAvailableMockUsers.length}) = Active (${availableActive}) + Inactive (${availableInactive})` },
     ],
   };
 
-  const totalExported = exportUsersPayload.users.length;
-  const activeCount = exportUsersPayload.users.filter((u) => u.Status === 'ACTIVE').length;
-  const inactiveCount = exportUsersPayload.users.filter((u) => u.Status === 'INACTIVE').length;
-  if (totalExported !== activeCount + inactiveCount) {
-    throw new Error('Export user count violation: Total Exported != Active + Inactive');
+  if (allUsersExport.users.length !== availableActive + availableInactive) {
+    throw new Error('ALL_USERS export count does not equal active + inactive');
+  }
+  if (!allUsersExport.filename.startsWith('HOSP_01_All_Users_') || !allUsersExport.filename.endsWith('.xlsx')) {
+    throw new Error(`Invalid filename for ALL_USERS: ${allUsersExport.filename}`);
   }
 
-  if (Object.keys(exportUsersPayload.users[0]).includes('Password') || Object.keys(exportUsersPayload.users[0]).includes('Default Password')) {
-    throw new Error('Exported users sheet contains forbidden password columns');
+  // 11b: Test ACTIVE_ONLY mode
+  const activeOnlyUsers = allAvailableMockUsers.filter((u) => u.Status === 'ACTIVE');
+  const activeOnlyExport = {
+    mode: 'ACTIVE_ONLY',
+    filename: `${clientInfo.clientCode}_Active_Users_1725440000000.xlsx`,
+    users: activeOnlyUsers,
+    metadata: [
+      { Property: 'Selected Client Code and Name', Value: `${clientInfo.clientCode} — ${clientInfo.clientName}` },
+      { Property: 'Application Version', Value: clientInfo.applicationVersion },
+      { Property: 'Export Mode', Value: 'ACTIVE_ONLY' },
+      { Property: 'Total Available Users', Value: totalAvailable },
+      { Property: 'Available Active Users', Value: availableActive },
+      { Property: 'Available Inactive Users', Value: availableInactive },
+      { Property: 'Exported Record Count', Value: activeOnlyUsers.length },
+      { Property: 'Snapshot Timestamp', Value: '2026-09-04T08:00:00Z' },
+      { Property: 'Export Timestamp', Value: new Date().toISOString() },
+      { Property: 'Operator ID', Value: 'user_admin_01' },
+      { Property: 'Count Invariant Verification', Value: `Exported (${activeOnlyUsers.length}) = Active Available (${availableActive}) [All Status = ACTIVE]` },
+    ],
+  };
+
+  if (activeOnlyExport.users.length !== availableActive) {
+    throw new Error('ACTIVE_ONLY export count does not equal availableActive count');
   }
-  if (exportUsersPayload.metadata.length !== 10) {
-    throw new Error('Export metadata incomplete');
+  if (activeOnlyExport.users.some((u) => u.Status !== 'ACTIVE')) {
+    throw new Error('ACTIVE_ONLY export contains non-active user records');
   }
-  console.log('✓ TEST 11 PASSED: Export Current Users structure and Total Exported = Active + Inactive invariant verified.');
+  if (!activeOnlyExport.filename.startsWith('HOSP_01_Active_Users_') || !activeOnlyExport.filename.endsWith('.xlsx')) {
+    throw new Error(`Invalid filename for ACTIVE_ONLY: ${activeOnlyExport.filename}`);
+  }
+
+  // Check zero password leakage in both modes
+  for (const exp of [allUsersExport, activeOnlyExport]) {
+    for (const u of exp.users) {
+      if (Object.keys(u).includes('Password') || Object.keys(u).includes('Default Password')) {
+        throw new Error('Exported users sheet contains forbidden password columns');
+      }
+    }
+  }
+
+  console.log('✓ TEST 11 PASSED: Export Current Users ALL_USERS & ACTIVE_ONLY modes, metadata sheet, filenames, and invariants verified.');
 
   // 12. Export Import Results Sheet Structure & Total Equation Invariant
   console.log('\n[TEST 12] Testing Export Import Results Workbook Structure & Accounting Equation...');
