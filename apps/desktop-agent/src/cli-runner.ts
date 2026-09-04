@@ -51,7 +51,7 @@ async function startAgentRunner() {
     setImmediate(pollCycle);
   };
 
-  // Dedicated Heartbeat Timer during task execution
+  // Dedicated Heartbeat Timer running independently
   const heartbeatTimer = setInterval(async () => {
     try {
       const status = isExecuting ? 'BUSY' : 'ONLINE';
@@ -60,9 +60,9 @@ async function startAgentRunner() {
         await handlePendingTask(pendingTask);
       }
     } catch (err) {
-      // quiet log
+      // quiet retry
     }
-  }, 2000);
+  }, 1500);
 
   const pollCycle = async () => {
     if (isExecuting) return;

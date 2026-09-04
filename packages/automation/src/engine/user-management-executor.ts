@@ -2363,6 +2363,7 @@ export class UserManagementExecutor {
           targetStatus: ClientUserStatus;
           loginUrl?: string;
           credentials?: { username: string; password?: string };
+          onProgress?: (msg: string) => void;
         },
     arg2?: string | ClientUserStatus,
     arg3?: ClientUserStatus
@@ -2373,8 +2374,10 @@ export class UserManagementExecutor {
     const targetStatus = isObj ? arg1.targetStatus : ((arg3 || arg2) as ClientUserStatus);
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
+    const onProgress = isObj ? arg1.onProgress : undefined;
 
     // 1. Ensure authenticated
+    onProgress?.(`Logging in to selected Simplex client…`);
     const authRes = await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
     if (!authRes.authenticated) {
       return {
@@ -2386,6 +2389,7 @@ export class UserManagementExecutor {
     }
 
     // 2. Open users screen
+    onProgress?.(`Opening Users screen…`);
     try {
       await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     } catch (navErr: any) {
@@ -2398,6 +2402,7 @@ export class UserManagementExecutor {
     }
 
     // 3. Locate exact user row
+    onProgress?.(`Locating user '${username}'…`);
     const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
     if (!lookupRes.success || !lookupRes.rowHandle) {
       return {
@@ -2475,6 +2480,7 @@ export class UserManagementExecutor {
     });
 
     // Click the status icon once
+    onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
     await clickTarget.click({ timeout: 5000 }).catch(async () => {
       await statusCell.click({ timeout: 5000 });
     });
@@ -2483,6 +2489,7 @@ export class UserManagementExecutor {
     await page.waitForTimeout(1000);
 
     // 4. Re-read and verify that the icon changed
+    onProgress?.(`Verifying remote status change…`);
     const verifyLookup = await this.findExactUserRow(page, username, usersListUrl);
     if (!verifyLookup.success || !verifyLookup.rowHandle) {
       // Reload and retry verification

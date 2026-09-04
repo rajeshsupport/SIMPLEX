@@ -6,7 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository, In, IsNull } from 'typeorm';
 import * as crypto from 'crypto';
 import * as argon2 from 'argon2';
 import {
@@ -56,10 +56,38 @@ export class AgentsService {
     });
 
     const now = Date.now();
+    // Query active runs within lease timeout (last 30s)
+    const activeRuns = await this.runRepo.find({
+      where: {
+        status: In(['CLAIMED', 'RUNNING', 'AUTHENTICATING', 'NAVIGATING', 'EXECUTING', 'VERIFYING']),
+        completedAt: IsNull(),
+      },
+      order: { updatedAt: 'DESC' },
+    });
+
+    const activeAgentIdToRun = new Map<string, AutomationRun>();
+    for (const r of activeRuns) {
+      if (r.desktopAgentId && !['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(r.status)) {
+        const runAgeMs = now - new Date(r.updatedAt || r.startedAt || r.createdAt).getTime();
+        // Valid lease within 30 seconds
+        if (runAgeMs < 30000) {
+          activeAgentIdToRun.set(r.desktopAgentId, r);
+        }
+      }
+    }
+
     return agents.map((a) => {
-      // Mark as OFFLINE if heartbeat is older than 15s
-      const isStale = !a.lastHeartbeatAt || now - new Date(a.lastHeartbeatAt).getTime() > 15000;
-      const status = isStale ? 'OFFLINE' : a.status;
+      const activeRun = activeAgentIdToRun.get(a.id);
+      const lastHeartbeatMs = a.lastHeartbeatAt ? now - new Date(a.lastHeartbeatAt).getTime() : Infinity;
+
+      let status = a.status;
+      if (activeRun) {
+        // A claimed, actively leased job must never be classified as OFFLINE solely because a normal heartbeat is temporarily delayed.
+        status = 'BUSY';
+      } else if (lastHeartbeatMs > 15000) {
+        // Disconnect grace period (15s) expired and no active task lease
+        status = 'OFFLINE';
+      }
 
       return {
         id: a.id,
@@ -69,7 +97,9 @@ export class AgentsService {
         assignedUserId: a.assignedUserId,
         assignedUsername: a.assignedUser?.username,
         status,
-        currentTaskDescription: a.currentTaskDescription || undefined,
+        currentTaskDescription: activeRun
+          ? `Executing ${activeRun.runType} (Run ID: ${activeRun.id})`
+          : a.currentTaskDescription || undefined,
         lastHeartbeatAt: a.lastHeartbeatAt ? a.lastHeartbeatAt.toISOString() : null,
         supportsVisibleChromeMutations: true,
         buildCommit: '6d63f04',
@@ -179,7 +209,13 @@ export class AgentsService {
       const task = await this.buildTaskAssignment(pendingRun);
       pendingRun.status = 'CLAIMED';
       pendingRun.startedAt = new Date();
+      pendingRun.updatedAt = new Date();
       await this.runRepo.save(pendingRun);
+
+      agent.status = 'BUSY';
+      agent.lastHeartbeatAt = new Date();
+      await this.agentRepo.save(agent);
+
       return { acknowledged: true, pendingRun: task };
     }
 
@@ -293,6 +329,7 @@ export class AgentsService {
     const run = await this.runRepo.findOne({ where: { id: runId } });
     if (!run) return;
 
+    run.updatedAt = new Date(); // Refresh active task execution lease
     if (dto.resultData?.stage) {
       run.status = dto.resultData.stage as any;
     } else if (dto.status) {
@@ -306,6 +343,20 @@ export class AgentsService {
       run.completedAt = new Date();
     }
     await this.runRepo.save(run);
+
+    // Maintain active agent lease & status as BUSY while task telemetry is received
+    if (run.desktopAgentId) {
+      const agent = await this.agentRepo.findOne({ where: { id: run.desktopAgentId } });
+      if (agent) {
+        agent.lastHeartbeatAt = new Date();
+        if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+          agent.status = 'ONLINE';
+        } else {
+          agent.status = 'BUSY';
+        }
+        await this.agentRepo.save(agent);
+      }
+    }
 
     if (dto.step) {
       let step = await this.stepRepo.findOne({

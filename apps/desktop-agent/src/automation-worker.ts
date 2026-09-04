@@ -347,22 +347,32 @@ export class AutomationWorker {
 
         if (task.taskType === 'SET_CLIENT_USER_STATUS' || task.taskType === 'CHANGE_CLIENT_USER_STATUS') {
           const targetStatus = task.payload.status || task.payload.targetStatus;
-          onProgress?.(`Logging in to selected Simplex client…`);
-          onProgress?.(`Opening Users screen…`);
-          onProgress?.(`Searching for '${task.payload.username}'…`);
-          onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
+          const reportProgress = (msg: string) => {
+            onProgress?.(msg);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: msg, stage: 'MUTATING' },
+              })
+              .catch(() => {});
+          };
+
+          reportProgress(`Logging in to selected Simplex client…`);
+          reportProgress(`Opening Users screen…`);
+          reportProgress(`Searching for '${task.payload.username}'…`);
+          reportProgress(`Updating remote status to ${targetStatus} in Simplex client…`);
           const statusRes = await UserManagementExecutor.setUserStatus(mutationPage, {
             usersListUrl,
             username: task.payload.username,
             targetStatus,
             loginUrl,
             credentials: task.credentials,
+            onProgress: reportProgress,
           });
           const totalDurationMs = Date.now() - startTime;
           if (statusRes.success) {
-            onProgress?.(`Verifying remote result…`);
-            onProgress?.(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
-            onProgress?.(`Synchronizing Central data…`);
+            reportProgress(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
+            reportProgress(`Synchronizing Central data…`);
             await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: statusRes });
           } else {
             onProgress?.(`✗ Remote status verification failed: ${statusRes.errorMessage || statusRes.message}`);
