@@ -60,9 +60,14 @@ export class ClientUsersController {
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
   async getFormOptions(
     @Query('clientId') clientId: string,
+    @Query('refresh') refresh: string,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.getLiveFormOptions(clientId, user);
+    return this.clientUsersService.getLiveFormOptions(
+      clientId,
+      user,
+      refresh === 'true' || refresh === '1'
+    );
   }
 
   @Post('sync')

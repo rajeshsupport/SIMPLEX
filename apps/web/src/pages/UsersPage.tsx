@@ -38,6 +38,7 @@ import {
   ClientWithCredentialInfo,
   ExcelUserImportPreviewResult,
   ExcelUserImportExecutionSummary,
+  ClientCreateFormMetadata,
   PERMISSIONS,
 } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
@@ -90,9 +91,9 @@ export const UsersPage: React.FC = () => {
     nickName: '',
     email: '',
     mobileNumber: '',
-    nationality: 'Saudi Arabia',
-    role: 'Physician',
-    profileRole: 'Clinical Specialist',
+    nationality: '',
+    role: '',
+    profileRole: '',
     barcodeNumber: '',
     signatureBase64: '',
     signatureFilename: '',
@@ -196,9 +197,48 @@ export const UsersPage: React.FC = () => {
     loadClients();
   }, []);
 
-  const [formMetadata, setFormMetadata] = useState<any>(null);
+  const [formMetadata, setFormMetadata] = useState<ClientCreateFormMetadata | null>(null);
+  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [optionsSyncTime, setOptionsSyncTime] = useState<string | null>(null);
   const [isConfirmingCreate, setIsConfirmingCreate] = useState(false);
   const reqIdRef = useRef<number>(0);
+
+  const loadFormOptions = async (clientId: string, forceRefresh: boolean = false) => {
+    if (!clientId) return;
+    setIsLoadingOptions(true);
+    setOptionsError(null);
+    try {
+      const url = `/client-users/form-options?clientId=${encodeURIComponent(clientId)}${forceRefresh ? '&refresh=true' : ''}`;
+      const meta = await ApiClient.request<ClientCreateFormMetadata>(url);
+      setFormMetadata(meta);
+      setOptionsSyncTime(new Date().toLocaleTimeString());
+      if (meta && meta.nationalities && meta.nationalities.length > 0) {
+        const defaultNat = typeof meta.nationalities[0] === 'string' ? meta.nationalities[0] : (meta.nationalities[0].value || meta.nationalities[0].label);
+        const defaultRole = meta.roles && meta.roles.length > 0 ? (typeof meta.roles[0] === 'string' ? meta.roles[0] : (meta.roles[0].value || meta.roles[0].label)) : '';
+        let matchingProf = '';
+        if (defaultRole && meta.profileRoles) {
+          const match = meta.profileRoles.find(
+            (p: any) => !p.roleDependency || p.roleDependency.toLowerCase() === defaultRole.toLowerCase()
+          );
+          if (match) matchingProf = typeof match === 'string' ? match : (match.value || match.label);
+        }
+        setCreateForm((prev) => ({
+          ...prev,
+          nationality: prev.nationality || defaultNat || '',
+          role: prev.role || defaultRole || '',
+          profileRole: prev.profileRole || matchingProf || '',
+        }));
+      }
+    } catch (err: any) {
+      const errCode = err.response?.code || err.code;
+      const errMsg = err.response?.message || err.message;
+      setFormMetadata(null);
+      setOptionsError(errCode === 'FORM_OPTIONS_UNAVAILABLE' ? 'FORM_OPTIONS_UNAVAILABLE' : (errMsg || 'FORM_OPTIONS_UNAVAILABLE'));
+    } finally {
+      setIsLoadingOptions(false);
+    }
+  };
 
   const handleClientChange = (newClientId: string) => {
     if (newClientId === selectedClientId) return;
@@ -433,6 +473,9 @@ export const UsersPage: React.FC = () => {
     setCreateError(null);
     setPotentialDuplicate(null);
     setIsConfirmingCreate(false);
+    setFormMetadata(null);
+    setOptionsError(null);
+    setOptionsSyncTime(null);
     setCreateForm({
       clientId: selectedClientId,
       username: '',
@@ -442,9 +485,9 @@ export const UsersPage: React.FC = () => {
       nickName: '',
       email: '',
       mobileNumber: '',
-      nationality: 'Saudi Arabia',
-      role: 'Physician',
-      profileRole: 'Clinical Specialist',
+      nationality: '',
+      role: '',
+      profileRole: '',
       barcodeNumber: '',
       signatureBase64: '',
       signatureFilename: '',
@@ -456,24 +499,7 @@ export const UsersPage: React.FC = () => {
       overrideDuplicateName: false,
     });
     setIsCreateModalOpen(true);
-
-    try {
-      const meta = await ApiClient.request<any>(`/client-users/form-options?clientId=${selectedClientId}`);
-      setFormMetadata(meta);
-      if (meta && meta.nationalities && meta.nationalities.length > 0) {
-        const defaultNat = meta.nationalities[0].value || meta.nationalities[0].label;
-        const defaultRole = meta.roles?.[0]?.value || meta.roles?.[0]?.label || 'Physician';
-        const matchingProf = meta.profileRoles?.find((p: any) => !p.roleDependency || p.roleDependency.toLowerCase() === defaultRole.toLowerCase());
-        setCreateForm((prev) => ({
-          ...prev,
-          nationality: defaultNat,
-          role: defaultRole,
-          profileRole: matchingProf ? (matchingProf.value || matchingProf.label) : '',
-        }));
-      }
-    } catch (err) {
-      console.error('Failed to fetch live form options', err);
-    }
+    await loadFormOptions(selectedClientId);
   };
 
   // Create User
@@ -1215,6 +1241,62 @@ export const UsersPage: React.FC = () => {
       {/* Modal: Create User */}
       <Modal isOpen={isCreateModalOpen} onClose={() => setIsCreateModalOpen(false)} title="Create User on Client Portal">
         <form onSubmit={handleCreateUser} className="space-y-4 text-xs">
+          {/* Options Synchronization Toolbar */}
+          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400">Target Client: <strong className="text-white">{selectedClient?.clientCode}</strong> ({selectedClient?.applicationVersion || 'v9.4'})</span>
+            </div>
+            <div className="flex items-center gap-3">
+              {optionsSyncTime && !isLoadingOptions && !optionsError && (
+                <span className="text-[11px] text-emerald-400 flex items-center gap-1">
+                  <CheckCircle className="w-3.5 h-3.5" />
+                  Options synchronized at {optionsSyncTime}
+                </span>
+              )}
+              <button
+                type="button"
+                disabled={isLoadingOptions}
+                onClick={() => loadFormOptions(selectedClientId, true)}
+                className="text-[11px] text-sky-400 hover:text-sky-300 disabled:opacity-50 flex items-center gap-1 font-medium transition-colors"
+                title="Reload live options directly from Simplex Add User page"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingOptions ? 'animate-spin' : ''}`} />
+                Refresh Options
+              </button>
+            </div>
+          </div>
+
+          {/* Loading Options Banner */}
+          {isLoadingOptions && (
+            <div className="p-3 bg-sky-950/70 border border-sky-800/80 rounded-lg text-sky-200 flex items-center gap-2.5">
+              <Loader2 className="w-4 h-4 animate-spin text-sky-400 flex-shrink-0" />
+              <span>Loading client options from live Add User screen…</span>
+            </div>
+          )}
+
+          {/* Options Error Banner */}
+          {optionsError && !isLoadingOptions && (
+            <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <div className="font-bold flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-red-400" />
+                  <span>FORM_OPTIONS_UNAVAILABLE</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadFormOptions(selectedClientId, true)}
+                  className="px-2.5 py-1 bg-red-800 hover:bg-red-700 text-white rounded text-[11px] font-semibold flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Retry
+                </button>
+              </div>
+              <p className="text-[11px] text-red-300">
+                Could not load live dropdown options from Simplex client. Submission is disabled until options are successfully synchronized.
+              </p>
+            </div>
+          )}
+
           {createError && (
             <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200">
               <div className="font-bold flex items-center gap-1.5 mb-1">
@@ -1285,16 +1367,7 @@ export const UsersPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="block text-slate-400 mb-1">Nick Name</label>
-              <input
-                type="text"
-                value={createForm.nickName}
-                onChange={(e) => setCreateForm({ ...createForm, nickName: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
-              />
-            </div>
+          <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-slate-400 mb-1">Email</label>
               <input
@@ -1316,23 +1389,24 @@ export const UsersPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Live Dropdowns */}
+          {/* Live Dropdowns Scoped by Client */}
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-slate-400 mb-1">Nationality *</label>
               <select
+                required
+                disabled={isLoadingOptions || !!optionsError || !formMetadata}
                 value={createForm.nationality}
                 onChange={(e) => setCreateForm({ ...createForm, nationality: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {(formMetadata?.nationalities?.length
-                  ? formMetadata.nationalities.map((n: any) => (typeof n === 'string' ? n : n?.label || n?.value || ''))
-                  : clientOptions.nationalities
-                ).map((n: any) => {
-                  const val = typeof n === 'string' ? n : (n?.label || n?.value || '');
+                <option value="">{isLoadingOptions ? 'Loading nationalities…' : '-- Select Nationality --'}</option>
+                {formMetadata?.nationalities?.map((n: any) => {
+                  const val = typeof n === 'string' ? n : (n?.value || n?.label || '');
+                  const lbl = typeof n === 'string' ? n : (n?.label || n?.value || '');
                   return (
                     <option key={val} value={val}>
-                      {val}
+                      {lbl}
                     </option>
                   );
                 })}
@@ -1341,6 +1415,7 @@ export const UsersPage: React.FC = () => {
             <div>
               <label className="block text-slate-400 mb-1">Role</label>
               <select
+                disabled={isLoadingOptions || !!optionsError || !formMetadata}
                 value={createForm.role}
                 onChange={(e) => {
                   const newRole = e.target.value;
@@ -1349,20 +1424,19 @@ export const UsersPage: React.FC = () => {
                     const prof = formMetadata.profileRoles.find(
                       (p: any) => p.roleDependency && p.roleDependency.toLowerCase() === newRole.toLowerCase()
                     );
-                    if (prof) matchingProf = typeof prof === 'string' ? prof : prof?.label || prof?.value || '';
+                    if (prof) matchingProf = typeof prof === 'string' ? prof : prof?.value || prof?.label || '';
                   }
                   setCreateForm({ ...createForm, role: newRole, profileRole: matchingProf });
                 }}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {(formMetadata?.roles?.length
-                  ? formMetadata.roles.map((r: any) => (typeof r === 'string' ? r : r?.label || r?.value || ''))
-                  : clientOptions.roles
-                ).map((r: any) => {
-                  const val = typeof r === 'string' ? r : (r?.label || r?.value || '');
+                <option value="">{isLoadingOptions ? 'Loading roles…' : '-- Select Role --'}</option>
+                {formMetadata?.roles?.map((r: any) => {
+                  const val = typeof r === 'string' ? r : (r?.value || r?.label || '');
+                  const lbl = typeof r === 'string' ? r : (r?.label || r?.value || '');
                   return (
                     <option key={val} value={val}>
-                      {val}
+                      {lbl}
                     </option>
                   );
                 })}
@@ -1371,27 +1445,28 @@ export const UsersPage: React.FC = () => {
             <div>
               <label className="block text-slate-400 mb-1">Profile Role</label>
               <select
+                disabled={isLoadingOptions || !!optionsError || !formMetadata}
                 value={createForm.profileRole}
                 onChange={(e) => setCreateForm({ ...createForm, profileRole: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white"
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {(formMetadata?.profileRoles?.length
-                  ? formMetadata.profileRoles
-                      .filter(
-                        (pr: any) =>
-                          !pr.roleDependency ||
-                          pr.roleDependency.toLowerCase() === (createForm.role || '').toLowerCase()
-                      )
-                      .map((pr: any) => (typeof pr === 'string' ? pr : pr?.label || pr?.value || ''))
-                  : clientOptions.profileRoles
-                ).map((pr: any) => {
-                  const val = typeof pr === 'string' ? pr : (pr?.label || pr?.value || '');
-                  return (
-                    <option key={val} value={val}>
-                      {val}
-                    </option>
-                  );
-                })}
+                <option value="">{isLoadingOptions ? 'Loading profile roles…' : '-- Select Profile Role --'}</option>
+                {formMetadata?.profileRoles
+                  ?.filter(
+                    (pr: any) =>
+                      !pr.roleDependency ||
+                      !createForm.role ||
+                      pr.roleDependency.toLowerCase() === (createForm.role || '').toLowerCase()
+                  )
+                  .map((pr: any) => {
+                    const val = typeof pr === 'string' ? pr : (pr?.value || pr?.label || '');
+                    const lbl = typeof pr === 'string' ? pr : (pr?.label || pr?.value || '');
+                    return (
+                      <option key={val} value={val}>
+                        {lbl}
+                      </option>
+                    );
+                  })}
               </select>
             </div>
           </div>
@@ -1478,7 +1553,8 @@ export const UsersPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold shadow-lg shadow-emerald-950/50"
+                  disabled={isLoadingOptions || !!optionsError || !formMetadata}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-emerald-950/50"
                 >
                   Confirm & Create on Client
                 </button>
@@ -1494,7 +1570,8 @@ export const UsersPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow-lg shadow-sky-950/50"
+                  disabled={isLoadingOptions || !!optionsError || !formMetadata || !createForm.username || !createForm.firstName || !createForm.lastName || !createForm.mobileNumber || !createForm.nationality}
+                  className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-sky-950/50"
                 >
                   Review & Create User
                 </button>

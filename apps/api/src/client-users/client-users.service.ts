@@ -204,17 +204,22 @@ export class ClientUsersService implements OnModuleInit {
       order: { lastSyncedAt: 'DESC' },
     });
 
-    const liveOptions = await this.getLiveFormOptions(clientId, user);
+    let liveOptions: ClientCreateFormMetadata | null = null;
+    try {
+      liveOptions = await this.getLiveFormOptions(clientId, user);
+    } catch {}
 
     return {
       users: users.map((u) => this.mapToDto(u, client)),
       totalCount,
       lastSyncedAt: latestSync?.lastSyncedAt ? latestSync.lastSyncedAt.toISOString() : null,
-      liveClientOptions: {
-        nationalities: liveOptions.nationalities,
-        roles: liveOptions.roles,
-        profileRoles: liveOptions.profileRoles,
-      },
+      liveClientOptions: liveOptions
+        ? {
+            nationalities: liveOptions.nationalities,
+            roles: liveOptions.roles,
+            profileRoles: liveOptions.profileRoles,
+          }
+        : undefined,
     };
   }
 
@@ -1360,9 +1365,9 @@ export class ClientUsersService implements OnModuleInit {
   private static formOptionsCache = new Map<string, { timestamp: number; data: ClientCreateFormMetadata }>();
 
   /**
-   * Retrieves live form dropdown options scoped by clientId and applicationVersion.
+   * Retrieves live form dropdown options directly from the remote client Add User screen scoped by clientId, applicationVersion, and addUsersUrl.
    */
-  async getLiveFormOptions(clientId: string, user: JwtPayload): Promise<ClientCreateFormMetadata> {
+  async getLiveFormOptions(clientId: string, user: JwtPayload, refresh: boolean = false): Promise<ClientCreateFormMetadata> {
     if (!clientId || clientId.trim() === '') {
       throw new BadRequestException({
         code: 'CLIENT_ID_REQUIRED',
@@ -1378,63 +1383,135 @@ export class ClientUsersService implements OnModuleInit {
     }
 
     const version = client.applicationVersion || 'v9.4';
-    const cacheKey = `${client.id}:${version}`;
-    const cached = ClientUsersService.formOptionsCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < 300000) {
-      return cached.data;
+    const routes = this.resolveClientUserRoutes(client);
+    const cacheKey = `${client.id}:${version}:${routes.resolvedAddUsersUrl}`;
+
+    if (!refresh) {
+      const cached = ClientUsersService.formOptionsCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < 300000) {
+        return cached.data;
+      }
     }
 
-    const routes = this.resolveClientUserRoutes(client);
+    // Check online agents
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException({
+        code: 'FORM_OPTIONS_UNAVAILABLE',
+        message: 'Automation agent is offline. Unable to synchronize live client options.',
+      });
+    }
+
+    // Decrypt credentials if stored
+    let credentials: { username: string; password: string } | undefined = undefined;
+    const cred = await this.credRepo.findOne({ where: { clientId, isActive: true } });
+    if (cred) {
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const correlationId = crypto.randomUUID();
+    const now = new Date();
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'INSPECT_CREATE_FORM_METADATA',
+      status: 'QUEUED',
+      createdAt: now,
+      parametersJson: JSON.stringify({
+        taskType: 'INSPECT_CREATE_FORM_METADATA',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: routes.resolvedUsersUrl,
+        addUsersRoute: '/addUsers',
+        applicationVersion: version,
+        credentials,
+        createdEpochMs: Date.now(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    // Bounded execution wait up to 15s for headless option inspection
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+
+    while (Date.now() - startTime < 15000) {
+      await new Promise((r) => setTimeout(r, 200));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && ['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT'].includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status)) {
+      const errorMsg = completedRun?.errorMessage || 'Live form options could not be retrieved from the client portal.';
+      throw new BadRequestException({
+        code: 'FORM_OPTIONS_UNAVAILABLE',
+        message: errorMsg,
+      });
+    }
+
+    let resultData: any = null;
+    try {
+      resultData = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    if (!resultData || (!resultData.nationalities?.length && !resultData.roles?.length)) {
+      throw new BadRequestException({
+        code: 'FORM_OPTIONS_UNAVAILABLE',
+        message: 'No live dropdown options were discovered on the client Add User form.',
+      });
+    }
 
     const metadata: ClientCreateFormMetadata = {
       clientId: client.id,
       applicationVersion: version,
       addUsersUrl: routes.resolvedAddUsersUrl,
-      nationalities: [
-        { label: 'Saudi Arabia', value: 'Saudi Arabia', clientId: client.id, applicationVersion: version },
-        { label: 'United Arab Emirates', value: 'United Arab Emirates', clientId: client.id, applicationVersion: version },
-        { label: 'Egypt', value: 'Egypt', clientId: client.id, applicationVersion: version },
-        { label: 'Jordan', value: 'Jordan', clientId: client.id, applicationVersion: version },
-        { label: 'India', value: 'India', clientId: client.id, applicationVersion: version },
-        { label: 'Pakistan', value: 'Pakistan', clientId: client.id, applicationVersion: version },
-        { label: 'Philippines', value: 'Philippines', clientId: client.id, applicationVersion: version },
-        { label: 'United States', value: 'United States', clientId: client.id, applicationVersion: version },
-        { label: 'United Kingdom', value: 'United Kingdom', clientId: client.id, applicationVersion: version },
-        { label: 'Other', value: 'Other', clientId: client.id, applicationVersion: version },
-      ],
-      roles: [
-        { label: 'Physician', value: 'Physician', clientId: client.id, applicationVersion: version },
-        { label: 'Nurse', value: 'Nurse', clientId: client.id, applicationVersion: version },
-        { label: 'Pharmacist', value: 'Pharmacist', clientId: client.id, applicationVersion: version },
-        { label: 'Lab Technician', value: 'Lab Technician', clientId: client.id, applicationVersion: version },
-        { label: 'Admin', value: 'Admin', clientId: client.id, applicationVersion: version },
-        { label: 'Operator', value: 'Operator', clientId: client.id, applicationVersion: version },
-        { label: 'Super User', value: 'Super User', clientId: client.id, applicationVersion: version },
-      ],
-      profileRoles: [
-        { label: 'Clinical Specialist', value: 'Clinical Specialist', clientId: client.id, applicationVersion: version, roleDependency: 'Physician' },
-        { label: 'General Practitioner', value: 'General Practitioner', clientId: client.id, applicationVersion: version, roleDependency: 'Physician' },
-        { label: 'Head Nurse', value: 'Head Nurse', clientId: client.id, applicationVersion: version, roleDependency: 'Nurse' },
-        { label: 'Chief Pharmacist', value: 'Chief Pharmacist', clientId: client.id, applicationVersion: version, roleDependency: 'Pharmacist' },
-        { label: 'System Administrator', value: 'System Administrator', clientId: client.id, applicationVersion: version, roleDependency: 'Admin' },
-        { label: 'Billing Specialist', value: 'Billing Specialist', clientId: client.id, applicationVersion: version, roleDependency: 'Operator' },
-      ],
-      fieldMappings: {
-        username: '#username',
-        firstName: '#firstName',
-        middleName: '#middleName',
-        lastName: '#lastName',
-        nickName: '#nickName',
-        email: '#email',
-        mobileNumber: '#mobileNo',
-        nationality: '#nationality',
-        role: '#role',
-        profileRole: '#profileRole',
-        barcodeNumber: '#barcodeNo',
-      },
+      nationalities: resultData.nationalities || [],
+      roles: resultData.roles || [],
+      profileRoles: resultData.profileRoles || [],
+      fieldMappings: resultData.fieldMappings,
     };
 
     ClientUsersService.formOptionsCache.set(cacheKey, { timestamp: Date.now(), data: metadata });
+
+    await this.auditRepo.save(
+      this.auditRepo.create({
+        action: 'CLIENT_FORM_OPTIONS_SYNCHRONIZED',
+        actorUserId: user.sub,
+        actorUsername: user.username,
+        entityType: 'CLIENT',
+        entityId: clientId,
+        result: 'SUCCESS',
+        correlationId,
+        detailsJson: JSON.stringify({
+          clientCode: client.clientCode,
+          nationalitiesCount: metadata.nationalities.length,
+          rolesCount: metadata.roles.length,
+          profileRolesCount: metadata.profileRoles.length,
+          resolvedAddUsersUrl: routes.resolvedAddUsersUrl,
+        }),
+      })
+    );
+
     return metadata;
   }
 

@@ -701,44 +701,9 @@ export class UserManagementExecutor {
           clientId,
           applicationVersion,
           addUsersUrl,
-          nationalities:
-            natOptions.length > 0
-              ? natOptions
-              : [
-                  { label: 'Saudi Arabia', value: 'Saudi Arabia', clientId, applicationVersion },
-                  { label: 'United Arab Emirates', value: 'United Arab Emirates', clientId, applicationVersion },
-                  { label: 'Egypt', value: 'Egypt', clientId, applicationVersion },
-                  { label: 'Jordan', value: 'Jordan', clientId, applicationVersion },
-                  { label: 'India', value: 'India', clientId, applicationVersion },
-                  { label: 'Pakistan', value: 'Pakistan', clientId, applicationVersion },
-                  { label: 'Philippines', value: 'Philippines', clientId, applicationVersion },
-                  { label: 'United States', value: 'United States', clientId, applicationVersion },
-                  { label: 'United Kingdom', value: 'United Kingdom', clientId, applicationVersion },
-                  { label: 'Other', value: 'Other', clientId, applicationVersion },
-                ],
-          roles:
-            roleOptions.length > 0
-              ? roleOptions
-              : [
-                  { label: 'Physician', value: 'Physician', clientId, applicationVersion },
-                  { label: 'Nurse', value: 'Nurse', clientId, applicationVersion },
-                  { label: 'Pharmacist', value: 'Pharmacist', clientId, applicationVersion },
-                  { label: 'Lab Technician', value: 'Lab Technician', clientId, applicationVersion },
-                  { label: 'Admin', value: 'Admin', clientId, applicationVersion },
-                  { label: 'Operator', value: 'Operator', clientId, applicationVersion },
-                  { label: 'Super User', value: 'Super User', clientId, applicationVersion },
-                ],
-          profileRoles:
-            profRoleOptions.length > 0
-              ? profRoleOptions
-              : [
-                  { label: 'Clinical Specialist', value: 'Clinical Specialist', clientId, applicationVersion, roleDependency: 'Physician' },
-                  { label: 'General Practitioner', value: 'General Practitioner', clientId, applicationVersion, roleDependency: 'Physician' },
-                  { label: 'Head Nurse', value: 'Head Nurse', clientId, applicationVersion, roleDependency: 'Nurse' },
-                  { label: 'Chief Pharmacist', value: 'Chief Pharmacist', clientId, applicationVersion, roleDependency: 'Pharmacist' },
-                  { label: 'System Administrator', value: 'System Administrator', clientId, applicationVersion, roleDependency: 'Admin' },
-                  { label: 'Billing Specialist', value: 'Billing Specialist', clientId, applicationVersion, roleDependency: 'Operator' },
-                ],
+          nationalities: natOptions,
+          roles: roleOptions,
+          profileRoles: profRoleOptions,
           fieldMappings: {
             username: '#username',
             firstName: '#firstName',

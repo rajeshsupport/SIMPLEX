@@ -144,6 +144,90 @@ export class AutomationWorker {
     }
 
     // =========================================================================
+    // 1.5 DEDICATED HEADLESS LIVE FORM OPTIONS INSPECTOR
+    // =========================================================================
+    if (task.taskType === 'INSPECT_CREATE_FORM_METADATA' || task.taskType === 'INSPECT_FORM_OPTIONS') {
+      let inspectContext: BrowserContext | null = null;
+      try {
+        onProgress?.(`[INSPECT OPTIONS] Launching isolated headless browser context for client [${task.clientId}]...`);
+        inspectContext = await BrowserProfileManager.launchPersistentContext({
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          isHeaded: false,
+          namespace: 'sync',
+          slowMo: 0,
+        });
+
+        const inspectPage = inspectContext.pages()[0] || (await inspectContext.newPage());
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const addUsersUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.payload?.addUsersRoute || '/addUsers',
+          fallbackRoute: '/addUsers',
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+
+        onProgress?.(`[INSPECT OPTIONS] Inspecting live Add User options at ${addUsersUrl}...`);
+        const metadata = await UserManagementExecutor.inspectCreateFormMetadata(inspectPage, {
+          addUsersUrl,
+          clientId: task.clientId,
+          applicationVersion: task.payload?.applicationVersion || 'v9.4',
+          loginUrl,
+          credentials: task.credentials,
+        });
+
+        const totalDurationMs = Date.now() - startTime;
+        if (metadata && (metadata.nationalities?.length > 0 || metadata.roles?.length > 0)) {
+          onProgress?.(`✓ [INSPECT OPTIONS COMPLETED] Discovered ${metadata.nationalities.length} nationalities, ${metadata.roles.length} roles, ${metadata.profileRoles.length} profile roles.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: metadata,
+          });
+        } else {
+          onProgress?.(`✗ [INSPECT OPTIONS FAILED] No dropdown options discovered on remote form.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: 'FORM_OPTIONS_UNAVAILABLE: No dropdown options discovered on remote Add User form.',
+            totalDurationMs,
+            resultData: {
+              success: false,
+              errorCode: 'FORM_OPTIONS_UNAVAILABLE',
+              errorMessage: 'No dropdown options discovered on remote Add User form.',
+            },
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        onProgress?.(`[INSPECT OPTIONS ERROR] ${err.message}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: err.message || 'FORM_OPTIONS_UNAVAILABLE',
+          totalDurationMs,
+          resultData: {
+            success: false,
+            errorCode: 'FORM_OPTIONS_UNAVAILABLE',
+            errorMessage: err.message,
+          },
+        });
+      } finally {
+        if (inspectContext) {
+          try {
+            await inspectContext.close();
+            onProgress?.('[INSPECT OPTIONS] Headless inspect context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // =========================================================================
     // 2. REMOTE CLIENT MUTATION WORKFLOWS (VISIBLE AUTOMATED CHROME WINDOW)
     // =========================================================================
     const isMutationTask = [

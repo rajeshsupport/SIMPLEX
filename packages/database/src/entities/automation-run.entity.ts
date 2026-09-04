@@ -48,7 +48,9 @@ export class AutomationRun {
     | 'RESET_PASSWORD'
     | 'CREATE_SERVICE'
     | 'BULK_IMPORT'
-    | 'BULK_IMPORT_CLIENT_USERS';
+    | 'BULK_IMPORT_CLIENT_USERS'
+    | 'INSPECT_CREATE_FORM_METADATA'
+    | 'INSPECT_FORM_OPTIONS';
 
   @Index()
   @Column({ type: 'nvarchar', length: 50, default: 'QUEUED' })
