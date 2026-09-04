@@ -2912,10 +2912,12 @@ export const UsersPage: React.FC = () => {
                                     ? 'bg-purple-950 text-purple-300 border border-purple-800'
                                     : r.result === 'INVALID' || r.result === 'VALIDATION_FAILED'
                                     ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                    : r.errorCode === 'REMOTE_CREATE_UNCONFIRMED'
+                                    ? 'bg-orange-950 text-orange-300 border border-orange-800'
                                     : 'bg-red-950 text-red-300 border border-red-800'
                                 }`}
                               >
-                                {r.result}
+                                {r.errorCode === 'REMOTE_CREATE_UNCONFIRMED' ? 'UNCONFIRMED' : r.result}
                               </span>
                             </td>
                             <td className="p-2 text-slate-300">{r.existingStatus || r.remoteStatus || 'N/A'}</td>

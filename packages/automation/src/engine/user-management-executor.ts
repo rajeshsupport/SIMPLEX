@@ -1953,7 +1953,7 @@ export class UserManagementExecutor {
     // Check error banner or success banner
     const errorBanner = page
       .locator(
-        '.alert-danger, .error-message, [data-testid="error-message"], .toast-error, .alert-warning, .text-danger:has-text("already exists"), .text-danger:has-text("error")'
+        '.alert-danger, .error-message, [data-testid="error-message"], .toast-error, .alert-warning, .text-danger, .field-validation-error, .validation-summary-errors, #lblError, #errorMsg, .invalid-feedback, [role="alert"], .help-block-error, .form-error, .err-msg, span.error, label.error, div.error'
       )
       .first();
 
@@ -1987,13 +1987,51 @@ export class UserManagementExecutor {
             errorMessage: bannerText,
           };
         }
+        if (bannerLower.includes('profile role') || bannerLower.includes('selected role requires')) {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'REMOTE_REQUIRED_FIELD_UNSUPPORTED',
+            errorMessage: bannerText,
+          };
+        }
         return {
           success: false,
           username: dto.username,
-          errorCode: 'REMOTE_SAVE_REJECTED',
+          errorCode: 'REMOTE_VALIDATION_FAILED',
           errorMessage: bannerText,
         };
       }
+    }
+
+    // Also check for HTML5 / form input invalid constraint validation messages
+    const inputValidationErr = await page
+      .evaluate(() => {
+        const invalidEl = document.querySelector('input:invalid, select:invalid, textarea:invalid') as HTMLInputElement | null;
+        if (invalidEl && invalidEl.validationMessage) {
+          const fieldLabel =
+            invalidEl.getAttribute('name') ||
+            invalidEl.getAttribute('id') ||
+            invalidEl.getAttribute('placeholder') ||
+            'Field';
+          return `${fieldLabel}: ${invalidEl.validationMessage}`;
+        }
+        const fieldErr = document.querySelector('.field-validation-error, .invalid-feedback, .text-danger, #lblError');
+        if (fieldErr && (fieldErr as HTMLElement).innerText && (fieldErr as HTMLElement).innerText.trim().length > 0) {
+          return (fieldErr as HTMLElement).innerText.trim();
+        }
+        return null;
+      })
+      .catch(() => null);
+
+    if (inputValidationErr) {
+      page.off('dialog', dialogHandler);
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_VALIDATION_FAILED',
+        errorMessage: inputValidationErr,
+      };
     }
 
     const successBanner = page.locator('.alert-success, .toast-success, .success-message, [data-testid="success-message"]').first();

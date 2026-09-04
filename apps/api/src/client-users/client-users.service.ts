@@ -827,7 +827,11 @@ export class ClientUsersService implements OnModuleInit {
   /**
    * Creates a user with duplicate validation and automated browser execution.
    */
-  async createClientUser(dto: CreateClientUserDto, user: JwtPayload): Promise<ClientUser> {
+  async createClientUser(
+    dto: CreateClientUserDto,
+    user: JwtPayload,
+    options?: { skipPostSync?: boolean }
+  ): Promise<ClientUser> {
     const client = await this.clientRepo.findOne({ where: { id: dto.clientId } });
     if (!client) throw new NotFoundException(`Client ${dto.clientId} not found`);
 
@@ -1002,10 +1006,8 @@ export class ClientUsersService implements OnModuleInit {
           (completedRun.status === 'FAILED' && parsedResult.isRemoteSaveConfirmed));
 
       if (!isConfirmedSuccess) {
-        let errorCode = 'REMOTE_VALIDATION_FAILED';
-        let errorMessage = completedRun?.errorMessage || 'User creation failed on client portal.';
-        if (parsedResult.errorCode) errorCode = parsedResult.errorCode;
-        if (parsedResult.errorMessage) errorMessage = parsedResult.errorMessage;
+        let errorCode = parsedResult.errorCode || 'REMOTE_VALIDATION_FAILED';
+        let errorMessage = parsedResult.errorMessage || completedRun?.errorMessage || 'User creation failed on client portal.';
         if (completedRun?.status === 'TIMED_OUT') errorCode = 'OPERATION_TIMED_OUT';
         throw new BadRequestException({
           code: errorCode,
@@ -1013,11 +1015,13 @@ export class ClientUsersService implements OnModuleInit {
         });
       }
 
-      // Automatically trigger post-mutation pull sync
-      try {
-        await this.syncClientUsers(client.id, user);
-      } catch (syncErr: any) {
-        this.logger.warn(`Post-creation automatic sync failed: ${syncErr.message}`);
+      // Automatically trigger post-mutation pull sync (unless skipped for batch import)
+      if (!options?.skipPostSync) {
+        try {
+          await this.syncClientUsers(client.id, user);
+        } catch (syncErr: any) {
+          this.logger.warn(`Post-creation automatic sync failed: ${syncErr.message}`);
+        }
       }
 
       // Save snapshot or update existing if found during pull sync
@@ -2407,6 +2411,8 @@ export class ClientUsersService implements OnModuleInit {
       existingUserMap.set(u.username.toLowerCase().trim(), u);
     }
 
+    const pendingReconciliationRows: { row: ExcelUserImportRow; resultIndex: number }[] = [];
+
     for (const row of rows) {
       const rowCorrelationId = crypto.randomUUID();
       const fullName = `${row.firstName || ''} ${row.lastName || ''}`.trim();
@@ -2524,7 +2530,8 @@ export class ClientUsersService implements OnModuleInit {
               status: row.requestedStatus || 'ACTIVE',
               overrideDuplicateName: true,
             },
-            user
+            user,
+            { skipPostSync: true }
           );
 
           results.push({
@@ -2574,30 +2581,94 @@ export class ClientUsersService implements OnModuleInit {
           }
         }
       } catch (err: any) {
-        failedCount++;
         const errorCode = err.response?.code || err.code || 'REMOTE_ERROR';
         const errorMsg = (err.response?.message || err.message || 'Error executing row mutation').replace(/<[^>]*>?/gm, '');
-        results.push({
-          sNo,
-          rowNumber: row.rowNumber,
-          action: row.action,
-          username: row.username,
-          fullName,
-          result: 'FAILED',
-          errorCode,
-          message: errorMsg,
-          executedAt: new Date().toISOString(),
-          correlationId: rowCorrelationId,
-        });
+
+        if (
+          row.action === 'CREATE' &&
+          (errorCode === 'REMOTE_CREATE_VERIFICATION_FAILED' ||
+            errorCode === 'OPERATION_TIMED_OUT' ||
+            errorMsg.toLowerCase().includes('could not be verified') ||
+            errorMsg.toLowerCase().includes('timed out'))
+        ) {
+          const resIdx = results.length;
+          results.push({
+            sNo,
+            rowNumber: row.rowNumber,
+            action: row.action,
+            username: row.username,
+            fullName,
+            result: 'FAILED',
+            errorCode: 'REMOTE_CREATE_VERIFICATION_FAILED',
+            message: errorMsg,
+            executedAt: new Date().toISOString(),
+            correlationId: rowCorrelationId,
+          });
+          failedCount++;
+          pendingReconciliationRows.push({ row, resultIndex: resIdx });
+        } else {
+          failedCount++;
+          results.push({
+            sNo,
+            rowNumber: row.rowNumber,
+            action: row.action,
+            username: row.username,
+            fullName,
+            result: 'FAILED',
+            errorCode,
+            message: errorMsg,
+            executedAt: new Date().toISOString(),
+            correlationId: rowCorrelationId,
+          });
+        }
       }
     }
 
-    // Trigger authoritative pull sync after successful batch
-    if (createdCount > 0) {
-      try {
-        await this.syncClientUsers(clientId, user);
-      } catch (err) {
-        console.warn('Post-import pull sync warning:', err);
+    // Always perform exactly ONE batch-level authoritative pull sync
+    try {
+      await this.syncClientUsers(clientId, user);
+    } catch (err: any) {
+      this.logger.warn(`Post-import batch pull sync warning: ${err.message}`);
+    }
+
+    // Reconcile pending verification rows against the fresh synchronized snapshot
+    if (pendingReconciliationRows.length > 0) {
+      const freshSnapshots = await this.snapshotRepo.find({
+        where: { clientId, isPresentRemotely: true },
+      });
+      const snapshotMapByUsername = new Map<string, ClientUserSnapshot>();
+      const snapshotMapByName = new Map<string, ClientUserSnapshot>();
+      for (const s of freshSnapshots) {
+        if (s.username) snapshotMapByUsername.set(s.username.toLowerCase().trim(), s);
+        if (s.fullName) snapshotMapByName.set(s.fullName.toLowerCase().trim(), s);
+        const firstLast = `${(s.firstName || '').toLowerCase().trim()} ${(s.lastName || '').toLowerCase().trim()}`.trim();
+        if (firstLast) snapshotMapByName.set(firstLast, s);
+      }
+
+      for (const pending of pendingReconciliationRows) {
+        const uNorm = (pending.row.username || '').toLowerCase().trim();
+        const nameNorm = `${(pending.row.firstName || '').toLowerCase().trim()} ${(pending.row.lastName || '').toLowerCase().trim()}`.trim();
+        const matched = snapshotMapByUsername.get(uNorm) || snapshotMapByName.get(nameNorm) || snapshotMapByName.get(uNorm);
+
+        const targetResult = results[pending.resultIndex];
+        if (matched) {
+          // Reconcile row from FAILED to CREATED
+          if (targetResult) {
+            targetResult.result = 'CREATED';
+            targetResult.remoteStatus = matched.status || 'ACTIVE';
+            targetResult.errorCode = undefined;
+            targetResult.message = `User '${pending.row.username}' created and verified on client via batch reconciliation.`;
+            createdCount++;
+            failedCount = Math.max(0, failedCount - 1);
+          }
+        } else {
+          // Truly absent remotely -> mark REMOTE_CREATE_UNCONFIRMED for explicit review
+          if (targetResult) {
+            targetResult.result = 'FAILED';
+            targetResult.errorCode = 'REMOTE_CREATE_UNCONFIRMED';
+            targetResult.message = `REMOTE_CREATE_UNCONFIRMED — User '${pending.row.username}' could not be confirmed in client users directory after batch synchronization. Requires operator review before retry.`;
+          }
+        }
       }
     }
 

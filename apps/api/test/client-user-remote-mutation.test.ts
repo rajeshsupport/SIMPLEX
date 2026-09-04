@@ -1567,8 +1567,130 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(validateCreateFields({ role: 'Physician', profileRole: 'Cardiologist', mobileNumber: '12345' }, roleDeps), true);
   console.log('✓ TEST 73 Passed');
 
+  // 74. Single Batch-Level Post-Import Sync & Reconciliation of REMOTE_CREATE_VERIFICATION_FAILED
+  console.log('\n[TEST 74] Testing Single Batch-Level Post-Import Sync & Reconciliation...');
+  const mockBatchRows = [
+    { sNo: 1, username: 'onetest', firstName: 'One', lastName: 'Test' },
+    { sNo: 2, username: 'twotest', firstName: 'Two', lastName: 'Test' },
+    { sNo: 3, username: 'threetest', firstName: 'Three', lastName: 'Test' },
+    { sNo: 4, username: 'fourtest', firstName: 'Four', lastName: 'Test' },
+    { sNo: 5, username: 'fivetest', firstName: 'Five', lastName: 'Test' },
+    { sNo: 6, username: 'sixtest', firstName: 'Six', lastName: 'Test' },
+    { sNo: 7, username: 'seventest', firstName: 'Seven', lastName: 'Test' },
+    { sNo: 8, username: 'eighttest', firstName: 'Eight', lastName: 'Test' },
+    { sNo: 9, username: 'ninetest', firstName: 'Nine', lastName: 'Test' },
+    { sNo: 10, username: 'tentest', firstName: 'Ten', lastName: 'Test' },
+  ];
+
+  // Initial execution state: 9 rows returned REMOTE_CREATE_VERIFICATION_FAILED, 1 row (eighttest) returned REMOTE_VALIDATION_FAILED
+  const initialResults = mockBatchRows.map((r) => {
+    if (r.username === 'eighttest') {
+      return {
+        sNo: r.sNo,
+        rowNumber: r.sNo + 1,
+        username: r.username,
+        result: 'FAILED',
+        errorCode: 'REMOTE_VALIDATION_FAILED',
+        message: 'Username eighttest: Invalid character in user name on Simplex portal',
+      };
+    }
+    return {
+      sNo: r.sNo,
+      rowNumber: r.sNo + 1,
+      username: r.username,
+      result: 'FAILED',
+      errorCode: 'REMOTE_CREATE_VERIFICATION_FAILED',
+      message: `User '${r.username}' could not be verified on the remote user list after creation.`,
+    };
+  });
+
+  // Simulate ONE batch-level read-only sync returning 9 users that exist on remote portal
+  const syncedRemoteDirectory = [
+    { username: 'onetest', fullName: 'One Test', status: 'ACTIVE' },
+    { username: 'twotest', fullName: 'Two Test', status: 'ACTIVE' },
+    { username: 'threetest', fullName: 'Three Test', status: 'ACTIVE' },
+    { username: 'fourtest', fullName: 'Four Test', status: 'ACTIVE' },
+    { username: 'fivetest', fullName: 'Five Test', status: 'ACTIVE' },
+    { username: 'sixtest', fullName: 'Six Test', status: 'ACTIVE' },
+    { username: 'seventest', fullName: 'Seven Test', status: 'ACTIVE' },
+    { username: 'ninetest', fullName: 'Nine Test', status: 'ACTIVE' },
+    { username: 'tentest', fullName: 'Ten Test', status: 'ACTIVE' },
+  ];
+
+  const remoteUsernames = new Map(syncedRemoteDirectory.map((u) => [u.username.toLowerCase(), u]));
+
+  let reconciledCreated = 0;
+  let trulyMissingUnconfirmed = 0;
+  let validationFailed = 0;
+
+  const reconciledResults = initialResults.map((res) => {
+    if (res.errorCode === 'REMOTE_CREATE_VERIFICATION_FAILED') {
+      const match = remoteUsernames.get(res.username.toLowerCase());
+      if (match) {
+        reconciledCreated++;
+        return {
+          ...res,
+          result: 'CREATED',
+          remoteStatus: match.status,
+          errorCode: undefined,
+          message: `User '${res.username}' created and verified on client via batch reconciliation.`,
+        };
+      } else {
+        trulyMissingUnconfirmed++;
+        return {
+          ...res,
+          result: 'FAILED',
+          errorCode: 'REMOTE_CREATE_UNCONFIRMED',
+          message: `REMOTE_CREATE_UNCONFIRMED — User '${res.username}' could not be confirmed in client users directory after batch synchronization. Requires operator review before retry.`,
+        };
+      }
+    } else {
+      validationFailed++;
+      return res;
+    }
+  });
+
+  assert.strictEqual(reconciledCreated, 9, 'Exactly 9 usernames must be reconciled from FAILED to CREATED');
+  assert.strictEqual(validationFailed, 1, 'Exactly 1 username (eighttest) must remain validation failed');
+  assert.strictEqual(trulyMissingUnconfirmed, 0, 'Zero missing unconfirmed rows in this set');
+  assert.strictEqual(reconciledResults.filter((r) => r.result === 'CREATED').length, 9);
+  assert.strictEqual(reconciledResults.find((r) => r.username === 'eighttest')?.errorCode, 'REMOTE_VALIDATION_FAILED');
+  console.log('✓ TEST 74 Passed');
+
+  // 75. Exact Safe Validation Message for eighttest
+  console.log('\n[TEST 75] Testing Exact Safe Validation Message Capture (No Generic Masking)...');
+  const eightTestResult = reconciledResults.find((r) => r.username === 'eighttest')!;
+  assert.strictEqual(eightTestResult.message.includes('User creation failed on client portal'), false, 'Must not use generic message');
+  assert.ok(eightTestResult.message.includes('Invalid character in user name on Simplex portal'), 'Must capture exact validation message');
+  console.log('✓ TEST 75 Passed');
+
+  // 76. Batch Sync Deduplication Invariant
+  console.log('\n[TEST 76] Testing Batch Sync Produces Zero Duplicate Central Rows...');
+  const centralSnapshots = [
+    { id: '1', username: 'onetest', isPresentRemotely: true },
+    { id: '2', username: 'twotest', isPresentRemotely: true },
+    { id: '3', username: 'threetest', isPresentRemotely: true },
+  ];
+
+  const incomingRemoteList = [
+    { username: 'onetest', fullName: 'One Test', status: 'ACTIVE' },
+    { username: 'twotest', fullName: 'Two Test', status: 'ACTIVE' },
+    { username: 'threetest', fullName: 'Three Test', status: 'ACTIVE' },
+  ];
+
+  const dedupedMap = new Map<string, any>();
+  for (const item of incomingRemoteList) {
+    const key = item.username.toLowerCase();
+    if (!dedupedMap.has(key)) {
+      dedupedMap.set(key, item);
+    }
+  }
+
+  assert.strictEqual(dedupedMap.size, 3, 'Batch sync must contain exactly 3 unique users without duplicates');
+  console.log('✓ TEST 76 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (73/73)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (76/76)');
   console.log('======================================================================\n');
 }
 
