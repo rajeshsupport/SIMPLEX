@@ -7,7 +7,7 @@ export interface ProfileOptions {
   clientId: string;
   userId: string;
   isHeaded?: boolean;
-  namespace?: 'interactive' | 'sync';
+  namespace?: 'interactive' | 'sync' | 'mutation';
   viewport?: { width: number; height: number };
   slowMo?: number;
 }
@@ -55,7 +55,11 @@ export class BrowserProfileManager {
   /**
    * Returns the canonical, validated profile path for a client and user within an isolated namespace.
    */
-  public static getProfilePath(clientId: string, userId: string, namespace: 'interactive' | 'sync' = 'interactive'): string {
+  public static getProfilePath(
+    clientId: string,
+    userId: string,
+    namespace: 'interactive' | 'sync' | 'mutation' = 'interactive'
+  ): string {
     // 1. Strict validation (rejection of ambiguous / malicious inputs)
     const validClientId = this.validateIdentifier(clientId, 'Client');
     const validUserId = this.validateIdentifier(userId, 'User');
@@ -223,9 +227,17 @@ export class BrowserProfileManager {
   }
 
   /**
+   * Checks if a profile directory currently has a Chromium lock file.
+   */
+  public static isProfileLocked(userDataDir: string): boolean {
+    const lockPath = path.join(userDataDir, 'SingletonLock');
+    return fs.existsSync(lockPath);
+  }
+
+  /**
    * Securely purges a profile directory.
    */
-  public static deleteProfile(clientId: string, userId: string, namespace?: 'interactive' | 'sync'): void {
+  public static deleteProfile(clientId: string, userId: string, namespace?: 'interactive' | 'sync' | 'mutation'): void {
     if (namespace) {
       const profilePath = this.getProfilePath(clientId, userId, namespace);
       if (fs.existsSync(profilePath)) {

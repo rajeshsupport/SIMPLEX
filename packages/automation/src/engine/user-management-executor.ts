@@ -1870,8 +1870,35 @@ export class UserManagementExecutor {
       }
     }
 
+    if (page.isClosed()) {
+      page.off('dialog', dialogHandler);
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+        errorMessage: 'Browser was closed before Add User form could be submitted.',
+      };
+    }
+
+    if (isObj && (arg1 as any).onMutationDispatched) {
+      (arg1 as any).onMutationDispatched();
+    }
+
     // Click submit button once
-    await submitBtn.click();
+    try {
+      await submitBtn.click();
+    } catch (clickErr: any) {
+      if (page.isClosed()) {
+        page.off('dialog', dialogHandler);
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
+          errorMessage: 'Browser was closed during form submission.',
+        };
+      }
+      throw clickErr;
+    }
     await page.waitForTimeout(600);
 
     // Handle DOM confirmation modals / alerts (e.g. Bootstrap modal, SweetAlert, Bootbox)
@@ -2324,6 +2351,7 @@ export class UserManagementExecutor {
     options?: { remoteUserId?: string }
   ): Promise<{
     success: boolean;
+    rowLocator?: any;
     rowHandle?: any;
     rowIndex?: number;
     statusColIdx?: number;
@@ -2417,72 +2445,146 @@ export class UserManagementExecutor {
     let totalRowsInspected = 0;
     let pagesVisitedCount = 0;
 
-    // Helper to inspect rows on current page
+    // Helper to inspect rows on current page in a single in-browser evaluation pass
     const inspectCurrentPageRows = async (): Promise<{
-      matches: { row: any; index: number; status: ClientUserStatus }[];
+      matches: { index: number; status: ClientUserStatus }[];
       rowCount: number;
     }> => {
-      const rows = await page.$$(
-        'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row'
-      );
-      const matches: { row: any; index: number; status: ClientUserStatus }[] = [];
-
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const cells = await row.$$('td, [role="gridcell"], [role="cell"], .cell, .grid-cell');
-        if (cells.length === 0) continue;
-
-        // Skip rows that are hidden (e.g. filtered by client-side search)
-        const isHidden = await row.evaluate((el) => {
-          const style = window.getComputedStyle(el);
-          return style.display === 'none' || style.visibility === 'hidden';
-        });
-        if (isHidden) continue;
-
-        const cellTexts = await Promise.all(cells.map((c) => c.textContent()));
-        const cellUsername = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
-
-        // Extract action link attributes & row IDs
-        const rowData = await row.evaluate((el) => {
-          const dataId = el.getAttribute('data-id') || el.getAttribute('data-user-id') || el.getAttribute('id') || '';
-          const links = Array.from(el.querySelectorAll('a[href], button[onclick], [ng-click]')).map((a) => {
-            return (a.getAttribute('href') || '') + ' ' + (a.getAttribute('onclick') || '') + ' ' + (a.getAttribute('ng-click') || '');
-          });
-          return { dataId, links };
-        });
-
-        // 1. Priority 1: Match by remoteUserId / edit-route identifier if available
-        let isMatch = false;
-        if (targetRemoteUserId && rowData.dataId && rowData.dataId.toLowerCase() === targetRemoteUserId.toLowerCase()) {
-          isMatch = true;
-        }
-
-        // 2. Priority 2: Exact case-insensitive normalized username in the "Name" column
-        if (!isMatch && cellUsername === normTarget) {
-          isMatch = true;
-        }
-
-        // 3. Priority 3: Exact username extracted from the row's Edit/View/Toggle href
-        if (!isMatch) {
-          for (const linkText of rowData.links) {
-            const userParamMatch = linkText.match(/(?:userId|username|toggleStatus|resetPassword|editUser)[=\/('"]+([^&'" )]+)/i);
-            if (userParamMatch && userParamMatch[1].trim().toLowerCase() === normTarget) {
-              isMatch = true;
-              break;
-            }
-          }
-        }
-
-        // If matched, extract current remote status
-        if (isMatch) {
-          let rowStatus: ClientUserStatus = 'ACTIVE';
-          if (statusColIdx >= 0 && statusColIdx < cells.length) {
-            rowStatus = await UserManagementExecutor.evaluateCellStatus(cells[statusColIdx]);
-          }
-          matches.push({ row, index: i, status: rowStatus });
-        }
+      if (page.isClosed()) {
+        throw new Error('DOM_READ_ABORTED: Target page, context or browser has been closed');
       }
-      return { matches, rowCount: rows.length };
+
+      try {
+        const rowsData = await page.evaluate(
+          ({ selector, usernameColIdx, statusColIdx, normTarget, targetRemoteUserId }) => {
+            const rows = Array.from(document.querySelectorAll(selector));
+            const results: {
+              index: number;
+              status: 'ACTIVE' | 'INACTIVE';
+            }[] = [];
+
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              const cells = Array.from(row.querySelectorAll('td, [role="gridcell"], [role="cell"], .cell, .grid-cell'));
+              if (cells.length === 0) continue;
+
+              const style = window.getComputedStyle(row);
+              if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+              const cellTexts = cells.map((c) => (c.textContent || '').trim());
+              const cellUsername = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
+
+              const dataId = row.getAttribute('data-id') || row.getAttribute('data-user-id') || row.getAttribute('id') || '';
+              const links = Array.from(row.querySelectorAll('a[href], button[onclick], [ng-click]')).map((a) => {
+                return (a.getAttribute('href') || '') + ' ' + (a.getAttribute('onclick') || '') + ' ' + (a.getAttribute('ng-click') || '');
+              });
+
+              let isMatch = false;
+              if (targetRemoteUserId && dataId && dataId.toLowerCase() === targetRemoteUserId.toLowerCase()) {
+                isMatch = true;
+              }
+              if (!isMatch && cellUsername === normTarget) {
+                isMatch = true;
+              }
+              if (!isMatch) {
+                for (const linkText of links) {
+                  const userParamMatch = linkText.match(/(?:userId|username|toggleStatus|resetPassword|editUser)[=\/('"]+([^&'" )]+)/i);
+                  if (userParamMatch && userParamMatch[1].trim().toLowerCase() === normTarget) {
+                    isMatch = true;
+                    break;
+                  }
+                }
+              }
+
+              let rowStatus: 'ACTIVE' | 'INACTIVE' = 'ACTIVE';
+              if (statusColIdx >= 0 && statusColIdx < cells.length) {
+                const sc = cells[statusColIdx];
+                const innerText = (sc.textContent || '').toUpperCase();
+                const html = sc.innerHTML.toLowerCase();
+                if (
+                  innerText.includes('INACTIVE') ||
+                  innerText.includes('DISABLE') ||
+                  innerText.includes('FALSE') ||
+                  innerText.includes('DEACTIVAT') ||
+                  innerText.includes('✖') ||
+                  innerText.includes('BLOCK') ||
+                  html.includes('fa-ban') ||
+                  html.includes('fa-times') ||
+                  html.includes('badge-inactive') ||
+                  html.includes('badge-danger') ||
+                  html.includes('title="inactive"') ||
+                  html.includes('text-danger')
+                ) {
+                  rowStatus = 'INACTIVE';
+                } else if (
+                  innerText.includes('ACTIVE') ||
+                  innerText.includes('ENABLE') ||
+                  innerText.includes('TRUE') ||
+                  innerText.includes('✔') ||
+                  html.includes('fa-check') ||
+                  html.includes('glyphicon-ok') ||
+                  html.includes('badge-active') ||
+                  html.includes('badge-success') ||
+                  html.includes('title="active"') ||
+                  html.includes('title="enabled"') ||
+                  html.includes('text-success')
+                ) {
+                  rowStatus = 'ACTIVE';
+                }
+              }
+
+              if (isMatch) {
+                results.push({ index: i, status: rowStatus });
+              }
+            }
+            return { matches: results, rowCount: rows.length };
+          },
+          {
+            selector: 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row',
+            usernameColIdx,
+            statusColIdx,
+            normTarget,
+            targetRemoteUserId,
+          }
+        );
+
+        return rowsData;
+      } catch (err: any) {
+        if (page.isClosed() || (err.message && err.message.includes('Target page, context or browser has been closed'))) {
+          throw new Error('DOM_READ_ABORTED: Target page, context or browser has been closed');
+        }
+        return { matches: [], rowCount: 0 };
+      }
+    };
+
+    // Helper to build return match object
+    const buildMatchResult = async (matchedIndex: number, currentRemoteStatus: ClientUserStatus, matchCount: number) => {
+      const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
+      const rowLocator = page.locator(tableSelector).nth(matchedIndex);
+      let rowHandle: any = null;
+      try {
+        const rows = await page.$$(tableSelector);
+        rowHandle = rows[matchedIndex] || null;
+      } catch {}
+
+      return {
+        success: true,
+        rowLocator,
+        rowHandle,
+        rowIndex: matchedIndex,
+        statusColIdx,
+        actionColIdx,
+        usernameColIdx,
+        fullNameColIdx,
+        currentRemoteStatus,
+        diagnostics: {
+          requestedNormalizedUsername: normTarget,
+          remoteRowsInspected: totalRowsInspected,
+          pagesVisited: pagesVisitedCount,
+          usernameColIdx,
+          matchCount,
+        },
+      };
     };
 
     // Bounded retry attempts (up to 3 attempts with 800ms delay) to allow asynchronous rendering settling
@@ -2530,23 +2632,7 @@ export class UserManagementExecutor {
         pagesVisitedCount = 1;
 
         if (matches.length === 1) {
-          return {
-            success: true,
-            rowHandle: matches[0].row,
-            rowIndex: matches[0].index,
-            statusColIdx,
-            actionColIdx,
-            usernameColIdx,
-            fullNameColIdx,
-            currentRemoteStatus: matches[0].status,
-            diagnostics: {
-              requestedNormalizedUsername: normTarget,
-              remoteRowsInspected: totalRowsInspected,
-              pagesVisited: pagesVisitedCount,
-              usernameColIdx,
-              matchCount: 1,
-            },
-          };
+          return await buildMatchResult(matches[0].index, matches[0].status, 1);
         }
         if (matches.length > 1) {
           return {
@@ -2572,7 +2658,7 @@ export class UserManagementExecutor {
           el.dispatchEvent(new Event('change', { bubbles: true }));
           el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
           el.dispatchEvent(new Event('blur', { bubbles: true }));
-        });
+        }).catch(() => {});
         await page.waitForTimeout(400);
       }
 
@@ -2586,23 +2672,7 @@ export class UserManagementExecutor {
         totalRowsInspected += rowCount;
 
         if (matches.length === 1) {
-          return {
-            success: true,
-            rowHandle: matches[0].row,
-            rowIndex: matches[0].index,
-            statusColIdx,
-            actionColIdx,
-            usernameColIdx,
-            fullNameColIdx,
-            currentRemoteStatus: matches[0].status,
-            diagnostics: {
-              requestedNormalizedUsername: normTarget,
-              remoteRowsInspected: totalRowsInspected,
-              pagesVisited: pagesVisitedCount,
-              usernameColIdx,
-              matchCount: 1,
-            },
-          };
+          return await buildMatchResult(matches[0].index, matches[0].status, 1);
         }
         if (matches.length > 1) {
           return {
@@ -2619,13 +2689,16 @@ export class UserManagementExecutor {
           };
         }
 
-        // Check page signature to prevent cycles
-        const rows = await page.$$('table tbody tr, [ng-repeat], [data-ng-repeat], [role="row"]:not(:first-child), .user-row');
-        if (rows.length === 0) break;
+        // Check page signature to prevent cycles using single-pass in-browser evaluation
+        const firstRowText = await page.evaluate(() => {
+          const firstRow = document.querySelector('table tbody tr, [ng-repeat], [data-ng-repeat], [role="row"]:not(:first-child), .user-row');
+          if (!firstRow) return null;
+          const firstCells = Array.from(firstRow.querySelectorAll('td, [role="gridcell"], .cell'));
+          return firstCells.slice(0, 3).map((c) => (c.textContent || '').trim()).join('|');
+        }).catch(() => null);
 
-        const firstRowCells = await rows[0].$$('td, [role="gridcell"], .cell');
-        const firstRowTexts = await Promise.all(firstRowCells.map((c) => c.textContent()));
-        const sig = `${pageNum}:${firstRowTexts.slice(0, 3).join('|')}`;
+        if (!firstRowText) break;
+        const sig = `${pageNum}:${firstRowText}`;
         if (seenPageSignatures.has(sig)) break;
         seenPageSignatures.add(sig);
 
@@ -2714,11 +2787,15 @@ export class UserManagementExecutor {
       };
     }
 
-    const editBtn = await lookupRes.rowHandle.$(
-      'button.btn-edit, a.btn-edit, a[href*="edit" i], [data-testid="btn-edit-user"], a[title*="edit" i], button[title*="edit" i]'
-    );
+    const rowIndex = lookupRes.rowIndex ?? 0;
+    const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
+    const rowLocator = page.locator(tableSelector).nth(rowIndex);
 
-    if (editBtn) {
+    const editBtn = rowLocator.locator(
+      'button.btn-edit, a.btn-edit, a[href*="edit" i], [data-testid="btn-edit-user"], a[title*="edit" i], button[title*="edit" i]'
+    ).first();
+
+    if ((await editBtn.count().catch(() => 0)) > 0 && (await editBtn.isVisible().catch(() => false))) {
       await editBtn.click();
     } else {
       await page.goto(`${usersListUrl}/edit/${username}`, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
@@ -2767,13 +2844,38 @@ export class UserManagementExecutor {
       }
     }
 
+    if (page.isClosed()) {
+      return {
+        success: false,
+        username,
+        errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+        errorMessage: 'Browser was closed before Edit User changes could be saved.',
+      };
+    }
+
+    if (isObj && (arg1 as any).onMutationDispatched) {
+      (arg1 as any).onMutationDispatched();
+    }
+
     const submitBtn = page
       .locator(
         '#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), button:has-text("Save"), [data-testid="btn-save-user"], .btn-save'
       )
       .first();
     if (await submitBtn.isVisible().catch(() => false)) {
-      await submitBtn.click();
+      try {
+        await submitBtn.click();
+      } catch (clickErr: any) {
+        if (page.isClosed()) {
+          return {
+            success: false,
+            username,
+            errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
+            errorMessage: 'Browser was closed during Edit User save.',
+          };
+        }
+        throw clickErr;
+      }
       await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     }
 
@@ -2860,20 +2962,22 @@ export class UserManagementExecutor {
       };
     }
 
-    const { rowHandle, statusColIdx, currentRemoteStatus } = lookupRes;
-    const targetCells = await rowHandle.$$('td, [role="gridcell"], .cell');
-    const statusCell = targetCells[statusColIdx!];
+    const { statusColIdx, currentRemoteStatus } = lookupRes;
+    const rowIndex = lookupRes.rowIndex ?? 0;
+    const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
+    const rowLocator = page.locator(tableSelector).nth(rowIndex);
+    const statusCellLocator = rowLocator.locator('td, [role="gridcell"], .cell').nth(statusColIdx!);
 
-    if (!statusCell) {
+    if (page.isClosed()) {
       return {
         success: false,
         username,
-        errorCode: 'REMOTE_STATUS_CONTROL_NOT_FOUND',
-        errorMessage: `Status column cell for user '${username}' not found in table.`,
+        errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+        errorMessage: 'Browser page was closed before status mutation could be executed.',
       };
     }
 
-    const initialStatus = currentRemoteStatus || (await this.evaluateCellStatus(statusCell));
+    const initialStatus = currentRemoteStatus || 'ACTIVE';
 
     if (initialStatus === targetStatus) {
       return {
@@ -2885,18 +2989,20 @@ export class UserManagementExecutor {
     }
 
     // Verify control does NOT target Action column or Delete/Edit/View
-    const isUnsafeAction = await statusCell.evaluate((el: HTMLElement) => {
-      const html = el.innerHTML.toLowerCase();
-      return (
-        html.includes('fa-trash') ||
-        html.includes('glyphicon-trash') ||
-        html.includes('title="delete') ||
-        html.includes('class="delete') ||
-        html.includes('fa-pencil') ||
-        html.includes('title="edit') ||
-        html.includes('action-delete')
-      );
-    });
+    const isUnsafeAction = await statusCellLocator
+      .evaluate((el: HTMLElement) => {
+        const html = el.innerHTML.toLowerCase();
+        return (
+          html.includes('fa-trash') ||
+          html.includes('glyphicon-trash') ||
+          html.includes('title="delete') ||
+          html.includes('class="delete') ||
+          html.includes('fa-pencil') ||
+          html.includes('title="edit') ||
+          html.includes('action-delete')
+        );
+      })
+      .catch(() => false);
 
     if (isUnsafeAction) {
       return {
@@ -2908,41 +3014,63 @@ export class UserManagementExecutor {
     }
 
     // Find clickable status icon or toggle control within the status cell ONLY
-    const clickTarget = await statusCell.$(
-      'a, button, [role="button"], [ng-click], [onclick], .status-control, .status-icon, .status-toggle, i, span.badge-active, span.badge-inactive, span, svg'
-    );
-
-    if (!clickTarget) {
-      return {
-        success: false,
-        username,
-        errorCode: 'REMOTE_STATUS_CONTROL_NOT_ACTIONABLE',
-        errorMessage: `Status control in row for '${username}' is not actionable or clickable.`,
-      };
-    }
+    const clickTarget = statusCellLocator
+      .locator(
+        'a, button, [role="button"], [ng-click], [onclick], .status-control, .status-icon, .status-toggle, i, span.badge-active, span.badge-inactive, span, svg'
+      )
+      .first();
 
     // Handle client confirmation dialog
     page.once('dialog', async (dialog) => {
       await dialog.accept().catch(() => {});
     });
 
+    if (isObj && (arg1 as any).onMutationDispatched) {
+      (arg1 as any).onMutationDispatched();
+    }
+
     // Click the status icon once
     onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
-    await clickTarget.click({ timeout: 5000 }).catch(async () => {
-      await statusCell.click({ timeout: 5000 });
-    });
+    try {
+      if ((await clickTarget.count().catch(() => 0)) > 0) {
+        await clickTarget.click({ timeout: 5000 }).catch(async () => {
+          await statusCellLocator.click({ timeout: 5000 });
+        });
+      } else {
+        await statusCellLocator.click({ timeout: 5000 });
+      }
+    } catch (clickErr: any) {
+      if (page.isClosed()) {
+        return {
+          success: false,
+          username,
+          errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
+          errorMessage: 'Browser page was closed during or immediately after clicking status toggle.',
+        };
+      }
+      throw clickErr;
+    }
 
     await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(1000);
 
     // 4. Re-read and verify that the icon changed
     onProgress?.(`Verifying remote status change…`);
-    const verifyLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId });
-    if (!verifyLookup.success || !verifyLookup.rowHandle) {
+    if (page.isClosed()) {
+      return {
+        success: false,
+        username,
+        errorCode: 'REMOTE_OUTCOME_UNKNOWN',
+        errorMessage: 'Browser closed during post-mutation status verification.',
+      };
+    }
+
+    const verifyLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
+    if (!verifyLookup.success || !verifyLookup.rowLocator) {
       // Reload and retry verification
       await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-      const retryLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId });
-      if (!retryLookup.success || !retryLookup.rowHandle) {
+      const retryLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
+      if (!retryLookup.success || !retryLookup.rowLocator) {
         return {
           success: false,
           username,
@@ -3096,27 +3224,65 @@ export class UserManagementExecutor {
 
     // 6. Locate and trigger Password Reset control
     onProgress?.(`Resetting password for '${username}' in Simplex client…`);
-    const row = lookupRes.rowHandle;
-    const resetBtn = await row.$(
-      'button.btn-reset-password, a.btn-reset-password, [data-testid="btn-reset-password"], a[title*="Reset" i], button[title*="Reset" i], a:has-text("Reset"), button:has-text("Reset"), a[onclick*="reset" i], button[onclick*="reset" i]'
-    );
+    const rowIndex = lookupRes.rowIndex ?? 0;
+    const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
+    const rowLocator = page.locator(tableSelector).nth(rowIndex);
 
-    if (resetBtn) {
-      await resetBtn.click({ timeout: 5000 }).catch(async () => {
-        await resetBtn.dispatchEvent('click');
-      });
+    if (page.isClosed()) {
+      page.off('dialog', dialogHandler);
+      return {
+        success: false,
+        username,
+        errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+        errorMessage: 'Browser was closed before password reset could be executed.',
+      };
+    }
+
+    const resetBtn = rowLocator
+      .locator(
+        'button.btn-reset-password, a.btn-reset-password, [data-testid="btn-reset-password"], a[title*="Reset" i], button[title*="Reset" i], a:has-text("Reset"), button:has-text("Reset"), a[onclick*="reset" i], button[onclick*="reset" i]'
+      )
+      .first();
+
+    const hasResetBtn = (await resetBtn.count().catch(() => 0)) > 0 && (await resetBtn.isVisible().catch(() => false));
+
+    if (hasResetBtn) {
+      if (isObj && (arg1 as any).onMutationDispatched) {
+        (arg1 as any).onMutationDispatched();
+      }
+      try {
+        await resetBtn.click({ timeout: 5000 }).catch(async () => {
+          await resetBtn.dispatchEvent('click');
+        });
+      } catch (clickErr: any) {
+        if (page.isClosed()) {
+          page.off('dialog', dialogHandler);
+          return {
+            success: false,
+            username,
+            errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
+            errorMessage: 'Browser closed during password reset execution.',
+          };
+        }
+        throw clickErr;
+      }
     } else {
       // Check for Simplex Edit User screen password reset link
-      const editLink = await row.$(
-        'a[href*="editUsers"], a[href*="editUser"], a[title*="Edit" i], .btn-edit, a:has-text("Edit"), button:has-text("Edit")'
-      );
-      if (editLink) {
-        const editHref = await editLink.getAttribute('href');
+      const editLink = rowLocator
+        .locator(
+          'a[href*="editUsers"], a[href*="editUser"], a[title*="Edit" i], .btn-edit, a:has-text("Edit"), button:has-text("Edit")'
+        )
+        .first();
+
+      const hasEditLink = (await editLink.count().catch(() => 0)) > 0 && (await editLink.isVisible().catch(() => false));
+
+      if (hasEditLink) {
+        const editHref = await editLink.getAttribute('href').catch(() => null);
         if (editHref && !editHref.startsWith('javascript:') && editHref !== '#') {
           await page.goto(editHref.startsWith('http') ? editHref : new URL(editHref, usersListUrl).toString(), {
             waitUntil: 'domcontentloaded',
             timeout: 10000,
-          });
+          }).catch(() => {});
         } else {
           await editLink.click({ timeout: 5000 }).catch(() => {});
           await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
@@ -3129,6 +3295,9 @@ export class UserManagementExecutor {
           .first();
 
         if (await editResetBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+          if (isObj && (arg1 as any).onMutationDispatched) {
+            (arg1 as any).onMutationDispatched();
+          }
           await editResetBtn.click({ timeout: 5000 });
         } else {
           page.off('dialog', dialogHandler);

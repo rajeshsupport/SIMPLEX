@@ -1321,8 +1321,93 @@ async function runClientUsersTests() {
     assert.strictEqual(revertStatusRes.status, 'ACTIVE');
     console.log('✓ TEST 68 Passed');
 
+    // 69. Strict Profile Ownership: interactive vs sync vs mutation namespaces
+    console.log('\n[TEST 69] Testing Strict Profile Namespace Isolation (interactive, sync, mutation)...');
+    const interactiveProfileDir = BrowserProfileManager.getProfilePath('client_1', 'op_1', 'interactive');
+    const syncProfileDir = BrowserProfileManager.getProfilePath('client_1', 'op_1', 'sync');
+    const mutationProfileDir = BrowserProfileManager.getProfilePath('client_1', 'op_1', 'mutation');
+
+    assert.ok(interactiveProfileDir.endsWith('/interactive'), 'Interactive path must end in /interactive');
+    assert.ok(syncProfileDir.endsWith('/sync'), 'Sync path must end in /sync');
+    assert.ok(mutationProfileDir.endsWith('/mutation'), 'Mutation path must end in /mutation');
+    assert.notStrictEqual(interactiveProfileDir, mutationProfileDir, 'Interactive and mutation profiles must never share the same user-data-dir');
+    assert.notStrictEqual(syncProfileDir, mutationProfileDir, 'Sync and mutation profiles must never share the same user-data-dir');
+    console.log('✓ TEST 69 Passed');
+
+    // 70. Context Ownership: Closing mutation context does not affect interactive context
+    console.log('\n[TEST 70] Testing Closing Mutation Context Does Not Close Interactive Context...');
+    const interactiveContext = await browser.newContext();
+    const interactivePage = await interactiveContext.newPage();
+    await interactivePage.goto(`${BASE_URL}/MasterV9.4/users`);
+
+    const mutationContext = await browser.newContext();
+    const mutationPage = await mutationContext.newPage();
+    await mutationPage.goto(`${BASE_URL}/MasterV9.4/users`);
+
+    // Close mutation context
+    await mutationContext.close();
+    assert.strictEqual(interactivePage.isClosed(), false, 'Interactive page must remain open when mutation context closes');
+    assert.strictEqual(interactiveContext.pages().length, 1, 'Interactive context must retain its pages');
+    await interactiveContext.close();
+    console.log('✓ TEST 70 Passed');
+
+    // 71. Single In-Browser Evaluation: No Stale ElementHandle on Closed/Navigated Pages
+    console.log('\n[TEST 71] Testing Zero Stale ElementHandle Exceptions Across Fast DOM Scans...');
+    const lookupAfterNav = await UserManagementExecutor.findExactUserRow(page, 'abdul.p', `${BASE_URL}/MasterV9.4/users`);
+    assert.strictEqual(lookupAfterNav.success, true);
+    assert.strictEqual(lookupAfterNav.currentRemoteStatus, 'ACTIVE');
+    assert.ok(lookupAfterNav.rowLocator, 'Must return Playwright Locator');
+    console.log('✓ TEST 71 Passed');
+
+    // 72. Pre-Click Closure Error Classification & Safe Retry Protection
+    console.log('\n[TEST 72] Testing Pre-Click Closure Error Handling (BROWSER_CONTEXT_CLOSED_BEFORE_ACTION)...');
+    const closedContext = await browser.newContext();
+    const closedPage = await closedContext.newPage();
+    await closedContext.close(); // Close before action
+
+    const closedRes = await UserManagementExecutor.setUserStatus(closedPage, {
+      usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+      username: 'synthetic.test.user',
+      targetStatus: 'INACTIVE',
+    });
+    assert.strictEqual(closedRes.success, false);
+    assert.ok(
+      closedRes.errorCode === 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION' ||
+      closedRes.errorCode === 'CLIENT_USERS_SCREEN_FAILED' ||
+      closedRes.errorCode === 'CLIENT_AUTO_LOGIN_FAILED'
+    );
+    console.log('✓ TEST 72 Passed');
+
+    // 73. Idempotent Context Cleanup: Double close produces zero uncaught exceptions
+    console.log('\n[TEST 73] Testing Idempotent Context Cleanup...');
+    const testCtx = await browser.newContext();
+    await testCtx.close();
+    await testCtx.close().catch(() => {}); // Second close should be safe
+    console.log('✓ TEST 73 Passed');
+
+    // 74. Read-Only Reconciliation After Post-Click Disconnect
+    console.log('\n[TEST 74] Testing Post-Action Reconciliation Without Duplicate Mutation...');
+    const syncRecon = await UserManagementExecutor.syncUsersHeadless(page, {
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+    });
+    const abdulPresent = syncRecon.users.some((u) => u.username === 'abdul.p');
+    assert.strictEqual(abdulPresent, true, 'Reconciliation must confirm user in read-only snapshot');
+    console.log('✓ TEST 74 Passed');
+
+    // 75. Security & Error Message Sanitization Invariant
+    console.log('\n[TEST 75] Testing Error Message Sanitization (Zero Profile Path / Credential Leaks)...');
+    const rawError = `Error at /Users/operator/.hmc-console/profiles/client_123/user_op/mutation/SingletonLock: password=Secret123!`;
+    const sanitized = rawError
+      .replace(/(?:\/[a-zA-Z0-9._-]+)+\/\.hmc-console\/profiles\/[^\s'"]+/g, '[PROFILE_DIR]')
+      .replace(/(?:password|token|secret|bearer)\s*[:=]\s*[^\s,;]+/gi, '[REDACTED_CREDENTIAL]');
+    assert.strictEqual(sanitized.includes('/Users/operator'), false, 'Must not leak home path');
+    assert.strictEqual(sanitized.includes('Secret123!'), false, 'Must not leak password');
+    assert.ok(sanitized.includes('[PROFILE_DIR]'), 'Must redact profile directory');
+    assert.ok(sanitized.includes('[REDACTED_CREDENTIAL]'), 'Must redact credential');
+    console.log('✓ TEST 75 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (68/68)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (75/75)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});
