@@ -622,8 +622,52 @@ export class UserManagementExecutor {
 
     const metadata = await page.evaluate(
       ({ clientId, applicationVersion, addUsersUrl }) => {
-        const getOptions = (selectSelector: string, dependency?: string) => {
-          const selectEl = document.querySelector(selectSelector) as HTMLSelectElement | null;
+        const getOptions = (selectSelector: string, dependency?: string, labelPattern?: string) => {
+          let selectEl = document.querySelector(selectSelector) as HTMLSelectElement | null;
+          if (!selectEl && labelPattern) {
+            const rx = new RegExp(labelPattern, 'i');
+            const allLabels = Array.from(document.querySelectorAll('label, .control-label, .form-label, span.label, th, td, legend'));
+            for (const lbl of allLabels) {
+              const text = (lbl.textContent || '').replace(/\s+/g, ' ').trim();
+              if (rx.test(text)) {
+                const forAttr = lbl.getAttribute('for') || lbl.getAttribute('htmlfor');
+                if (forAttr) {
+                  const target = document.getElementById(forAttr);
+                  if (target && target.tagName.toLowerCase() === 'select') {
+                    selectEl = target as HTMLSelectElement;
+                    break;
+                  }
+                }
+                const nested = lbl.querySelector('select') as HTMLSelectElement | null;
+                if (nested) {
+                  selectEl = nested;
+                  break;
+                }
+                let next = lbl.nextElementSibling as HTMLElement | null;
+                while (next) {
+                  if (next.tagName.toLowerCase() === 'select') {
+                    selectEl = next as HTMLSelectElement;
+                    break;
+                  }
+                  const sub = next.querySelector('select') as HTMLSelectElement | null;
+                  if (sub) {
+                    selectEl = sub;
+                    break;
+                  }
+                  next = next.nextElementSibling as HTMLElement | null;
+                }
+                if (selectEl) break;
+                const container = lbl.closest('.field, .form-group, .form-item, tr, td, .col, .col-md-*, .form-row, div');
+                if (container) {
+                  const found = container.querySelector('select') as HTMLSelectElement | null;
+                  if (found) {
+                    selectEl = found;
+                    break;
+                  }
+                }
+              }
+            }
+          }
           if (!selectEl) return [];
           const opts = Array.from(selectEl.options);
           return opts
@@ -638,13 +682,19 @@ export class UserManagementExecutor {
         };
 
         const natOptions = getOptions(
-          '#nationality, select[name="nationality"], [data-testid="select-nationality"], select[name*="nation" i]'
+          '#nationality, select[name="nationality"], [data-testid="select-nationality"], select[name*="nation" i]',
+          undefined,
+          '^nationality'
         );
         const roleOptions = getOptions(
-          '#role, select[name="role"], [data-testid="select-role"], select[name*="role" i]:not([name*="profile" i])'
+          '#role, select[name="role"], [data-testid="select-role"], select[name*="role" i]:not([name*="profile" i])',
+          undefined,
+          '^role'
         );
         const profRoleOptions = getOptions(
-          '#profileRole, select[name="profileRole"], [data-testid="select-profilerole"], select[name*="profile" i]'
+          '#profileRole, select[name="profileRole"], [data-testid="select-profilerole"], select[name*="profile" i]',
+          undefined,
+          '^profile\\s*role'
         );
 
         return {

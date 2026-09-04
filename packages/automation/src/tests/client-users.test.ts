@@ -547,10 +547,24 @@ async function runClientUsersTests() {
     assert.ok(missingFieldRes.errorMessage?.includes("Required field 'username' not found"), 'Error message must cite missing field');
     assert.ok(missingFieldRes.errorMessage?.includes('Add - User Details') || missingFieldRes.errorMessage?.includes('addUsers-missing-field'), 'Error message must cite heading or URL');
     assert.ok(missingFieldRes.errorMessage?.includes('Department') || missingFieldRes.errorMessage?.includes('Employee Code'), 'Error message must cite detected labels');
-    console.log('✓ TEST 31 Passed');
+    // 32. Read-only live form-option synchronization (inspectCreateFormMetadata)
+    console.log('\n[TEST 32] Testing Read-Only Live Form-Option Synchronization...');
+    const liveMeta = await UserManagementExecutor.inspectCreateFormMetadata(page, {
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      clientId: 'client-123',
+      applicationVersion: 'v9.4',
+    });
+    assert.strictEqual(liveMeta.clientId, 'client-123');
+    assert.strictEqual(liveMeta.applicationVersion, 'v9.4');
+    assert.ok(liveMeta.nationalities.length >= 5, 'Should extract nationalities from live form');
+    assert.ok(liveMeta.roles.length >= 4, 'Should extract roles from live form');
+    assert.ok(liveMeta.profileRoles.length >= 3, 'Should extract profile roles from live form');
+    const saudiOpt = liveMeta.nationalities.find((n) => n.label === 'Saudi Arabia');
+    assert.ok(saudiOpt, 'Should find Saudi Arabia option in synchronized metadata');
+    console.log('✓ TEST 32 Passed');
 
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (31/31)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (32/32)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});
