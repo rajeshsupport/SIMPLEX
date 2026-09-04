@@ -1,6 +1,6 @@
 import { BrowserContext, Page } from 'playwright';
 import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
-import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute } from '@hmc/shared';
+import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, normalizeClientBaseUrl } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
 function buildAbsoluteUrl(baseUrl: string, route?: string, fallbackRoute: string = '/'): string {
@@ -88,7 +88,21 @@ export class AutomationWorker {
     onProgress?: (msg: string) => void
   ): Promise<void> {
     const startTime = Date.now();
+    const clientName = task.payload?.clientName || task.payload?.clientCode || 'Simplex Client';
+    const version = task.payload?.applicationVersion || task.workflowVersion || 'v9.4';
+    let resolvedRoleUrl = 'UNKNOWN';
+    try {
+      resolvedRoleUrl = resolveClientRoleUrl({
+        baseUrl: task.clientBaseUrl,
+        applicationPath: task.clientAppPath || task.payload?.applicationPath,
+        userRoleRoute: task.payload?.userRoleRoute,
+      });
+    } catch (urlErr: any) {
+      resolvedRoleUrl = `NOT_RESOLVED (${urlErr.message})`;
+    }
+
     onProgress?.(`Starting task [${task.taskType}] for client [${task.clientId}] (namespace: ${namespace})...`);
+    onProgress?.(`[AUTOMATION TELEMETRY] Client ID: ${task.clientId} | Client Name: ${clientName} | Configured Base URL: ${task.clientBaseUrl} | Resolved addUserRole URL: ${resolvedRoleUrl} | Version: ${version} | Status: INITIALIZING`);
 
     // =========================================================================
     // 1. DEDICATED HEADLESS BACKGROUND SYNC HANDLER (namespace: 'sync')

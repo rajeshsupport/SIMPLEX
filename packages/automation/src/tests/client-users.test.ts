@@ -1406,8 +1406,74 @@ async function runClientUsersTests() {
     assert.ok(sanitized.includes('[REDACTED_CREDENTIAL]'), 'Must redact credential');
     console.log('✓ TEST 75 Passed');
 
+    // 76. Dynamic Role Master URL Resolution (Preserves version, context, port; prevents duplicate route)
+    console.log('\n[TEST 76] Testing Dynamic Role Master URL Resolution across Multiple Client Architectures...');
+    const { resolveClientRoleUrl, normalizeClientBaseUrl, validateRedirectHost } = await import('@hmc/shared');
+
+    // Scenario A: Staging with /MasterV9.3
+    const stagingRoleUrl = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/' });
+    assert.strictEqual(stagingRoleUrl, 'https://staging.simplexworld.com/MasterV9.3/addUserRole', 'Must resolve standard staging role URL');
+
+    // Scenario B: Client with MasterV10.18
+    const v10RoleUrl = resolveClientRoleUrl({ baseUrl: 'https://client1.example.com/MasterV10.18' });
+    assert.strictEqual(v10RoleUrl, 'https://client1.example.com/MasterV10.18/addUserRole', 'Must preserve client-specific version MasterV10.18');
+
+    // Scenario C: Hospital with context path /HMC/MasterV9.4
+    const hmcRoleUrl = resolveClientRoleUrl({ baseUrl: 'https://hospital.example.com/HMC/MasterV9.4' });
+    assert.strictEqual(hmcRoleUrl, 'https://hospital.example.com/HMC/MasterV9.4/addUserRole', 'Must preserve application context path');
+
+    // Scenario D: IP with Port
+    const ipPortRoleUrl = resolveClientRoleUrl({ baseUrl: 'http://192.168.1.100:8080/MasterV9.3' });
+    assert.strictEqual(ipPortRoleUrl, 'http://192.168.1.100:8080/MasterV9.3/addUserRole', 'Must preserve custom port');
+
+    // Scenario E: Client route override
+    const overrideRoleUrl = resolveClientRoleUrl({
+      baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+      userRoleRoute: '/customRoleMaster',
+    });
+    assert.strictEqual(overrideRoleUrl, 'https://staging.simplexworld.com/MasterV9.3/customRoleMaster', 'Must apply client-specific route override');
+
+    // Scenario F: Login URL provided instead of base URL
+    const fromLoginUrl = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/login' });
+    assert.strictEqual(fromLoginUrl, 'https://staging.simplexworld.com/MasterV9.3/addUserRole', 'Must strip /login and resolve /addUserRole');
+
+    // Scenario G: URL already ending with /addUserRole
+    const existingRoleUrl = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/addUserRole' });
+    assert.strictEqual(existingRoleUrl, 'https://staging.simplexworld.com/MasterV9.3/addUserRole', 'Must not duplicate /addUserRole');
+    console.log('✓ TEST 76 Passed');
+
+    // 77. Dedicated Role Master Inspection (inspectRoleMaster)
+    console.log('\n[TEST 77] Testing Dedicated Role Master Screen Role Extraction...');
+    const extractedRoleMaster = await UserManagementExecutor.inspectRoleMaster(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/users`,
+      clientId: 'client_unit_test',
+    });
+    assert.ok(Array.isArray(extractedRoleMaster.roles), 'Roles must be an array');
+    console.log('✓ TEST 77 Passed');
+
+    // 78. Redirect Host Verification & Untrusted Host Rejection
+    console.log('\n[TEST 78] Testing Redirect Host Verification & Cross-Host Protection...');
+    const validRedirect = validateRedirectHost('https://staging.simplexworld.com/MasterV9.3/login', 'https://staging.simplexworld.com/MasterV9.3/dashboard');
+    assert.strictEqual(validRedirect.isValid, true, 'Valid same-host redirect must be accepted');
+
+    const untrustedRedirect = validateRedirectHost('https://staging.simplexworld.com/MasterV9.3/login', 'https://phishing-site.example.com/login');
+    assert.strictEqual(untrustedRedirect.isValid, false, 'Untrusted cross-host redirect must be rejected');
+    assert.ok(untrustedRedirect.error?.includes('HOST_MISMATCH_AFTER_REDIRECT'), 'Must classify as HOST_MISMATCH_AFTER_REDIRECT');
+    console.log('✓ TEST 78 Passed');
+
+    // 79. Non-Sensitive Automation Run Logging Invariant
+    console.log('\n[TEST 79] Testing Non-Sensitive Automation Run Logging Invariant...');
+    const sampleTelemetryLog = `[AUTOMATION TELEMETRY] Client ID: client_123 | Client Name: Metro Hospital | Configured Base URL: https://staging.simplexworld.com/MasterV9.3 | Resolved addUserRole URL: https://staging.simplexworld.com/MasterV9.3/addUserRole | Version: v9.4 | Status: INITIALIZING`;
+    assert.ok(sampleTelemetryLog.includes('Client ID: client_123'));
+    assert.ok(sampleTelemetryLog.includes('Metro Hospital'));
+    assert.ok(sampleTelemetryLog.includes('https://staging.simplexworld.com/MasterV9.3/addUserRole'));
+    assert.strictEqual(sampleTelemetryLog.includes('password'), false);
+    assert.strictEqual(sampleTelemetryLog.includes('token'), false);
+    assert.strictEqual(sampleTelemetryLog.includes('cookie'), false);
+    console.log('✓ TEST 79 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (75/75)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (79/79)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});

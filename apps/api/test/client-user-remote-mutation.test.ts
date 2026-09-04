@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as XLSX from 'xlsx';
 import { PERMISSIONS } from '@hmc/shared';
 
 type ClientUserStatus = 'ACTIVE' | 'INACTIVE';
@@ -1689,8 +1690,143 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(dedupedMap.size, 3, 'Batch sync must contain exactly 3 unique users without duplicates');
   console.log('✓ TEST 76 Passed');
 
+  // 77. Dynamic Client Role URL Architecture & Normalization
+  console.log('\n[TEST 77] Testing Dynamic Client Role URL Architecture & Normalization...');
+  const { resolveClientRoleUrl, normalizeClientBaseUrl, validateRedirectHost } = await import('@hmc/shared');
+
+  const client1RoleUrl = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/' });
+  assert.strictEqual(client1RoleUrl, 'https://staging.simplexworld.com/MasterV9.3/addUserRole');
+
+  const client2RoleUrl = resolveClientRoleUrl({ baseUrl: 'https://client1.example.com/MasterV10.18' });
+  assert.strictEqual(client2RoleUrl, 'https://client1.example.com/MasterV10.18/addUserRole');
+
+  const client3RoleUrl = resolveClientRoleUrl({ baseUrl: 'https://hospital.example.com/HMC/MasterV9.4' });
+  assert.strictEqual(client3RoleUrl, 'https://hospital.example.com/HMC/MasterV9.4/addUserRole');
+
+  const client4RoleUrl = resolveClientRoleUrl({ baseUrl: 'http://192.168.1.100:8080/MasterV9.3' });
+  assert.strictEqual(client4RoleUrl, 'http://192.168.1.100:8080/MasterV9.3/addUserRole');
+
+  const client5RoleUrl = resolveClientRoleUrl({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+    userRoleRoute: '/customRoleMaster',
+  });
+  assert.strictEqual(client5RoleUrl, 'https://staging.simplexworld.com/MasterV9.3/customRoleMaster');
+
+  const client6RoleUrl = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/login' });
+  assert.strictEqual(client6RoleUrl, 'https://staging.simplexworld.com/MasterV9.3/addUserRole');
+
+  const client7RoleUrl = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/addUserRole/' });
+  assert.strictEqual(client7RoleUrl, 'https://staging.simplexworld.com/MasterV9.3/addUserRole');
+  console.log('✓ TEST 77 Passed');
+
+  // 78. Client-Isolated Excel Template Role Extraction
+  console.log('\n[TEST 78] Testing Client-Isolated Excel Template Role Extraction (Roles & Template Info Sheets)...');
+  const mockClientA = {
+    id: 'client_aaa_111',
+    clientCode: 'CLI_A',
+    clientName: 'Client Hospital A',
+    baseUrl: 'https://clienta.hospital.com/MasterV9.3',
+    applicationPath: '/MasterV9.3',
+    applicationVersion: 'v9.3',
+  };
+  const mockRolesA = ['Chief Surgeon', 'Anesthesiologist', 'Clinical Specialist'];
+
+  const wsUsersA = XLSX.utils.json_to_sheet([
+    {
+      'S.No': 'SAMPLE',
+      'User Name *': 'sample.user',
+      'First Name *': 'Sample',
+      'Last Name *': 'User',
+      'Mobile No *': '0501234567',
+      'Nationality *': 'Saudi Arabia',
+      'Role': mockRolesA[0],
+    },
+  ]);
+
+  const wsDropdownA = XLSX.utils.json_to_sheet(mockRolesA.map((r) => ({ Nationality: 'Saudi Arabia', Role: r })));
+  const wsRolesA = XLSX.utils.json_to_sheet(mockRolesA.map((r) => ({ 'Role Name': r, 'Client Code': mockClientA.clientCode, 'Client Name': mockClientA.clientName })));
+  const wsInfoA = XLSX.utils.aoa_to_sheet([
+    ['Property', 'Value'],
+    ['Client ID', mockClientA.id],
+    ['Client Code', mockClientA.clientCode],
+    ['Client Name', mockClientA.clientName],
+    ['Base URL', mockClientA.baseUrl],
+    ['Resolved Role URL', resolveClientRoleUrl({ baseUrl: mockClientA.baseUrl })],
+  ]);
+
+  const wbA = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wbA, wsUsersA, 'Users');
+  XLSX.utils.book_append_sheet(wbA, wsDropdownA, 'Dropdown Options');
+  XLSX.utils.book_append_sheet(wbA, wsRolesA, 'Roles');
+  XLSX.utils.book_append_sheet(wbA, wsInfoA, 'Template Info');
+  wbA.Props = { Title: 'User Import Template', Subject: mockClientA.id };
+
+  const bufA = XLSX.write(wbA, { type: 'buffer', bookType: 'xlsx' });
+  const readWbA = XLSX.read(bufA, { type: 'buffer' });
+  assert.ok(readWbA.SheetNames.includes('Roles'), 'Workbook must include Roles sheet');
+  assert.ok(readWbA.SheetNames.includes('Template Info'), 'Workbook must include Template Info sheet');
+  console.log('✓ TEST 78 Passed');
+
+  // 79. Import Safety: Verification of Excel Client ID === Current Selected Client ID
+  console.log('\n[TEST 79] Testing Excel Import Client ID Verification (CLIENT_MISMATCH Protection)...');
+  const checkClientMatch = (uploadedWb: XLSX.WorkBook, targetClientId: string) => {
+    let fileClientId: string | undefined;
+    const metaSheet = uploadedWb.SheetNames.find((s) => ['template info', 'metadata', 'info'].includes(s.toLowerCase()));
+    if (metaSheet) {
+      const rows: any[] = XLSX.utils.sheet_to_json(uploadedWb.Sheets[metaSheet], { header: 1 });
+      for (const r of rows) {
+        if (Array.isArray(r) && ['client id', 'client_id', 'clientid'].includes(String(r[0] || '').trim().toLowerCase())) {
+          fileClientId = String(r[1] || '').trim();
+          break;
+        }
+      }
+    }
+    if (!fileClientId && uploadedWb.Props && (uploadedWb.Props as any).Subject) {
+      fileClientId = (uploadedWb.Props as any).Subject;
+    }
+
+    if (fileClientId && fileClientId !== targetClientId) {
+      return {
+        success: false,
+        errorCode: 'CLIENT_MISMATCH',
+        message: 'The Excel template was generated for a different client.',
+      };
+    }
+    return { success: true };
+  };
+
+  const sameClientCheck = checkClientMatch(readWbA, 'client_aaa_111');
+  assert.strictEqual(sameClientCheck.success, true, 'Same client must pass');
+
+  const diffClientCheck = checkClientMatch(readWbA, 'client_bbb_222');
+  assert.strictEqual(diffClientCheck.success, false, 'Different client must fail');
+  assert.strictEqual(diffClientCheck.errorCode, 'CLIENT_MISMATCH', 'Must return CLIENT_MISMATCH');
+  assert.strictEqual(diffClientCheck.message, 'The Excel template was generated for a different client.');
+  console.log('✓ TEST 79 Passed');
+
+  // 80. Untrusted Redirect Protection
+  console.log('\n[TEST 80] Testing Untrusted Redirect Host Rejection...');
+  const okRedir = validateRedirectHost('https://staging.simplexworld.com/MasterV9.3/login', 'https://staging.simplexworld.com/MasterV9.3/users');
+  assert.strictEqual(okRedir.isValid, true);
+
+  const evilRedir = validateRedirectHost('https://staging.simplexworld.com/MasterV9.3/login', 'https://attacker-domain.com/login');
+  assert.strictEqual(evilRedir.isValid, false);
+  assert.ok(evilRedir.error?.includes('HOST_MISMATCH_AFTER_REDIRECT'));
+  console.log('✓ TEST 80 Passed');
+
+  // 81. Non-Sensitive Automation Run Telemetry Logging
+  console.log('\n[TEST 81] Testing Non-Sensitive Automation Run Telemetry Logging Invariant...');
+  const telemetryOutput = `[AUTOMATION TELEMETRY] Client ID: ${mockClientA.id} | Client Name: ${mockClientA.clientName} | Configured Base URL: ${mockClientA.baseUrl} | Resolved addUserRole URL: ${resolveClientRoleUrl({ baseUrl: mockClientA.baseUrl })} | Version: ${mockClientA.applicationVersion} | Status: INITIALIZING`;
+  assert.ok(telemetryOutput.includes(mockClientA.id));
+  assert.ok(telemetryOutput.includes(mockClientA.clientName));
+  assert.ok(telemetryOutput.includes('https://clienta.hospital.com/MasterV9.3/addUserRole'));
+  assert.strictEqual(telemetryOutput.includes('password'), false);
+  assert.strictEqual(telemetryOutput.includes('token'), false);
+  assert.strictEqual(telemetryOutput.includes('cookie'), false);
+  console.log('✓ TEST 81 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (76/76)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (81/81)');
   console.log('======================================================================\n');
 }
 

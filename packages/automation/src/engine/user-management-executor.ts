@@ -1,5 +1,5 @@
 import { Page, Locator } from 'playwright';
-import { ClientUser, CreateClientUserDto, UpdateClientUserDto, ClientUserStatus, ClientCreateFormMetadata } from '@hmc/shared';
+import { ClientUser, CreateClientUserDto, UpdateClientUserDto, ClientUserStatus, ClientCreateFormMetadata, validateRedirectHost } from '@hmc/shared';
 import { SelectorResolver } from './selector-resolver';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -627,6 +627,88 @@ export class UserManagementExecutor {
       roles: ['Physician', 'Nurse', 'Admin', 'Pharmacist', 'Lab Technician', 'Operator', 'Super User'],
       profileRoles: ['Clinical Specialist', 'General Practitioner', 'Head Nurse', 'Chief Pharmacist', 'System Administrator', 'Billing Specialist'],
     };
+  }
+
+  /**
+   * The client host, application context and version are client-specific.
+   * Only the addUserRole route is common by default.
+   * Never hardcode the staging host or MasterV9.3.
+   *
+   * Inspects the live Role Master screen (/addUserRole) to extract available client roles.
+   */
+  public static async inspectRoleMaster(
+    page: Page,
+    options: {
+      roleUrl: string;
+      clientId: string;
+      applicationVersion?: string;
+      loginUrl?: string;
+      credentials?: { username: string; password?: string };
+    }
+  ): Promise<{ roles: string[]; roleDetails?: Array<{ roleName: string; description?: string }> }> {
+    const { roleUrl, clientId, loginUrl, credentials } = options;
+    if (page.isClosed()) {
+      return { roles: [] };
+    }
+
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: roleUrl, loginUrl, credentials });
+    if (!authRes.authenticated) {
+      return { roles: [] };
+    }
+
+    if (page.isClosed()) {
+      return { roles: [] };
+    }
+
+    if (page.url() !== roleUrl) {
+      await page.goto(roleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    }
+
+    if (page.isClosed()) {
+      return { roles: [] };
+    }
+
+    const extractedRoles = await page.evaluate(() => {
+      const roleSet = new Set<string>();
+      const details: Array<{ roleName: string; description?: string }> = [];
+
+      // 1. Check tables (e.g. role list table)
+      const rows = Array.from(document.querySelectorAll('table tbody tr, .role-item, .table tr'));
+      for (const r of rows) {
+        const cells = Array.from(r.querySelectorAll('td, th')).map((c) => (c.textContent || '').trim());
+        if (cells.length > 0) {
+          for (const cell of cells) {
+            if (cell && !cell.match(/^(s\.?no|#|action|status|actions|edit|delete|view)$/i) && cell.length > 1 && cell.length < 50) {
+              if (!roleSet.has(cell)) {
+                roleSet.add(cell);
+                details.push({ roleName: cell, description: cells[1] && cells[1] !== cell ? cells[1] : undefined });
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      // 2. Check dropdown / select elements if on a form
+      const selects = Array.from(document.querySelectorAll('select[name*="role" i], #role, #userRole, select'));
+      for (const sel of selects) {
+        const opts = Array.from((sel as HTMLSelectElement).options);
+        for (const opt of opts) {
+          const val = (opt.text || opt.value || '').trim();
+          if (val && !val.toLowerCase().includes('select') && !roleSet.has(val)) {
+            roleSet.add(val);
+            details.push({ roleName: val });
+          }
+        }
+      }
+
+      return {
+        roles: Array.from(roleSet),
+        roleDetails: details,
+      };
+    }).catch(() => ({ roles: [], roleDetails: [] }));
+
+    return extractedRoles;
   }
 
   /**
@@ -2291,6 +2373,17 @@ export class UserManagementExecutor {
           authenticated: false,
           errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
           errorMessage: 'Client auto-login failed: still on login page after credentials submission.',
+        };
+      }
+
+      // Check for untrusted redirects to an external or mismatched host
+      const postLoginUrl = page.url();
+      const redirectCheck = validateRedirectHost(targetLoginUrl, postLoginUrl);
+      if (!redirectCheck.isValid) {
+        return {
+          authenticated: false,
+          errorCode: 'HOST_MISMATCH_AFTER_REDIRECT',
+          errorMessage: redirectCheck.error || 'Untrusted host redirect detected after login.',
         };
       }
 

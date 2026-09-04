@@ -15,6 +15,7 @@ export const CreateClientSchema = z.object({
   loginRoute: z.string().default('/login'),
   usersRoute: z.string().default('/hmc/users'),
   servicesRoute: z.string().default('/hmc/services'),
+  userRoleRoute: z.string().default('/addUserRole').optional(),
   status: z.enum(['ACTIVE', 'INACTIVE', 'ARCHIVED']).default('ACTIVE'),
   allowedDesktopAgents: z.array(z.string()).optional().default([]),
 });

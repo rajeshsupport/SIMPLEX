@@ -46,6 +46,9 @@ export class Client {
   @Column({ type: 'nvarchar', length: 255, default: '/hmc/services' })
   servicesRoute!: string;
 
+  @Column({ type: 'nvarchar', length: 255, default: '/addUserRole', nullable: true })
+  userRoleRoute?: string | null;
+
   @Column({ type: 'nvarchar', length: 50, default: 'ACTIVE' })
   status!: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
 

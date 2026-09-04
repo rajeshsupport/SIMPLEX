@@ -86,6 +86,7 @@ export class ClientsService {
       loginRoute: dto.loginRoute || '/login',
       usersRoute: dto.usersRoute || '/hmc/users',
       servicesRoute: dto.servicesRoute || '/hmc/services',
+      userRoleRoute: dto.userRoleRoute || '/addUserRole',
       status: dto.status || 'ACTIVE',
       connectionStatus: 'UNKNOWN',
       allowedDesktopAgentsJson: dto.allowedDesktopAgents ? JSON.stringify(dto.allowedDesktopAgents) : null,
@@ -117,6 +118,7 @@ export class ClientsService {
     if (dto.loginRoute) client.loginRoute = dto.loginRoute;
     if (dto.usersRoute) client.usersRoute = dto.usersRoute;
     if (dto.servicesRoute) client.servicesRoute = dto.servicesRoute;
+    if (dto.userRoleRoute !== undefined) client.userRoleRoute = dto.userRoleRoute;
     if (dto.status) client.status = dto.status;
     if (dto.allowedDesktopAgents) client.allowedDesktopAgentsJson = JSON.stringify(dto.allowedDesktopAgents);
 
@@ -243,6 +245,7 @@ export class ClientsService {
       loginRoute: client.loginRoute,
       usersRoute: client.usersRoute,
       servicesRoute: client.servicesRoute,
+      userRoleRoute: client.userRoleRoute || '/addUserRole',
       status: client.status,
       connectionStatus: client.connectionStatus,
       allowedDesktopAgents: client.allowedDesktopAgentsJson ? JSON.parse(client.allowedDesktopAgentsJson) : [],

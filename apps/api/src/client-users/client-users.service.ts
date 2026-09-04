@@ -31,6 +31,8 @@ import {
   ClientUserStatus,
   JwtPayload,
   resolveClientRoute,
+  resolveClientRoleUrl,
+  normalizeClientBaseUrl,
   ClientCreateFormMetadata,
   UserImportAction,
   UserImportClassification,
@@ -94,6 +96,7 @@ export class ClientUsersService implements OnModuleInit {
     resolvedLoginUrl: string;
     resolvedUsersUrl: string;
     resolvedAddUsersUrl: string;
+    resolvedRoleUrl: string;
   } {
     let origin = client.baseUrl;
     try {
@@ -123,11 +126,18 @@ export class ClientUsersService implements OnModuleInit {
       fallbackRoute: '/addUsers',
     });
 
+    const resolvedRoleUrl = resolveClientRoleUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+      userRoleRoute: client.userRoleRoute,
+    });
+
     return {
       origin,
       resolvedLoginUrl,
       resolvedUsersUrl,
       resolvedAddUsersUrl,
+      resolvedRoleUrl,
     };
   }
 
@@ -2028,6 +2038,8 @@ export class ClientUsersService implements OnModuleInit {
     addComment('H1', "Required. Must match a valid nationality from the 'Dropdown Options' sheet.");
     addComment('I1', "Optional. Must match a valid role from the 'Dropdown Options' sheet.");
 
+    const routes = this.resolveClientUserRoutes(client);
+
     // 2. Sheet 2: Dropdown Options (Column A: Nationality, Column B: Role)
     const nationalities = Array.from(
       new Set(
@@ -2066,9 +2078,44 @@ export class ClientUsersService implements OnModuleInit {
     wsDropdown['!views'] = [{ state: 'frozen', ySplit: 1 }];
     wsDropdown['!autofilter'] = { ref: `A1:B${Math.max(2, dropdownRows.length + 1)}` };
 
+    // 3. Sheet 3: Roles (Selected client-specific roles extracted from Role Master / live options)
+    const clientRolesRows = roles.map((r) => ({
+      'Role Name': r,
+      'Client Code': client.clientCode,
+      'Client Name': client.clientName,
+    }));
+    const wsRoles = XLSX.utils.json_to_sheet(clientRolesRows.length > 0 ? clientRolesRows : [{ 'Role Name': 'Standard User', 'Client Code': client.clientCode, 'Client Name': client.clientName }], {
+      header: ['Role Name', 'Client Code', 'Client Name'],
+    });
+    wsRoles['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 30 }];
+    wsRoles['!views'] = [{ state: 'frozen', ySplit: 1 }];
+
+    // 4. Sheet 4: Template Info (Client identification metadata without credentials)
+    const templateInfoRows = [
+      ['Property', 'Value'],
+      ['Client ID', client.id],
+      ['Client Code', client.clientCode],
+      ['Client Name', client.clientName],
+      ['Base URL', client.baseUrl],
+      ['Resolved Role URL', routes.resolvedRoleUrl],
+      ['Application Version', client.applicationVersion],
+      ['Generated At', new Date().toISOString()],
+      ['Notice', 'This template is scoped to the selected client. Cross-client import is prohibited.'],
+    ];
+    const wsTemplateInfo = XLSX.utils.aoa_to_sheet(templateInfoRows);
+    wsTemplateInfo['!cols'] = [{ wch: 20 }, { wch: 60 }];
+
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
     XLSX.utils.book_append_sheet(wb, wsDropdown, 'Dropdown Options');
+    XLSX.utils.book_append_sheet(wb, wsRoles, 'Roles');
+    XLSX.utils.book_append_sheet(wb, wsTemplateInfo, 'Template Info');
+
+    wb.Props = {
+      Title: 'User Import Template',
+      Subject: client.id,
+      Company: client.clientName,
+    };
 
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     const filename = `${client.clientCode}_User_Import_Template_${Date.now()}.xlsx`;
@@ -2095,6 +2142,38 @@ export class ClientUsersService implements OnModuleInit {
       throw new BadRequestException({
         code: 'INVALID_EXCEL_FORMAT',
         message: 'Uploaded file is not a valid Excel (.xlsx) workbook.',
+      });
+    }
+
+    // Client mismatch verification
+    let fileClientId: string | undefined;
+    const metaSheetName = wb.SheetNames.find((s) => ['template info', 'metadata', 'info'].includes(s.toLowerCase()));
+    if (metaSheetName) {
+      const infoRows: any[] = XLSX.utils.sheet_to_json(wb.Sheets[metaSheetName], { header: 1 });
+      for (const row of infoRows) {
+        if (Array.isArray(row)) {
+          const key = String(row[0] || '').trim().toLowerCase();
+          const val = String(row[1] || '').trim();
+          if (['client id', 'client_id', 'clientid'].includes(key) && val) {
+            fileClientId = val;
+            break;
+          }
+        }
+      }
+    }
+    if (!fileClientId && wb.Props && (wb.Props as any).Subject) {
+      fileClientId = (wb.Props as any).Subject;
+    }
+
+    if (fileClientId && fileClientId !== clientId) {
+      throw new BadRequestException({
+        code: 'CLIENT_MISMATCH',
+        status: 'CLIENT_MISMATCH',
+        message: 'The Excel template was generated for a different client.',
+        details: {
+          fileClientId,
+          expectedClientId: clientId,
+        },
       });
     }
 
