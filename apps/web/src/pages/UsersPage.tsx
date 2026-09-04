@@ -14,6 +14,8 @@ import {
   Download,
   AlertTriangle,
   CheckCircle,
+  CheckCircle2,
+  AlertCircle,
   XCircle,
   FileSpreadsheet,
   Building2,
@@ -202,32 +204,63 @@ export const UsersPage: React.FC = () => {
   const [importing, setImporting] = useState(false);
 
   const { hasPermission, isSuperAdmin } = useAuth();
-  const [isAgentOnline, setIsAgentOnline] = useState<boolean>(true);
+  const [agentStatus, setAgentStatus] = useState<'ONLINE' | 'OFFLINE' | 'BUSY'>('OFFLINE');
+  const [isAgentOnline, setIsAgentOnline] = useState<boolean>(false);
+
+  // Status mutation progress / modal state
+  const [isMutatingStatus, setIsMutatingStatus] = useState(false);
+  const [statusMutationStage, setStatusMutationStage] = useState<string>('');
+  const [statusMutationElapsed, setStatusMutationElapsed] = useState<number>(0);
+  const [statusMutationError, setStatusMutationError] = useState<string | null>(null);
+  const [statusMutationSuccess, setStatusMutationSuccess] = useState<string | null>(null);
+  const statusMutationTimerRef = useRef<any>(null);
 
   // Clean up ephemeral credentials and intervals on unmount
   useEffect(() => {
     return () => {
       if (credentialPasswordTimerRef.current) clearInterval(credentialPasswordTimerRef.current);
+      if (statusMutationTimerRef.current) clearInterval(statusMutationTimerRef.current);
       setCredentialSuccessInfo(null);
     };
   }, []);
 
-  // Check agent status
+  // Check agent status with 3s polling
   useEffect(() => {
+    let isMounted = true;
     const checkAgent = async () => {
       try {
         const agents = await ApiClient.request<any[]>('/agents');
-        const online = (agents || []).some(
-          (a) => a.status === 'ONLINE' || a.status === 'BUSY'
-        );
-        setIsAgentOnline(online);
+        if (!isMounted) return;
+        if (!agents || agents.length === 0) {
+          setAgentStatus('OFFLINE');
+          setIsAgentOnline(false);
+          return;
+        }
+        const hasBusy = agents.some((a) => a.status === 'BUSY');
+        const hasOnline = agents.some((a) => a.status === 'ONLINE');
+        if (hasBusy) {
+          setAgentStatus('BUSY');
+          setIsAgentOnline(true);
+        } else if (hasOnline) {
+          setAgentStatus('ONLINE');
+          setIsAgentOnline(true);
+        } else {
+          setAgentStatus('OFFLINE');
+          setIsAgentOnline(false);
+        }
       } catch {
-        setIsAgentOnline(true);
+        if (isMounted) {
+          setAgentStatus('OFFLINE');
+          setIsAgentOnline(false);
+        }
       }
     };
     checkAgent();
-    const interval = setInterval(checkAgent, 10000);
-    return () => clearInterval(interval);
+    const interval = setInterval(checkAgent, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const selectedClient = clients.find((c) => c.id === selectedClientId);
@@ -729,25 +762,87 @@ export const UsersPage: React.FC = () => {
   };
 
   // Status Change (Activate/Deactivate in Simplex)
-  const [isMutatingStatus, setIsMutatingStatus] = useState(false);
   const handleStatusChange = async () => {
     if (!selectedUser || isMutatingStatus) return;
+
+    // Preflight Check: Automation Agent must be online
+    if (!isAgentOnline) {
+      setStatusMutationError('Automation Agent is offline. Start/reconnect the agent and retry.');
+      return;
+    }
+
     const nextStatus = selectedUser.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     setIsMutatingStatus(true);
+    setStatusMutationError(null);
+    setStatusMutationSuccess(null);
+    setStatusMutationStage('Preflight: Checking automation agent…');
+    setStatusMutationElapsed(0);
+
+    if (statusMutationTimerRef.current) clearInterval(statusMutationTimerRef.current);
+    statusMutationTimerRef.current = setInterval(() => {
+      setStatusMutationElapsed((prev) => prev + 1);
+    }, 1000);
+
     try {
+      setStatusMutationStage(`Submitting ${nextStatus} request to Simplex portal…`);
       await ApiClient.request(`/client-users/${selectedUser.id}/status`, {
         method: 'POST',
         body: JSON.stringify({ status: nextStatus }),
       });
-      setIsStatusModalOpen(false);
-      setActionMessage({ type: 'success', text: `✓ User '${selectedUser.username}' status updated to ${nextStatus} in ${selectedClient?.clientCode || 'Simplex'}.` });
+
+      setStatusMutationStage('Remote status verified. Synchronizing Central directory…');
+      setStatusMutationSuccess(`✓ User '${selectedUser.username}' status updated to ${nextStatus} in ${selectedClient?.clientCode || 'Simplex'}.`);
+
+      if (statusMutationTimerRef.current) {
+        clearInterval(statusMutationTimerRef.current);
+        statusMutationTimerRef.current = null;
+      }
+
       await loadUsers();
+
+      // Auto-close modal after 500ms on verified success
+      setTimeout(() => {
+        setIsStatusModalOpen(false);
+        setStatusMutationSuccess(null);
+        setStatusMutationStage('');
+        setActionMessage({
+          type: 'success',
+          text: `✓ User '${selectedUser.username}' status updated to ${nextStatus} in ${selectedClient?.clientCode || 'Simplex'}.`,
+        });
+      }, 500);
     } catch (err: any) {
-      const cleanError = (err.message || 'Status update failed').replace(/^Sync failed:\s*/i, '');
-      setActionMessage({ type: 'error', text: `Status update failed: ${cleanError}` });
+      if (statusMutationTimerRef.current) {
+        clearInterval(statusMutationTimerRef.current);
+        statusMutationTimerRef.current = null;
+      }
+      const rawCode = err.code || err.errorCode || err.response?.code;
+      const rawMsg = err.message || '';
+      if (rawCode === 'DESKTOP_AGENT_OFFLINE' || rawMsg.toLowerCase().includes('offline')) {
+        setStatusMutationError('Automation Agent is offline. Start/reconnect the agent and retry.');
+      } else {
+        const cleanError = rawMsg.replace(/^Status update failed:\s*/i, '').replace(/^Sync failed:\s*/i, '') || 'Status update failed';
+        setStatusMutationError(`Status update failed: ${cleanError}`);
+      }
     } finally {
       setIsMutatingStatus(false);
+      if (statusMutationTimerRef.current) {
+        clearInterval(statusMutationTimerRef.current);
+        statusMutationTimerRef.current = null;
+      }
     }
+  };
+
+  const handleCloseStatusModal = () => {
+    if (isMutatingStatus) return;
+    if (statusMutationTimerRef.current) {
+      clearInterval(statusMutationTimerRef.current);
+      statusMutationTimerRef.current = null;
+    }
+    setIsStatusModalOpen(false);
+    setStatusMutationError(null);
+    setStatusMutationSuccess(null);
+    setStatusMutationStage('');
+    setStatusMutationElapsed(0);
   };
 
   // Password Reset in Simplex
@@ -1141,6 +1236,24 @@ export const UsersPage: React.FC = () => {
               </div>
             </div>
 
+            <div className="text-right">
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Automation Agent</span>
+              <div className="flex items-center gap-1.5 justify-end">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    agentStatus === 'ONLINE'
+                      ? 'bg-emerald-400'
+                      : agentStatus === 'BUSY'
+                      ? 'bg-amber-400 animate-pulse'
+                      : 'bg-red-400'
+                  }`}
+                />
+                <span className="text-slate-300 font-mono text-xs font-semibold">
+                  {agentStatus}
+                </span>
+              </div>
+            </div>
+
             <button
               onClick={handleSyncUsers}
               disabled={syncing}
@@ -1452,12 +1565,17 @@ export const UsersPage: React.FC = () => {
                           {canChangeStatus && (() => {
                             const actionLabel = isActive ? 'Deactivate in Simplex' : 'Activate in Simplex';
                             const mutation = getMutationState(actionLabel);
+                            const isThisUserMutating = isMutatingStatus && selectedUser?.id === u.id;
                             return (
                               <button
-                                disabled={mutation.disabled}
+                                disabled={mutation.disabled || isMutatingStatus}
                                 onClick={() => {
-                                  if (mutation.disabled) return;
+                                  if (mutation.disabled || isMutatingStatus) return;
                                   setSelectedUser(u);
+                                  setStatusMutationError(null);
+                                  setStatusMutationSuccess(null);
+                                  setStatusMutationStage('');
+                                  setStatusMutationElapsed(0);
                                   setIsStatusModalOpen(true);
                                 }}
                                 title={mutation.title}
@@ -1468,7 +1586,11 @@ export const UsersPage: React.FC = () => {
                                     : 'text-red-400 hover:text-emerald-400 hover:bg-emerald-950/30'
                                 }`}
                               >
-                                <Power className="w-3.5 h-3.5" />
+                                {isThisUserMutating ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Power className="w-3.5 h-3.5" />
+                                )}
                               </button>
                             );
                           })()}
@@ -2231,49 +2353,107 @@ export const UsersPage: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Modal: Activate/Deactivate Confirmation in Simplex */}
+      {/* Modal: Activate/Deactivate in Simplex with Progress & Auto-Close */}
       <Modal
         isOpen={isStatusModalOpen}
-        onClose={() => !isMutatingStatus && setIsStatusModalOpen(false)}
+        onClose={handleCloseStatusModal}
         title={selectedUser?.status === 'ACTIVE' ? 'Deactivate in Simplex' : 'Activate in Simplex'}
       >
         {selectedUser && (
           <div className="space-y-4 text-xs">
-            <p className="text-slate-300 text-sm">
-              {selectedUser.status === 'ACTIVE'
-                ? `Deactivate ${selectedUser.username} in ${selectedClient?.clientCode || selectedUser.clientName}? This will update the selected Simplex client application.`
-                : `Activate ${selectedUser.username} in ${selectedClient?.clientCode || selectedUser.clientName}? This will update the selected Simplex client application.`}
-            </p>
-            <p className="text-slate-500 text-[11px]">
-              This will execute the real status change on the target Simplex client application via the desktop automation agent, verify remote success, and automatically pull the updated status into Central Console.
-            </p>
+            {/* 1. Progress State */}
+            {isMutatingStatus && (
+              <div className="p-4 bg-sky-950/60 border border-sky-800 rounded-lg space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <Loader2 className="w-5 h-5 animate-spin text-sky-400" />
+                    <span className="font-semibold text-sky-200 text-sm">
+                      {statusMutationStage || 'Updating remote status…'}
+                    </span>
+                  </div>
+                  <span className="font-mono text-xs text-sky-400">({statusMutationElapsed}s)</span>
+                </div>
+                <p className="text-slate-400 text-[11px]">
+                  Automation agent is executing live status toggle and verifying on {selectedClient?.clientCode || 'Simplex'}.
+                </p>
+              </div>
+            )}
 
-            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
-              <button
-                type="button"
-                disabled={isMutatingStatus}
-                onClick={() => setIsStatusModalOpen(false)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isMutatingStatus}
-                onClick={handleStatusChange}
-                className={`px-4 py-2 rounded font-semibold text-white shadow disabled:opacity-50 ${
-                  selectedUser.status === 'ACTIVE'
-                    ? 'bg-red-600 hover:bg-red-500'
-                    : 'bg-emerald-600 hover:bg-emerald-500'
-                }`}
-              >
-                {isMutatingStatus
-                  ? 'Updating in Simplex…'
-                  : selectedUser.status === 'ACTIVE'
-                  ? 'Deactivate in Simplex'
-                  : 'Activate in Simplex'}
-              </button>
-            </div>
+            {/* 2. Success State */}
+            {statusMutationSuccess && !isMutatingStatus && (
+              <div className="p-4 bg-emerald-950/70 border border-emerald-700 rounded-lg flex items-center gap-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                <div>
+                  <span className="font-semibold text-emerald-200 text-sm block">Status Updated Successfully</span>
+                  <span className="text-emerald-300 text-xs">{statusMutationSuccess}</span>
+                </div>
+              </div>
+            )}
+
+            {/* 3. Error State */}
+            {statusMutationError && !isMutatingStatus && (
+              <div className="p-4 bg-red-950/70 border border-red-800 rounded-lg space-y-2">
+                <div className="flex items-center gap-2 text-red-300 font-semibold text-sm">
+                  <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
+                  <span>Operation Failed</span>
+                </div>
+                <p className="text-red-300 text-xs pl-7">{statusMutationError}</p>
+                <div className="flex justify-end gap-2 pt-2 border-t border-red-900/50">
+                  <button
+                    type="button"
+                    onClick={handleCloseStatusModal}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold text-xs"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStatusChange}
+                    className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold text-xs flex items-center gap-1.5"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Retry
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 4. Default Confirmation State */}
+            {!isMutatingStatus && !statusMutationSuccess && !statusMutationError && (
+              <>
+                <p className="text-slate-300 text-sm">
+                  {selectedUser.status === 'ACTIVE'
+                    ? `Deactivate ${selectedUser.username} in ${selectedClient?.clientCode || selectedUser.clientName}? This will update the selected Simplex client application.`
+                    : `Activate ${selectedUser.username} in ${selectedClient?.clientCode || selectedUser.clientName}? This will update the selected Simplex client application.`}
+                </p>
+                <p className="text-slate-500 text-[11px]">
+                  This will execute the real status change on the target Simplex client application via the desktop automation agent, verify remote success, and automatically pull the updated status into Central Console.
+                </p>
+
+                <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={handleCloseStatusModal}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStatusChange}
+                    className={`px-4 py-2 rounded font-semibold text-white shadow ${
+                      selectedUser.status === 'ACTIVE'
+                        ? 'bg-red-600 hover:bg-red-500'
+                        : 'bg-emerald-600 hover:bg-emerald-500'
+                    }`}
+                  >
+                    {selectedUser.status === 'ACTIVE'
+                      ? 'Deactivate in Simplex'
+                      : 'Activate in Simplex'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </Modal>

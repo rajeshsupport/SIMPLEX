@@ -766,17 +766,19 @@ export class ClientUsersService implements OnModuleInit {
     return response;
   }
 
-  private static activeMutationLocks = new Set<string>();
+  private static activeMutationLocks = new Map<string, number>();
 
   private acquireMutationLock(clientId: string, username: string): () => void {
     const key = `${clientId}:${username.trim().toLowerCase()}`;
-    if (ClientUsersService.activeMutationLocks.has(key)) {
+    const now = Date.now();
+    const existingLockTime = ClientUsersService.activeMutationLocks.get(key);
+    if (existingLockTime && now - existingLockTime < 45000) {
       throw new BadRequestException({
         code: 'OPERATION_IN_PROGRESS',
         message: `Another mutation operation is already in progress for user '${username}'.`,
       });
     }
-    ClientUsersService.activeMutationLocks.add(key);
+    ClientUsersService.activeMutationLocks.set(key, now);
     return () => {
       ClientUsersService.activeMutationLocks.delete(key);
     };
@@ -1152,7 +1154,17 @@ export class ClientUsersService implements OnModuleInit {
         }
       }
 
-      if (!completedRun || completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+      if (!completedRun) {
+        savedRun.status = 'TIMED_OUT';
+        savedRun.errorMessage = 'User update timed out: Automation agent did not respond within 20 seconds.';
+        await this.runRepo.save(savedRun).catch(() => {});
+        throw new BadRequestException({
+          code: 'OPERATION_TIMED_OUT',
+          message: 'User update timed out: Automation agent did not respond within 20 seconds.',
+        });
+      }
+
+      if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
         let errorCode = 'REMOTE_EDIT_FAILED';
         let errorMsg = completedRun?.errorMessage || 'User edit failed on remote client portal.';
         try {
@@ -1285,7 +1297,17 @@ export class ClientUsersService implements OnModuleInit {
         }
       }
 
-      if (!completedRun || completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+      if (!completedRun) {
+        savedRun.status = 'TIMED_OUT';
+        savedRun.errorMessage = 'Status update timed out: Automation agent did not respond within 20 seconds.';
+        await this.runRepo.save(savedRun).catch(() => {});
+        throw new BadRequestException({
+          code: 'OPERATION_TIMED_OUT',
+          message: 'Status update timed out: Automation agent did not respond within 20 seconds.',
+        });
+      }
+
+      if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
         let errorCode = 'REMOTE_STATUS_VERIFICATION_FAILED';
         let errorMsg = completedRun?.errorMessage || 'Remote status verification failed on client portal.';
         try {
@@ -1415,7 +1437,17 @@ export class ClientUsersService implements OnModuleInit {
         }
       }
 
-      if (!completedRun || completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+      if (!completedRun) {
+        savedRun.status = 'TIMED_OUT';
+        savedRun.errorMessage = 'Password reset timed out: Automation agent did not respond within 20 seconds.';
+        await this.runRepo.save(savedRun).catch(() => {});
+        throw new BadRequestException({
+          code: 'OPERATION_TIMED_OUT',
+          message: 'Password reset timed out: Automation agent did not respond within 20 seconds.',
+        });
+      }
+
+      if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
         let errorCode = 'RESET_PASSWORD_FAILED';
         let errorMsg = completedRun?.errorMessage || 'Password reset failed on remote client portal.';
         try {

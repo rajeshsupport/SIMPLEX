@@ -81,6 +81,12 @@ export class AgentsService {
     });
   }
 
+  async getOnlineAgent(): Promise<DesktopAgentSummary | null> {
+    const agents = await this.getAllAgents();
+    const online = agents.find((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    return online || null;
+  }
+
   async registerOrPairAgent(dto: {
     agentName: string;
     machineHostname: string;
