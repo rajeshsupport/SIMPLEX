@@ -454,6 +454,46 @@ export function createFixtureApp(): express.Express {
     `);
   });
 
+  app.get('/MasterV9.4/addUsers-missing-field', (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>HMC Portal - Add User</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; }
+          .header { background: #1e293b; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+          .nav a { color: #94a3b8; text-decoration: none; margin-right: 1.5rem; font-weight: 500; }
+          .content { padding: 2rem; max-width: 800px; margin: 0 auto; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.5rem; border: 1px solid #334155; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div style="font-weight: bold; font-size: 1.25rem; color: #38bdf8;">HMC Clinical Suite</div>
+          <div class="nav"><a href="/MasterV9.4/users">Users</a></div>
+        </div>
+        <div class="content">
+          <div class="card">
+            <h2 class="screen-title">Add - User Details</h2>
+            <form id="addUserForm">
+              <div class="field">
+                <label>Department</label>
+                <input type="text" id="dept" />
+              </div>
+              <div class="field">
+                <label>Employee Code</label>
+                <input type="text" id="empCode" />
+              </div>
+            </form>
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  });
+
   app.post('/MasterV9.4/addUsers', (req: Request, res: Response) => {
     const { username, firstName, middleName, lastName, nickName, email, mobileNumber, nationality, role, profileRole, barcodeNumber } = req.body;
     if (clientUsers.some((u) => u.username.toLowerCase() === (username || '').toLowerCase())) {

@@ -711,6 +711,313 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Discovers a form control (input, select, textarea) on the current page using ordered resolution strategies:
+   * 1. Associated <label> text matching (for-attribute, nested input, sibling input, container input)
+   * 2. Form control attributes: name, formControlName, ng-model, data-testid
+   * 3. ID attribute and case variants
+   * 4. Placeholder attributes
+   */
+  public static async findFormField(
+    page: Page,
+    field:
+      | 'username'
+      | 'firstName'
+      | 'middleName'
+      | 'lastName'
+      | 'nickName'
+      | 'email'
+      | 'mobileNumber'
+      | 'nationality'
+      | 'role'
+      | 'profileRole'
+      | 'barcodeNumber'
+      | 'signature'
+      | 'stamp'
+      | 'profileImage'
+  ): Promise<Locator> {
+    const configMap: Record<
+      string,
+      {
+        labelPatterns: string[];
+        attrNames: string[];
+        idPatterns: string[];
+        placeholders: string[];
+        isSelect?: boolean;
+        isFile?: boolean;
+      }
+    > = {
+      username: {
+        labelPatterns: [
+          '^user\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          '^user\\s*id(?:\\s*\\*|\\s*:\\s*)?$',
+          '^username(?:\\s*\\*|\\s*:\\s*)?$',
+          '^login\\s*id(?:\\s*\\*|\\s*:\\s*)?$',
+          'user\\s*name',
+          'username',
+        ],
+        attrNames: ['userName', 'username', 'loginId', 'user_id', 'input-username', 'txtUser'],
+        idPatterns: ['username', 'userName', 'txtUserName', 'txt_username', 'txtUser', 'inputUsername'],
+        placeholders: ['username', 'user name', 'login id', 'user id'],
+      },
+      firstName: {
+        labelPatterns: [
+          '^first\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          '^given\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          '^f\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          'first\\s*name',
+        ],
+        attrNames: ['firstName', 'firstname', 'fName', 'givenName', 'input-firstname', 'first_name'],
+        idPatterns: ['firstName', 'firstname', 'fName', 'txtFirstName', 'txt_firstname', 'inputFirstName'],
+        placeholders: ['first name', 'given name'],
+      },
+      middleName: {
+        labelPatterns: [
+          '^middle\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          '^m\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          'middle\\s*name',
+        ],
+        attrNames: ['middleName', 'middlename', 'mName', 'input-middlename', 'middle_name'],
+        idPatterns: ['middleName', 'middlename', 'mName', 'txtMiddleName', 'txt_middlename'],
+        placeholders: ['middle name'],
+      },
+      lastName: {
+        labelPatterns: [
+          '^last\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          '^surname(?:\\s*\\*|\\s*:\\s*)?$',
+          '^family\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          '^l\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          'last\\s*name',
+          'surname',
+        ],
+        attrNames: ['lastName', 'lastname', 'lName', 'surname', 'familyName', 'input-lastname', 'last_name'],
+        idPatterns: ['lastName', 'lastname', 'lName', 'txtLastName', 'txt_lastname', 'inputLastName'],
+        placeholders: ['last name', 'surname', 'family name'],
+      },
+      nickName: {
+        labelPatterns: [
+          '^nick\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          '^alias(?:\\s*\\*|\\s*:\\s*)?$',
+          '^preferred\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
+          'nick\\s*name',
+        ],
+        attrNames: ['nickName', 'nickname', 'alias', 'preferredName', 'input-nickname', 'nick_name'],
+        idPatterns: ['nickName', 'nickname', 'txtNickName', 'txt_nickname'],
+        placeholders: ['nickname', 'nick name', 'alias'],
+      },
+      email: {
+        labelPatterns: [
+          '^email(?:\\s*address)?(?:\\s*\\*|\\s*:\\s*)?$',
+          '^e-mail(?:\\s*address)?(?:\\s*\\*|\\s*:\\s*)?$',
+          'email',
+        ],
+        attrNames: ['email', 'emailAddress', 'eMail', 'input-email', 'user_email'],
+        idPatterns: ['email', 'emailAddress', 'eMail', 'txtEmail', 'txt_email', 'inputEmail'],
+        placeholders: ['email', 'e-mail'],
+      },
+      mobileNumber: {
+        labelPatterns: [
+          '^mobile(?:\\s*no|\\s*number)?(?:\\s*\\*|\\s*:\\s*)?$',
+          '^phone(?:\\s*no|\\s*number)?(?:\\s*\\*|\\s*:\\s*)?$',
+          '^contact(?:\\s*no|\\s*number)?(?:\\s*\\*|\\s*:\\s*)?$',
+          '^cell(?:\\s*phone)?(?:\\s*\\*|\\s*:\\s*)?$',
+          'mobile',
+          'phone',
+        ],
+        attrNames: ['mobileNumber', 'mobileNo', 'mobile', 'phone', 'phoneNumber', 'input-mobile', 'mobile_no'],
+        idPatterns: ['mobileNo', 'mobileNumber', 'phone', 'mobile', 'txtMobile', 'txt_mobile', 'txtPhone', 'inputMobile'],
+        placeholders: ['mobile', 'phone', 'contact number', 'mobile number'],
+      },
+      nationality: {
+        labelPatterns: [
+          '^nationality(?:\\s*\\*|\\s*:\\s*)?$',
+          '^country(?:\\s*\\*|\\s*:\\s*)?$',
+          '^citizenship(?:\\s*\\*|\\s*:\\s*)?$',
+          'nationality',
+        ],
+        attrNames: ['nationality', 'country', 'citizenship', 'select-nationality', 'selNationality'],
+        idPatterns: ['nationality', 'country', 'selNationality', 'ddlNationality'],
+        placeholders: ['nationality', 'country'],
+        isSelect: true,
+      },
+      role: {
+        labelPatterns: [
+          '^role(?:\\s*\\*|\\s*:\\s*)?$',
+          '^user\\s*role(?:\\s*\\*|\\s*:\\s*)?$',
+          '^primary\\s*role(?:\\s*\\*|\\s*:\\s*)?$',
+          '^role$',
+        ],
+        attrNames: ['role', 'userRole', 'select-role', 'selRole'],
+        idPatterns: ['role', 'userRole', 'selRole', 'ddlRole'],
+        placeholders: ['role', 'select role'],
+        isSelect: true,
+      },
+      profileRole: {
+        labelPatterns: [
+          '^profile\\s*role(?:\\s*\\*|\\s*:\\s*)?$',
+          '^secondary\\s*role(?:\\s*\\*|\\s*:\\s*)?$',
+          '^specialty(?:\\s*\\*|\\s*:\\s*)?$',
+          '^designation(?:\\s*\\*|\\s*:\\s*)?$',
+          'profile\\s*role',
+        ],
+        attrNames: ['profileRole', 'profilerole', 'profile_role', 'select-profilerole', 'selProfileRole'],
+        idPatterns: ['profileRole', 'profilerole', 'selProfileRole', 'ddlProfileRole'],
+        placeholders: ['profile role', 'specialty', 'designation'],
+        isSelect: true,
+      },
+      barcodeNumber: {
+        labelPatterns: [
+          '^barcode(?:\\s*no|\\s*number)?(?:\\s*\\*|\\s*:\\s*)?$',
+          '^badge(?:\\s*no|\\s*number)?(?:\\s*\\*|\\s*:\\s*)?$',
+          '^card(?:\\s*no|\\s*number)?(?:\\s*\\*|\\s*:\\s*)?$',
+          'barcode',
+        ],
+        attrNames: ['barcodeNumber', 'barcodeNo', 'barcode', 'badgeNo', 'badgeNumber', 'input-barcode'],
+        idPatterns: ['barcodeNo', 'barcodeNumber', 'barcode', 'badgeNo', 'txtBarcode', 'inputBarcode'],
+        placeholders: ['barcode', 'badge'],
+      },
+      signature: {
+        labelPatterns: ['signature'],
+        attrNames: ['signature', 'signatureFile', 'sigFile', 'input-signature-file'],
+        idPatterns: ['signatureFile', 'signature', 'sigFile'],
+        placeholders: ['signature'],
+        isFile: true,
+      },
+      stamp: {
+        labelPatterns: ['stamp'],
+        attrNames: ['stamp', 'stampFile', 'input-stamp-file'],
+        idPatterns: ['stampFile', 'stamp'],
+        placeholders: ['stamp'],
+        isFile: true,
+      },
+      profileImage: {
+        labelPatterns: ['profile(?:\\s*picture|\\s*photo|\\s*image|\\s*file)?'],
+        attrNames: ['profile', 'profileFile', 'profileImage', 'input-profile-file'],
+        idPatterns: ['profileFile', 'profileImage', 'profilePhoto'],
+        placeholders: ['profile'],
+        isFile: true,
+      },
+    };
+
+    const config = configMap[field];
+    if (!config) {
+      return page.locator(`[name="${field}" i], #${field}`).first();
+    }
+
+    const fieldKey = `data-hmc-${field.toLowerCase()}`;
+
+    // Clean up any existing stale stamped attribute
+    await page
+      .evaluate(({ fieldKey }) => {
+        document.querySelectorAll(`[${fieldKey}]`).forEach((el) => el.removeAttribute(fieldKey));
+      }, { fieldKey })
+      .catch(() => {});
+
+    // Find and tag the element in DOM
+    await page.evaluate(
+      ({ fieldKey, labelPatterns, attrNames, idPatterns, placeholders, isSelect, isFile }) => {
+        const labelRegexes = labelPatterns.map((p) => new RegExp(p, 'i'));
+        const targetTag = isFile ? 'input[type="file"]' : isSelect ? 'select, input' : 'input, select, textarea';
+
+        // Strategy 1: Associated <label> text matching
+        const allLabels = Array.from(document.querySelectorAll('label, .control-label, .form-label, span.label, th, td, legend'));
+        for (const lbl of allLabels) {
+          const text = (lbl.textContent || '').replace(/\s+/g, ' ').trim();
+          const isMatch = labelRegexes.some((rx) => rx.test(text));
+          if (!isMatch) continue;
+
+          // a) for-attribute
+          const forAttr = lbl.getAttribute('for') || lbl.getAttribute('htmlfor');
+          if (forAttr) {
+            const targetEl = document.getElementById(forAttr);
+            if (targetEl && (isFile || targetEl.tagName.toLowerCase() !== 'button')) {
+              targetEl.setAttribute(fieldKey, 'true');
+              return true;
+            }
+          }
+
+          // b) nested input/select
+          const nested = lbl.querySelector(targetTag) as HTMLElement | null;
+          if (nested) {
+            nested.setAttribute(fieldKey, 'true');
+            return true;
+          }
+
+          // c) sibling element
+          let next = lbl.nextElementSibling as HTMLElement | null;
+          while (next) {
+            if (next.matches(targetTag)) {
+              next.setAttribute(fieldKey, 'true');
+              return true;
+            }
+            const sub = next.querySelector(targetTag) as HTMLElement | null;
+            if (sub) {
+              sub.setAttribute(fieldKey, 'true');
+              return true;
+            }
+            next = next.nextElementSibling as HTMLElement | null;
+          }
+
+          // d) parent container (.field, .form-group, tr, td, div)
+          const container = lbl.closest('.field, .form-group, .form-item, tr, td, .col, .col-md-*, .form-row, div');
+          if (container) {
+            const foundInput = container.querySelector(targetTag) as HTMLElement | null;
+            if (foundInput && foundInput !== lbl) {
+              foundInput.setAttribute(fieldKey, 'true');
+              return true;
+            }
+          }
+        }
+
+        // Strategy 2: Form control attributes (formcontrolname, ng-model, name, data-testid)
+        for (const name of attrNames) {
+          const selector = `[formcontrolname="${name}" i], [formControlName="${name}" i], [name="${name}" i], [ng-model*="${name}" i], [data-testid*="${name}" i], [data-test*="${name}" i]`;
+          const el = document.querySelector(selector) as HTMLElement | null;
+          if (el) {
+            el.setAttribute(fieldKey, 'true');
+            return true;
+          }
+        }
+
+        // Strategy 3: ID attribute and case variants
+        for (const id of idPatterns) {
+          const byId = document.getElementById(id);
+          if (byId) {
+            byId.setAttribute(fieldKey, 'true');
+            return true;
+          }
+          const el = document.querySelector(`[id="${id}" i], #${id}`) as HTMLElement | null;
+          if (el) {
+            el.setAttribute(fieldKey, 'true');
+            return true;
+          }
+        }
+
+        // Strategy 4: Placeholder attributes
+        for (const ph of placeholders) {
+          const el = document.querySelector(`input[placeholder*="${ph}" i], textarea[placeholder*="${ph}" i]`) as HTMLElement | null;
+          if (el) {
+            el.setAttribute(fieldKey, 'true');
+            return true;
+          }
+        }
+
+        return false;
+      },
+      {
+        fieldKey,
+        labelPatterns: config.labelPatterns,
+        attrNames: config.attrNames,
+        idPatterns: config.idPatterns,
+        placeholders: config.placeholders,
+        isSelect: config.isSelect,
+        isFile: config.isFile,
+      }
+    );
+
+    return page.locator(`[${fieldKey}="true"]`).first();
+  }
+
+  /**
    * Creates a user on the client application by filling the remote Add User form.
    */
   public static async createUser(
@@ -734,6 +1041,7 @@ export class UserManagementExecutor {
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
 
+    // 1. Ensure authenticated
     const authRes = await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
     if (!authRes.authenticated) {
       return {
@@ -743,66 +1051,214 @@ export class UserManagementExecutor {
         errorMessage: authRes.errorMessage || 'Automatic authentication to client failed.',
       };
     }
-    await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-    // 1. Locate fields
-    const usernameInput = page.locator('#username, #userName, [name="username"], [data-testid="input-username"]').first();
-    const firstNameInput = page.locator('#firstName, #fName, [name="firstName"], [data-testid="input-firstname"]').first();
-    const middleNameInput = page.locator('#middleName, #mName, [name="middleName"], [data-testid="input-middlename"]').first();
-    const lastNameInput = page.locator('#lastName, #lName, [name="lastName"], [data-testid="input-lastname"]').first();
-    const nickNameInput = page.locator('#nickName, [name="nickName"], [data-testid="input-nickname"]').first();
-    const emailInput = page.locator('#email, [name="email"], [data-testid="input-email"]').first();
-    const mobileInput = page.locator('#mobileNo, #mobileNumber, #phone, [name="mobileNumber"], [data-testid="input-mobile"]').first();
-    const nationalityInput = page.locator('#nationality, select[name="nationality"], [data-testid="select-nationality"]').first();
-    const roleInput = page.locator('#role, select[name="role"], [data-testid="select-role"]').first();
-    const profileRoleInput = page.locator('#profileRole, select[name="profileRole"], [data-testid="select-profilerole"]').first();
-    const barcodeInput = page.locator('#barcodeNo, #barcodeNumber, [name="barcodeNumber"], [data-testid="input-barcode"]').first();
-
-    // Check mandatory fields presence
-    if (!(await usernameInput.isVisible().catch(() => false))) {
+    // 2. Navigate to Add Users URL
+    try {
+      await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (navErr: any) {
       return {
         success: false,
         username: dto.username,
-        errorCode: 'REMOTE_FORM_FIELD_NOT_FOUND',
-        errorMessage: "Required field 'username' not found on remote Add User form.",
+        errorCode: 'REMOTE_ADD_USER_ROUTE_FAILED',
+        errorMessage: `Failed to navigate to Add User route: ${navErr.message}`,
       };
     }
 
-    // 2. Fill fields
-    await usernameInput.fill(dto.username);
-    if (await firstNameInput.isVisible().catch(() => false)) {
-      await firstNameInput.fill(dto.firstName);
-    }
-    if (dto.middleName && (await middleNameInput.isVisible().catch(() => false))) {
-      await middleNameInput.fill(dto.middleName);
-    }
-    if (await lastNameInput.isVisible().catch(() => false)) {
-      await lastNameInput.fill(dto.lastName);
-    }
-    if (dto.nickName && (await nickNameInput.isVisible().catch(() => false))) {
-      await nickNameInput.fill(dto.nickName);
-    }
-    if (dto.email && (await emailInput.isVisible().catch(() => false))) {
-      await emailInput.fill(dto.email);
-    }
-    if (await mobileInput.isVisible().catch(() => false)) {
-      await mobileInput.fill(dto.mobileNumber);
+    // Detect login redirect and re-authenticate if necessary
+    if (page.url().includes('/login')) {
+      const reAuth = await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
+      if (!reAuth.authenticated) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+          errorMessage: 'Redirected to login while opening Add User screen, and re-authentication failed.',
+        };
+      }
+      await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     }
 
-    // Nationality dropdown
+    // Check if route returned 404
+    const is404 = await page.evaluate(() => {
+      const text = (document.body ? document.body.innerText : '').toLowerCase();
+      return text.includes('404 not found') || text.includes('cannot get') || text.includes('page not found');
+    });
+    if (is404) {
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_ADD_USER_ROUTE_FAILED',
+        errorMessage: `Remote Add User route not found (404) at ${addUsersUrl.split('?')[0]}.`,
+      };
+    }
+
+    // Wait for spinners to disappear
+    try {
+      const spinner = page.locator('.loading, .spinner, .overlay, #loadingSpinner, .loader, .page-loader').first();
+      if ((await spinner.count()) > 0) {
+        await spinner.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+      }
+    } catch {}
+
+    // Wait for form or input controls to become ready
+    await page.waitForSelector('form, #addUserForm, input, select, .card, [data-testid="btn-save-user"], #btnSave', { timeout: 8000 }).catch(() => {});
+
+    const hasInputs = (await page.locator('input, select, form').count()) > 0;
+    if (!hasInputs) {
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_ADD_USER_FORM_NOT_READY',
+        errorMessage: 'Remote Add User form did not render or become ready within the timeout.',
+      };
+    }
+
+    // 3. Robust form field discovery
+    const usernameInput = await this.findFormField(page, 'username');
+    const isUserVisible = await usernameInput.isVisible().catch(() => false);
+
+    if (!isUserVisible) {
+      const detectedLabels = await page.evaluate(() => {
+        const labels = Array.from(document.querySelectorAll('label, .control-label, .form-label, th, legend, span.label'))
+          .map((l) => (l.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter((t) => t.length > 0 && t.length < 50);
+        return Array.from(new Set(labels));
+      });
+      const pageHeading = await page.evaluate(() => {
+        const headings = Array.from(
+          document.querySelectorAll(
+            'h1, h2, h3, h4, .page-title, .screen-title, .title, .heading, legend, .mm-title, [class*="title" i]'
+          )
+        )
+          .map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter((t) => t.length > 0);
+        return headings[0] || 'Add User Screen';
+      });
+      const sanitizedUrl = page.url().split('?')[0];
+
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_REQUIRED_FIELD_NOT_FOUND',
+        errorMessage: `Required field 'username' not found on remote Add User form. (URL: ${sanitizedUrl}, Heading: '${pageHeading}', Detected Labels: [${detectedLabels.join(', ')}])`,
+      };
+    }
+
+    const firstNameInput = await this.findFormField(page, 'firstName');
+    const middleNameInput = await this.findFormField(page, 'middleName');
+    const lastNameInput = await this.findFormField(page, 'lastName');
+    const nickNameInput = await this.findFormField(page, 'nickName');
+    const emailInput = await this.findFormField(page, 'email');
+    const mobileInput = await this.findFormField(page, 'mobileNumber');
+    const nationalityInput = await this.findFormField(page, 'nationality');
+    const roleInput = await this.findFormField(page, 'role');
+    const profileRoleInput = await this.findFormField(page, 'profileRole');
+    const barcodeInput = await this.findFormField(page, 'barcodeNumber');
+
+    // 4. Fill text inputs with event dispatching for Angular / AngularJS reactive binding
+    await usernameInput.fill(dto.username);
+    await usernameInput.evaluate((el: HTMLInputElement, val: string) => {
+      el.value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+    }, dto.username);
+
+    if (dto.firstName && (await firstNameInput.isVisible().catch(() => false))) {
+      await firstNameInput.fill(dto.firstName);
+      await firstNameInput.evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, dto.firstName);
+    }
+
+    if (dto.middleName && (await middleNameInput.isVisible().catch(() => false))) {
+      await middleNameInput.fill(dto.middleName);
+      await middleNameInput.evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, dto.middleName);
+    }
+
+    if (dto.lastName && (await lastNameInput.isVisible().catch(() => false))) {
+      await lastNameInput.fill(dto.lastName);
+      await lastNameInput.evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, dto.lastName);
+    }
+
+    if (dto.nickName && (await nickNameInput.isVisible().catch(() => false))) {
+      await nickNameInput.fill(dto.nickName);
+      await nickNameInput.evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, dto.nickName);
+    }
+
+    if (dto.email && (await emailInput.isVisible().catch(() => false))) {
+      await emailInput.fill(dto.email);
+      await emailInput.evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, dto.email);
+    }
+
+    if (dto.mobileNumber && (await mobileInput.isVisible().catch(() => false))) {
+      await mobileInput.fill(dto.mobileNumber);
+      await mobileInput.evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, dto.mobileNumber);
+    }
+
+    // 5. Dynamic dropdowns with option discovery
+    // Nationality
     if (dto.nationality && (await nationalityInput.isVisible().catch(() => false))) {
       const isSelect = await nationalityInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
-        try {
-          await nationalityInput.selectOption({ label: dto.nationality }).catch(async () => {
-            await nationalityInput.selectOption({ value: dto.nationality });
-          });
-        } catch {
+        const availableOptions: { text: string; value: string }[] = await nationalityInput.evaluate((el: HTMLSelectElement) => {
+          return Array.from(el.options).map((o) => ({
+            text: (o.text || '').trim(),
+            value: (o.value || '').trim(),
+          }));
+        });
+
+        const targetNorm = dto.nationality.trim().toLowerCase();
+        const matched = availableOptions.find(
+          (o) =>
+            o.text.toLowerCase() === targetNorm ||
+            o.value.toLowerCase() === targetNorm ||
+            (o.text && o.text.toLowerCase().includes(targetNorm)) ||
+            (o.value && o.value.toLowerCase().includes(targetNorm))
+        );
+
+        if (matched && matched.value !== undefined) {
+          await nationalityInput.selectOption({ value: matched.value });
+          await nationalityInput.evaluate((el: HTMLSelectElement, val: string) => {
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, matched.value);
+        } else {
+          const optionLabels = availableOptions.map((o) => o.text || o.value).filter((t) => t && !t.toLowerCase().includes('select'));
           return {
             success: false,
             username: dto.username,
             errorCode: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
-            errorMessage: `Nationality option '${dto.nationality}' not found on remote Add User form.`,
+            errorMessage: `Nationality option '${dto.nationality}' not found on remote Add User form. Available options: [${optionLabels.join(', ')}].`,
           };
         }
       } else {
@@ -810,20 +1266,40 @@ export class UserManagementExecutor {
       }
     }
 
-    // Role dropdown
+    // Role
     if (dto.role && (await roleInput.isVisible().catch(() => false))) {
       const isSelect = await roleInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
-        try {
-          await roleInput.selectOption({ label: dto.role }).catch(async () => {
-            await roleInput.selectOption({ value: dto.role });
-          });
-        } catch {
+        const availableOptions: { text: string; value: string }[] = await roleInput.evaluate((el: HTMLSelectElement) => {
+          return Array.from(el.options).map((o) => ({
+            text: (o.text || '').trim(),
+            value: (o.value || '').trim(),
+          }));
+        });
+
+        const targetNorm = dto.role.trim().toLowerCase();
+        const matched = availableOptions.find(
+          (o) =>
+            o.text.toLowerCase() === targetNorm ||
+            o.value.toLowerCase() === targetNorm ||
+            (o.text && o.text.toLowerCase().includes(targetNorm)) ||
+            (o.value && o.value.toLowerCase().includes(targetNorm))
+        );
+
+        if (matched && matched.value !== undefined) {
+          await roleInput.selectOption({ value: matched.value });
+          await roleInput.evaluate((el: HTMLSelectElement, val: string) => {
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, matched.value);
+        } else {
+          const optionLabels = availableOptions.map((o) => o.text || o.value).filter((t) => t && !t.toLowerCase().includes('select'));
           return {
             success: false,
             username: dto.username,
             errorCode: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
-            errorMessage: `Role option '${dto.role}' not found on remote Add User form.`,
+            errorMessage: `Role option '${dto.role}' not found on remote Add User form. Available options: [${optionLabels.join(', ')}].`,
           };
         }
       } else {
@@ -831,22 +1307,43 @@ export class UserManagementExecutor {
       }
     }
 
-    // Profile Role dropdown (role-dependent)
+    // Profile Role (Dependent dropdown)
     if (dto.profileRole && (await profileRoleInput.isVisible().catch(() => false))) {
-      await page.waitForTimeout(300);
+      // Allow Angular reactive binding to refresh dependent profile roles
+      await page.waitForTimeout(400);
+
       const isSelect = await profileRoleInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
-        try {
-          await profileRoleInput.selectOption({ label: dto.profileRole }).catch(async () => {
-            await profileRoleInput.selectOption({ value: dto.profileRole });
-          });
-        } catch {
-          // If profile role option was not present, stop with REMOTE_DROPDOWN_OPTION_NOT_FOUND
+        const availableOptions: { text: string; value: string }[] = await profileRoleInput.evaluate((el: HTMLSelectElement) => {
+          return Array.from(el.options).map((o) => ({
+            text: (o.text || '').trim(),
+            value: (o.value || '').trim(),
+          }));
+        });
+
+        const targetNorm = dto.profileRole.trim().toLowerCase();
+        const matched = availableOptions.find(
+          (o) =>
+            o.text.toLowerCase() === targetNorm ||
+            o.value.toLowerCase() === targetNorm ||
+            (o.text && o.text.toLowerCase().includes(targetNorm)) ||
+            (o.value && o.value.toLowerCase().includes(targetNorm))
+        );
+
+        if (matched && matched.value !== undefined) {
+          await profileRoleInput.selectOption({ value: matched.value });
+          await profileRoleInput.evaluate((el: HTMLSelectElement, val: string) => {
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, matched.value);
+        } else {
+          const optionLabels = availableOptions.map((o) => o.text || o.value).filter((t) => t && !t.toLowerCase().includes('select'));
           return {
             success: false,
             username: dto.username,
             errorCode: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
-            errorMessage: `Profile Role option '${dto.profileRole}' not found for selected role on remote form.`,
+            errorMessage: `Profile Role option '${dto.profileRole}' not found for selected role on remote form. Available options: [${optionLabels.join(', ')}].`,
           };
         }
       } else {
@@ -856,71 +1353,157 @@ export class UserManagementExecutor {
 
     if (dto.barcodeNumber && (await barcodeInput.isVisible().catch(() => false))) {
       await barcodeInput.fill(dto.barcodeNumber);
+      await barcodeInput.evaluate((el: HTMLInputElement, val: string) => {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }, dto.barcodeNumber);
     }
 
-    // 3. Handle File Uploads (Signature, Stamp, Profile)
+    // 6. Handle File Uploads
     const tempDir = path.join(os.tmpdir(), 'hmc-uploads');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
     if (dto.signatureBase64) {
-      const sigPath = path.join(tempDir, `sig_${Date.now()}_${dto.signatureFilename || 'signature.png'}`);
-      fs.writeFileSync(sigPath, Buffer.from(dto.signatureBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
-      const sigInput = page.locator('input[type="file"][name*="sig" i], #signatureFile, [data-testid="input-signature-file"]').first();
-      if ((await sigInput.count()) > 0) await sigInput.setInputFiles(sigPath).catch(() => {});
+      const sigLoc = await this.findFormField(page, 'signature');
+      if ((await sigLoc.count()) > 0) {
+        const sigPath = path.join(tempDir, `sig_${Date.now()}_${dto.signatureFilename || 'signature.png'}`);
+        fs.writeFileSync(sigPath, Buffer.from(dto.signatureBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
+        await sigLoc.setInputFiles(sigPath).catch(() => {});
+      }
     }
 
     if (dto.stampBase64) {
-      const stampPath = path.join(tempDir, `stamp_${Date.now()}_${dto.stampFilename || 'stamp.png'}`);
-      fs.writeFileSync(stampPath, Buffer.from(dto.stampBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
-      const stampInput = page.locator('input[type="file"][name*="stamp" i], #stampFile, [data-testid="input-stamp-file"]').first();
-      if ((await stampInput.count()) > 0) await stampInput.setInputFiles(stampPath).catch(() => {});
+      const stampLoc = await this.findFormField(page, 'stamp');
+      if ((await stampLoc.count()) > 0) {
+        const stampPath = path.join(tempDir, `stamp_${Date.now()}_${dto.stampFilename || 'stamp.png'}`);
+        fs.writeFileSync(stampPath, Buffer.from(dto.stampBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
+        await stampLoc.setInputFiles(stampPath).catch(() => {});
+      }
     }
 
     if (dto.profileBase64) {
-      const profPath = path.join(tempDir, `prof_${Date.now()}_${dto.profileFilename || 'profile.png'}`);
-      fs.writeFileSync(profPath, Buffer.from(dto.profileBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
-      const profInput = page.locator('input[type="file"][name*="prof" i], #profileFile, [data-testid="input-profile-file"]').first();
-      if ((await profInput.count()) > 0) await profInput.setInputFiles(profPath).catch(() => {});
+      const profLoc = await this.findFormField(page, 'profileImage');
+      if ((await profLoc.count()) > 0) {
+        const profPath = path.join(tempDir, `prof_${Date.now()}_${dto.profileFilename || 'profile.png'}`);
+        fs.writeFileSync(profPath, Buffer.from(dto.profileBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
+        await profLoc.setInputFiles(profPath).catch(() => {});
+      }
     }
 
-    // 4. Read-Back Verification Before Save
-    const readUsername = await usernameInput.inputValue().catch(() => '');
-    const readFirstName = await firstNameInput.inputValue().catch(() => '');
-    const readLastName = await lastNameInput.inputValue().catch(() => '');
+    // 7. Read-Back Verification Before Save
+    const readUsername = (await usernameInput.inputValue().catch(() => '')).trim();
+    const readFirstName = (await firstNameInput.inputValue().catch(() => '')).trim();
+    const readLastName = (await lastNameInput.inputValue().catch(() => '')).trim();
 
     if (
-      readUsername.toLowerCase().trim() !== dto.username.toLowerCase().trim() ||
-      (readFirstName && readFirstName.trim() !== dto.firstName.trim()) ||
-      (readLastName && readLastName.trim() !== dto.lastName.trim())
+      readUsername.toLowerCase() !== dto.username.toLowerCase().trim() ||
+      (dto.firstName && readFirstName && readFirstName !== dto.firstName.trim()) ||
+      (dto.lastName && readLastName && readLastName !== dto.lastName.trim())
     ) {
       return {
         success: false,
         username: dto.username,
-        errorCode: 'REMOTE_FORM_VALUE_MISMATCH',
+        errorCode: 'REMOTE_FORM_VALIDATION_FAILED',
         errorMessage: 'Remote form value mismatch during pre-submission read-back verification.',
       };
     }
 
-    // 5. Submit Form Exactly Once
-    const submitBtn = page.locator('#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), [data-testid="btn-save-user"]').first();
-    await submitBtn.click();
+    // 8. Submit Form Exactly Once with Dialog and Error Banner Handling
+    let dialogMessage: string | null = null;
+    const dialogHandler = async (dialog: any) => {
+      dialogMessage = dialog.message();
+      await dialog.accept().catch(() => {});
+    };
+    page.on('dialog', dialogHandler);
 
-    // 6. Detect Success or Error
-    const errorBanner = page.locator('.alert-danger, .error-message, [data-testid="error-message"], .toast-error').first();
-    const isError = await errorBanner.isVisible().catch(() => false);
-    if (isError) {
-      const errorText = (await errorBanner.innerText().catch(() => 'Unknown remote error')).trim();
+    const submitBtn = page
+      .locator(
+        '#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), button:has-text("Save"), [data-testid="btn-save-user"], .btn-save, input[type="submit"][value*="Save" i]'
+      )
+      .first();
+
+    if ((await submitBtn.count()) === 0) {
+      page.off('dialog', dialogHandler);
       return {
         success: false,
         username: dto.username,
-        errorMessage: errorText,
-        errorCode: errorText.toLowerCase().includes('already exists') || errorText.toLowerCase().includes('duplicate')
-          ? 'DUPLICATE_USERNAME'
-          : 'REMOTE_VALIDATION_FAILED',
+        errorCode: 'REMOTE_SAVE_REJECTED',
+        errorMessage: 'Save button not found on remote Add User form.',
       };
     }
 
-    // 7. Verify User in Users List
+    await submitBtn.click();
+    await page.waitForTimeout(1000);
+
+    // Check dialog error
+    if (dialogMessage) {
+      page.off('dialog', dialogHandler);
+      const msgLower = (dialogMessage as string).toLowerCase();
+      if (msgLower.includes('already exists') || msgLower.includes('duplicate user') || msgLower.includes('username already')) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'DUPLICATE_USERNAME',
+          errorMessage: dialogMessage,
+        };
+      }
+      if (msgLower.includes('duplicate name') || msgLower.includes('name already exists')) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'POTENTIAL_DUPLICATE_NAME',
+          errorMessage: dialogMessage,
+        };
+      }
+      if (msgLower.includes('error') || msgLower.includes('failed') || msgLower.includes('invalid') || msgLower.includes('cannot')) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'REMOTE_SAVE_REJECTED',
+          errorMessage: dialogMessage,
+        };
+      }
+    }
+
+    // Check error banner
+    const errorBanner = page
+      .locator(
+        '.alert-danger, .error-message, [data-testid="error-message"], .toast-error, .alert-warning, .text-danger:has-text("already exists"), .text-danger:has-text("error")'
+      )
+      .first();
+
+    if (await errorBanner.isVisible().catch(() => false)) {
+      const errText = (await errorBanner.innerText().catch(() => 'Unknown remote error')).trim();
+      page.off('dialog', dialogHandler);
+      const errLower = errText.toLowerCase();
+      if (errLower.includes('already exists') || errLower.includes('duplicate user') || errLower.includes('duplicate username')) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'DUPLICATE_USERNAME',
+          errorMessage: errText,
+        };
+      }
+      if (errLower.includes('duplicate name')) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'POTENTIAL_DUPLICATE_NAME',
+          errorMessage: errText,
+        };
+      }
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_FORM_VALIDATION_FAILED',
+        errorMessage: errText,
+      };
+    }
+
+    page.off('dialog', dialogHandler);
+
+    // 9. Verify User in Users List
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     const verifyLookup = await this.findExactUserRow(page, dto.username, usersListUrl);
 
@@ -936,7 +1519,7 @@ export class UserManagementExecutor {
         success: false,
         username: dto.username,
         errorMessage: `User '${dto.username}' could not be verified on the remote user list after creation.`,
-        errorCode: 'REMOTE_USER_NOT_FOUND_AFTER_CREATE',
+        errorCode: 'REMOTE_CREATE_VERIFICATION_FAILED',
       };
     }
   }
@@ -1413,45 +1996,53 @@ export class UserManagementExecutor {
     }
 
     if (dto.firstName) {
-      const fInput = page.locator('#firstName, #fName, [name="firstName"], [data-testid="input-firstname"]').first();
+      const fInput = await this.findFormField(page, 'firstName');
       if (await fInput.isVisible().catch(() => false)) await fInput.fill(dto.firstName);
     }
     if (dto.lastName) {
-      const lInput = page.locator('#lastName, #lName, [name="lastName"], [data-testid="input-lastname"]').first();
+      const lInput = await this.findFormField(page, 'lastName');
       if (await lInput.isVisible().catch(() => false)) await lInput.fill(dto.lastName);
     }
     if (dto.mobileNumber) {
-      const mInput = page.locator('#mobileNo, #mobileNumber, [name="mobileNumber"], [data-testid="input-mobile"]').first();
+      const mInput = await this.findFormField(page, 'mobileNumber');
       if (await mInput.isVisible().catch(() => false)) await mInput.fill(dto.mobileNumber);
     }
     if (dto.email) {
-      const eInput = page.locator('#email, [name="email"], [data-testid="input-email"]').first();
+      const eInput = await this.findFormField(page, 'email');
       if (await eInput.isVisible().catch(() => false)) await eInput.fill(dto.email);
     }
     if (dto.nationality) {
-      const nInput = page.locator('#nationality, select[name="nationality"], [data-testid="select-nationality"]').first();
+      const nInput = await this.findFormField(page, 'nationality');
       if (await nInput.isVisible().catch(() => false)) {
         const isSelect = await nInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
         if (isSelect) {
-          await nInput.selectOption({ label: dto.nationality }).catch(() => {});
+          await nInput.selectOption({ label: dto.nationality }).catch(async () => {
+            await nInput.selectOption({ value: dto.nationality });
+          });
         } else {
           await nInput.fill(dto.nationality);
         }
       }
     }
     if (dto.role) {
-      const rInput = page.locator('#role, select[name="role"], [data-testid="select-role"]').first();
+      const rInput = await this.findFormField(page, 'role');
       if (await rInput.isVisible().catch(() => false)) {
         const isSelect = await rInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
         if (isSelect) {
-          await rInput.selectOption({ label: dto.role }).catch(() => {});
+          await rInput.selectOption({ label: dto.role }).catch(async () => {
+            await rInput.selectOption({ value: dto.role });
+          });
         } else {
           await rInput.fill(dto.role);
         }
       }
     }
 
-    const submitBtn = page.locator('#btnSave, #btnSubmit, button[type="submit"]:has-text("Save"), [data-testid="btn-save-user"]').first();
+    const submitBtn = page
+      .locator(
+        '#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), button:has-text("Save"), [data-testid="btn-save-user"], .btn-save'
+      )
+      .first();
     if (await submitBtn.isVisible().catch(() => false)) {
       await submitBtn.click();
       await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});

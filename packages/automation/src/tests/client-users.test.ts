@@ -471,8 +471,86 @@ async function runClientUsersTests() {
     assert.strictEqual(contextClosed, true, 'Mutation context must always be closed in finally');
     console.log('✓ TEST 28 Passed');
 
+    // 29. Robust findFormField resolution on Angular & non-standard DOM structures
+    console.log('\n[TEST 29] Testing Robust findFormField on Angular & non-standard DOM structures...');
+    await page.setContent(`
+      <div id="angularApp">
+        <div class="field-wrapper">
+          <label for="custom_user_ctrl">User Name *</label>
+          <input type="text" id="custom_user_ctrl" />
+        </div>
+        <div class="form-group">
+          <label>First Name</label>
+          <input type="text" formcontrolname="firstName" />
+        </div>
+        <div class="field">
+          <label>Last Name</label>
+          <input type="text" name="lastName" />
+        </div>
+        <div class="field">
+          <label>Nationality *</label>
+          <select name="nationality">
+            <option value="Saudi Arabia">Saudi Arabia</option>
+            <option value="Egypt">Egypt</option>
+          </select>
+        </div>
+      </div>
+    `);
+
+    const foundUser = await UserManagementExecutor.findFormField(page, 'username');
+    assert.strictEqual(await foundUser.isVisible(), true, 'Username must be resolved via label[for]');
+
+    const foundFirst = await UserManagementExecutor.findFormField(page, 'firstName');
+    assert.strictEqual(await foundFirst.isVisible(), true, 'First name must be resolved via formcontrolname / label container');
+
+    const foundLast = await UserManagementExecutor.findFormField(page, 'lastName');
+    assert.strictEqual(await foundLast.isVisible(), true, 'Last name must be resolved via label');
+
+    const foundNat = await UserManagementExecutor.findFormField(page, 'nationality');
+    assert.strictEqual(await foundNat.isVisible(), true, 'Nationality select must be resolved');
+    console.log('✓ TEST 29 Passed');
+
+    // 30. REMOTE_DROPDOWN_OPTION_NOT_FOUND when dropdown option does not exist
+    console.log('\n[TEST 30] Testing REMOTE_DROPDOWN_OPTION_NOT_FOUND classification...');
+    const invalidDropDto: CreateClientUserDto = {
+      clientId: 'client-123',
+      username: `test_inv_${Date.now()}`,
+      firstName: 'Invalid',
+      lastName: 'Option',
+      mobileNumber: '0501234567',
+      nationality: 'NonexistentCountry12345',
+      role: 'Physician',
+      status: 'ACTIVE',
+    };
+    const invalidDropRes = await UserManagementExecutor.createUser(
+      page,
+      `${BASE_URL}/MasterV9.4/addUsers`,
+      `${BASE_URL}/MasterV9.4/users`,
+      invalidDropDto
+    );
+    assert.strictEqual(invalidDropRes.success, false);
+    assert.strictEqual(invalidDropRes.errorCode, 'REMOTE_DROPDOWN_OPTION_NOT_FOUND');
+    assert.ok(invalidDropRes.errorMessage?.includes('NonexistentCountry12345'), 'Error message must specify requested option');
+    assert.ok(invalidDropRes.errorMessage?.includes('Available options'), 'Error message must list available options');
+    console.log('✓ TEST 30 Passed');
+
+    // 31. REMOTE_REQUIRED_FIELD_NOT_FOUND with sanitized URL, page heading, and detected labels
+    console.log('\n[TEST 31] Testing REMOTE_REQUIRED_FIELD_NOT_FOUND diagnostic details...');
+    const missingFieldRes = await UserManagementExecutor.createUser(
+      page,
+      `${BASE_URL}/MasterV9.4/addUsers-missing-field`,
+      `${BASE_URL}/MasterV9.4/users`,
+      createDto
+    );
+    assert.strictEqual(missingFieldRes.success, false);
+    assert.strictEqual(missingFieldRes.errorCode, 'REMOTE_REQUIRED_FIELD_NOT_FOUND');
+    assert.ok(missingFieldRes.errorMessage?.includes("Required field 'username' not found"), 'Error message must cite missing field');
+    assert.ok(missingFieldRes.errorMessage?.includes('Add - User Details') || missingFieldRes.errorMessage?.includes('addUsers-missing-field'), 'Error message must cite heading or URL');
+    assert.ok(missingFieldRes.errorMessage?.includes('Department') || missingFieldRes.errorMessage?.includes('Employee Code'), 'Error message must cite detected labels');
+    console.log('✓ TEST 31 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (28/28)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (31/31)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});
