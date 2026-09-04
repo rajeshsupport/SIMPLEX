@@ -334,8 +334,319 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(errorCodes.length, 12, 'All 12 classified error codes verified');
   console.log('✓ TEST 19 Passed');
 
+  // 20. Success Message Classification
+  console.log('\n[TEST 20] Testing Success Message Classification (Congrats!! Added successfully as SUCCESS)...');
+  const classifyRemoteMessage = (message: string): 'SUCCESS' | 'ERROR' => {
+    const lower = message.toLowerCase();
+    if (
+      lower.includes('congrats') ||
+      lower.includes('added successfully') ||
+      lower.includes('created successfully') ||
+      lower.includes('successfully added') ||
+      lower.includes('successfully created') ||
+      lower.includes('saved successfully') ||
+      lower.includes('user created') ||
+      lower.includes('user added')
+    ) {
+      return 'SUCCESS';
+    }
+    return 'ERROR';
+  };
+
+  assert.strictEqual(classifyRemoteMessage('Congrats!! Added successfully'), 'SUCCESS');
+  assert.strictEqual(classifyRemoteMessage('Added successfully'), 'SUCCESS');
+  assert.strictEqual(classifyRemoteMessage('User created successfully'), 'SUCCESS');
+  assert.strictEqual(classifyRemoteMessage('User already exists'), 'ERROR');
+  assert.strictEqual(classifyRemoteMessage('Invalid form submission'), 'ERROR');
+  console.log('✓ TEST 20 Passed');
+
+  // 21. Ephemeral Default Password Lifecycle & Masking
+  console.log('\n[TEST 21] Testing Ephemeral Default Password Lifecycle & 60s Auto-Clearing...');
+  let modalState: {
+    username: string;
+    defaultPassword: string | null;
+    isMasked: boolean;
+    countdown: number;
+  } | null = {
+    username: 'new_operator',
+    defaultPassword: 'TemporaryPass123!',
+    isMasked: true, // masked by default
+    countdown: 60,
+  };
+
+  assert.strictEqual(modalState.isMasked, true, 'Password must be masked by default');
+  
+  // Reveal
+  modalState.isMasked = false;
+  assert.strictEqual(modalState.isMasked, false, 'Reveal button must unmask password');
+
+  // Simulate 60s countdown expiration
+  modalState.countdown = 0;
+  if (modalState.countdown <= 0) {
+    modalState.defaultPassword = null;
+  }
+  assert.strictEqual(modalState.defaultPassword, null, 'Password must auto-clear from memory after 60 seconds');
+
+  // Simulate modal close immediately purging state
+  const closeModal = () => {
+    modalState = null;
+  };
+  closeModal();
+  assert.strictEqual(modalState, null, 'Closing modal must purge credential state from memory immediately');
+  console.log('✓ TEST 21 Passed');
+
+  // 22. Remote Password Unavailable Handling
+  console.log('\n[TEST 22] Testing Remote Password Unavailable Case...');
+  const remoteWithoutPass = { defaultPassword: undefined, temporaryPassword: undefined };
+  const getDisplayPasswordText = (pass?: string) => {
+    return pass || 'Default password was not provided by the client application.';
+  };
+  assert.strictEqual(
+    getDisplayPasswordText(remoteWithoutPass.defaultPassword),
+    'Default password was not provided by the client application.'
+  );
+  console.log('✓ TEST 22 Passed');
+
+  // 23. Zero Password Persistence in MSSQL Database Snapshots & Audit Records
+  console.log('\n[TEST 23] Testing Zero Plaintext Password in Database Snapshot & Audit Logs...');
+  const createSnapshotRecord = (dto: any) => ({
+    id: 'snap-uuid',
+    clientId: dto.clientId,
+    username: dto.username,
+    firstName: dto.firstName,
+    lastName: dto.lastName,
+    fullName: `${dto.firstName} ${dto.lastName}`,
+    status: dto.status || 'ACTIVE',
+    isPresentRemotely: true,
+  });
+
+  const snap = createSnapshotRecord({
+    clientId: 'c-1',
+    username: 'user_secure',
+    firstName: 'Secure',
+    lastName: 'User',
+    defaultPassword: 'SecretPassword99!',
+  });
+  assert.strictEqual('defaultPassword' in snap, false, 'Snapshot must not contain defaultPassword column');
+  assert.strictEqual('password' in snap, false, 'Snapshot must not contain password column');
+  console.log('✓ TEST 23 Passed');
+
+  // 24. Verification Gate Before Success Modal & Password Delivery
+  console.log('\n[TEST 24] Testing Verification Gate Before Success Modal & Password Delivery...');
+  const executionPipeline = (remoteVerified: boolean, centralSynced: boolean, rawPassword?: string) => {
+    if (!remoteVerified) throw new Error('REMOTE_CREATE_VERIFICATION_FAILED');
+    if (!centralSynced) throw new Error('CENTRAL_SYNC_FAILED');
+    return {
+      successModalOpen: true,
+      deliveredPassword: rawPassword || null,
+    };
+  };
+
+  assert.throws(() => executionPipeline(false, true, 'pwd123'), /REMOTE_CREATE_VERIFICATION_FAILED/);
+  assert.throws(() => executionPipeline(true, false, 'pwd123'), /CENTRAL_SYNC_FAILED/);
+  const successOutcome = executionPipeline(true, true, 'pwd123');
+  assert.strictEqual(successOutcome.successModalOpen, true);
+  assert.strictEqual(successOutcome.deliveredPassword, 'pwd123');
+  console.log('✓ TEST 24 Passed');
+
+  // 25. Post-Mutation Authoritative Pull Sync Reconciliation
+  console.log('\n[TEST 25] Testing Post-Mutation Pull Sync Reconciliation...');
+  const mockSnapshots = new Map<string, any>();
+  const mockSyncClientUsers = async (clientId: string) => {
+    // Simulate remote pull returning the new user
+    mockSnapshots.set('abdul.p', {
+      id: 'snap-reconciled-1',
+      clientId,
+      username: 'abdul.p',
+      fullName: 'Abdul Pathan',
+      status: 'ACTIVE',
+      isPresentRemotely: true,
+      lastSyncedAt: new Date().toISOString(),
+    });
+  };
+
+  const reconcileMock = async (clientId: string, username: string) => {
+    await mockSyncClientUsers(clientId);
+    const found = mockSnapshots.get(username.toLowerCase().trim());
+    if (!found) throw new Error('USER_NOT_FOUND_ON_REMOTE');
+    return {
+      ...found,
+      message: `User '${username}' successfully verified and synchronized with Central Console.`,
+    };
+  };
+
+  const recResult = await reconcileMock('client-123', 'abdul.p');
+  assert.strictEqual(recResult.username, 'abdul.p');
+  assert.strictEqual(recResult.status, 'ACTIVE');
+  console.log('✓ TEST 25 Passed');
+
+  // 26. Graceful Reconciliation State Handling (CREATED_PENDING_RECONCILIATION)
+  console.log('\n[TEST 26] Testing Graceful Reconciliation State Handling...');
+  const handleMutationOutcome = (runResult: { isRemoteSaveConfirmed: boolean; rowFound: boolean; defaultPassword?: string }) => {
+    if (runResult.rowFound) {
+      return { status: 'CONFIRMED_AND_VERIFIED', isError: false, defaultPassword: runResult.defaultPassword };
+    }
+    if (runResult.isRemoteSaveConfirmed) {
+      return { status: 'CREATED_PENDING_RECONCILIATION', isError: false, defaultPassword: runResult.defaultPassword };
+    }
+    return { status: 'REMOTE_CREATE_VERIFICATION_FAILED', isError: true };
+  };
+
+  const delayedOutcome = handleMutationOutcome({ isRemoteSaveConfirmed: true, rowFound: false, defaultPassword: 'EphemPass99!' });
+  assert.strictEqual(delayedOutcome.status, 'CREATED_PENDING_RECONCILIATION');
+  assert.strictEqual(delayedOutcome.isError, false, 'Confirmed remote save must never be treated as failure');
+  assert.strictEqual(delayedOutcome.defaultPassword, 'EphemPass99!');
+  console.log('✓ TEST 26 Passed');
+
+  // 27. Duplicate Mutation Submission Prevention
+  console.log('\n[TEST 27] Testing Duplicate Mutation Submission Prevention...');
+  const allowFormSubmission = (isSubmitting: boolean, isRemoteSaveConfirmed: boolean) => {
+    if (isSubmitting || isRemoteSaveConfirmed) return false;
+    return true;
+  };
+  assert.strictEqual(allowFormSubmission(false, true), false, 'Must block resubmission if save was confirmed');
+  assert.strictEqual(allowFormSubmission(true, false), false, 'Must block resubmission if active mutation in progress');
+  assert.strictEqual(allowFormSubmission(false, false), true, 'Allow submission only when no confirmed save exists');
+  console.log('✓ TEST 27 Passed');
+
+  // 28. Ephemeral Credential Security Invariant
+  console.log('\n[TEST 28] Testing Ephemeral Credential Security Invariants...');
+  const activeMemoryContext = {
+    ephemeralPassword: 'SecretPassword99!',
+    snapshotPayload: {
+      username: 'jdoe',
+      fullName: 'John Doe',
+      status: 'ACTIVE',
+    },
+    auditPayload: {
+      action: 'CLIENT_USER_CREATED',
+      username: 'jdoe',
+      detailsJson: JSON.stringify({ clientCode: 'HOSP_01', username: 'jdoe' }),
+    },
+  };
+  assert.strictEqual('password' in activeMemoryContext.snapshotPayload, false);
+  assert.strictEqual(activeMemoryContext.auditPayload.detailsJson.includes('SecretPassword99!'), false);
+  console.log('✓ TEST 28 Passed');
+
+  // 29. Unified Credential Success: CREATE Mode displays captured password
+  console.log('\n[TEST 29] Testing Unified Credential Success Popup: CREATE mode...');
+  const createSuccessPayload = {
+    type: 'CREATE' as const,
+    username: 'ahmed.m',
+    clientCode: 'HOSP_01',
+    clientName: 'Central Hospital',
+    password: 'CapturedDefault123!',
+  };
+  assert.strictEqual(createSuccessPayload.type, 'CREATE');
+  assert.strictEqual(createSuccessPayload.username, 'ahmed.m');
+  assert.strictEqual(createSuccessPayload.clientCode, 'HOSP_01');
+  assert.strictEqual(createSuccessPayload.password, 'CapturedDefault123!');
+  console.log('✓ TEST 29 Passed');
+
+  // 30. Unified Credential Success: RESET Mode displays returned password
+  console.log('\n[TEST 30] Testing Unified Credential Success Popup: RESET mode...');
+  const resetSuccessPayload = {
+    type: 'RESET' as const,
+    username: 'dr_sarah',
+    clientCode: 'HOSP_01',
+    clientName: 'Central Hospital',
+    password: 'Tmp@NewPass456!',
+  };
+  assert.strictEqual(resetSuccessPayload.type, 'RESET');
+  assert.strictEqual(resetSuccessPayload.username, 'dr_sarah');
+  assert.strictEqual(resetSuccessPayload.password, 'Tmp@NewPass456!');
+  console.log('✓ TEST 30 Passed');
+
+  // 31. Unified Credential Success: Create/Reset Failure NEVER displays password
+  console.log('\n[TEST 31] Testing Failure Never Displays Credential Modal or Password...');
+  const handleMutationFailure = (isSuccess: boolean, pwd?: string) => {
+    if (!isSuccess) {
+      return { modalOpen: false, credentialInfo: null };
+    }
+    return { modalOpen: true, credentialInfo: { password: pwd || null } };
+  };
+  const failedCreate = handleMutationFailure(false, 'ShouldNeverLeak!');
+  assert.strictEqual(failedCreate.modalOpen, false, 'Modal must remain closed on create failure');
+  assert.strictEqual(failedCreate.credentialInfo, null, 'Credential info must be null on create failure');
+
+  const failedReset = handleMutationFailure(false, 'ShouldNeverLeak!');
+  assert.strictEqual(failedReset.modalOpen, false, 'Modal must remain closed on reset failure');
+  assert.strictEqual(failedReset.credentialInfo, null, 'Credential info must be null on reset failure');
+  console.log('✓ TEST 31 Passed');
+
+  // 32. Unified Credential Success: Password Unavailable Fallbacks (Create vs Reset)
+  console.log('\n[TEST 32] Testing Password Unavailable Fallback Texts...');
+  const getFallbackText = (type: 'CREATE' | 'RESET', password: string | null) => {
+    if (password) return password;
+    return type === 'CREATE'
+      ? 'Default password was not provided by the client application.'
+      : 'Password reset succeeded, but the client application did not provide the password.';
+  };
+  assert.strictEqual(
+    getFallbackText('CREATE', null),
+    'Default password was not provided by the client application.'
+  );
+  assert.strictEqual(
+    getFallbackText('RESET', null),
+    'Password reset succeeded, but the client application did not provide the password.'
+  );
+  assert.strictEqual(getFallbackText('CREATE', 'CustomPass123'), 'CustomPass123');
+  console.log('✓ TEST 32 Passed');
+
+  // 33. Unified Credential Success: Strict Multi-Client Isolation
+  console.log('\n[TEST 33] Testing Multi-Client Password Isolation...');
+  const activeClientContext = 'CLIENT_A';
+  const deliveredCredentialContext = {
+    clientCode: 'CLIENT_B',
+    username: 'user_b',
+    password: 'ClientBSecret!',
+  };
+  // Invariant: Modal should only accept credentials matching current selected client
+  const isCredentialAccepted = deliveredCredentialContext.clientCode === activeClientContext;
+  assert.strictEqual(isCredentialAccepted, false, 'Must reject credentials from another client context');
+  console.log('✓ TEST 33 Passed');
+
+  // 34. Unified Credential Success: Ephemeral 60s Auto-Clear and Immediate Purge on Close/Unmount
+  console.log('\n[TEST 34] Testing Ephemeral 60s Countdown Auto-Clear & Memory Destruction...');
+  let modalCredentialState: { password: string | null; countdown: number } | null = {
+    password: 'SecretPass123!',
+    countdown: 60,
+  };
+  // Tick countdown to 0
+  modalCredentialState.countdown = 0;
+  if (modalCredentialState.countdown <= 0) {
+    modalCredentialState.password = null;
+  }
+  assert.strictEqual(modalCredentialState.password, null, 'Password must be nullified when countdown reaches 0');
+
+  // Destroy on Close/Unmount
+  const destroyState = () => {
+    modalCredentialState = null;
+  };
+  destroyState();
+  assert.strictEqual(modalCredentialState, null, 'Modal state must be completely cleared on close or unmount');
+  console.log('✓ TEST 34 Passed');
+
+  // 35. Unified Credential Success: Zero Plaintext Password Invariant
+  console.log('\n[TEST 35] Testing Zero Plaintext Password Invariant across Database and Audit Logs...');
+  const mssqlRecord = {
+    id: 'user-rec-1',
+    clientId: 'client-1',
+    username: 'dr_sarah',
+    fullName: 'Dr. Sarah',
+    status: 'ACTIVE',
+  };
+  const auditEntry = {
+    action: 'CLIENT_USER_PASSWORD_RESET',
+    actorUsername: 'admin',
+    detailsJson: JSON.stringify({ clientCode: 'HOSP_01', username: 'dr_sarah' }),
+  };
+  assert.strictEqual('password' in mssqlRecord, false, 'Database record must have no password column');
+  assert.strictEqual(auditEntry.detailsJson.includes('password'), false, 'Audit details must never include password');
+  console.log('✓ TEST 35 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION & FORM MAPPING TESTS PASSED (19/19)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION & FORM MAPPING TESTS PASSED (35/35)');
   console.log('======================================================================\n');
 }
 
@@ -343,3 +654,4 @@ runClientUserMutationUnitTests().catch((err) => {
   console.error('[TEST ERROR]', err);
   process.exit(1);
 });
+

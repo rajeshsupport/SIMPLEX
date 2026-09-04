@@ -76,7 +76,10 @@ export interface MutationResult {
   username: string;
   message?: string;
   status?: ClientUserStatus;
+  defaultPassword?: string;
   temporaryPassword?: string;
+  isRemoteSaveConfirmed?: boolean;
+  pendingReconciliation?: boolean;
   errorCode?: string;
   errorMessage?: string;
 }
@@ -1056,8 +1059,16 @@ export class UserManagementExecutor {
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
 
-    // 1. Ensure authenticated
-    const authRes = await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
+    const resolvedLoginUrl =
+      loginUrl || addUsersUrl.replace(/\/addUsers.*$/i, '/login').replace(/\/users.*$/i, '/login');
+
+    // 1. Authenticate first at the configured login/base route before navigating to /addUsers
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: addUsersUrl,
+      loginUrl: resolvedLoginUrl,
+      credentials,
+    });
+
     if (!authRes.authenticated) {
       return {
         success: false,
@@ -1067,9 +1078,11 @@ export class UserManagementExecutor {
       };
     }
 
-    // 2. Navigate to Add Users URL
+    // 2. Navigate to resolved /addUsers route only after authentication is confirmed
     try {
-      await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      if (page.url() !== addUsersUrl) {
+        await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      }
     } catch (navErr: any) {
       return {
         success: false,
@@ -1079,9 +1092,13 @@ export class UserManagementExecutor {
       };
     }
 
-    // Detect login redirect and re-authenticate if necessary
-    if (page.url().includes('/login')) {
-      const reAuth = await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
+    // Detect login redirect and re-authenticate once if necessary
+    if (page.url().includes('/login') || (await page.locator('#btnLogin, [data-testid="btn-login"]').count()) > 0) {
+      const reAuth = await this.ensureAuthenticated(page, {
+        targetUrl: addUsersUrl,
+        loginUrl: resolvedLoginUrl,
+        credentials,
+      });
       if (!reAuth.authenticated) {
         return {
           success: false,
@@ -1090,13 +1107,36 @@ export class UserManagementExecutor {
           errorMessage: 'Redirected to login while opening Add User screen, and re-authentication failed.',
         };
       }
-      await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      try {
+        await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch (retryNavErr: any) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'REMOTE_ADD_USER_ROUTE_FAILED',
+          errorMessage: `Failed to navigate to Add User route on retry: ${retryNavErr.message}`,
+        };
+      }
+      if (page.url().includes('/login') || (await page.locator('#btnLogin, [data-testid="btn-login"]').count()) > 0) {
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+          errorMessage: 'Redirected to login while opening Add User screen and session could not be established.',
+        };
+      }
     }
 
-    // Check if route returned 404
+    // Check if route returned 404 or access denied
     const is404 = await page.evaluate(() => {
       const text = (document.body ? document.body.innerText : '').toLowerCase();
-      return text.includes('404 not found') || text.includes('cannot get') || text.includes('page not found');
+      return (
+        text.includes('404 not found') ||
+        text.includes('cannot get') ||
+        text.includes('page not found') ||
+        text.includes('403 forbidden') ||
+        text.includes('access denied')
+      );
     });
     if (is404) {
       return {
@@ -1107,7 +1147,7 @@ export class UserManagementExecutor {
       };
     }
 
-    // Wait for spinners to disappear
+    // Wait for loading spinners to disappear
     try {
       const spinner = page.locator('.loading, .spinner, .overlay, #loadingSpinner, .loader, .page-loader').first();
       if ((await spinner.count()) > 0) {
@@ -1123,7 +1163,7 @@ export class UserManagementExecutor {
       return {
         success: false,
         username: dto.username,
-        errorCode: 'REMOTE_ADD_USER_FORM_NOT_READY',
+        errorCode: 'REMOTE_FORM_NOT_READY',
         errorMessage: 'Remote Add User form did not render or become ready within the timeout.',
       };
     }
@@ -1169,6 +1209,63 @@ export class UserManagementExecutor {
     const roleInput = await this.findFormField(page, 'role');
     const profileRoleInput = await this.findFormField(page, 'profileRole');
     const barcodeInput = await this.findFormField(page, 'barcodeNumber');
+
+    // Inspect displayed default password on the live Add User screen (if present)
+    let defaultPasswordCaptured: string | undefined = undefined;
+    try {
+      const liveFormPassword = await page.evaluate(() => {
+        // 1. Password input elements (disabled, readonly, or prefilled)
+        const inputs = Array.from(
+          document.querySelectorAll('input[name*="pass" i], input[id*="pass" i], input[type="password"], input[data-testid*="pass" i]')
+        ) as HTMLInputElement[];
+
+        for (const input of inputs) {
+          const val = (input.value || input.getAttribute('value') || '').trim();
+          if (val && val.length > 0) return val;
+        }
+
+        // 2. Labels with "password" and their associated input/value
+        const labels = Array.from(document.querySelectorAll('label, .form-label, .control-label, dt, th, span.label'));
+        for (const lbl of labels) {
+          const txt = (lbl.textContent || '').trim().toLowerCase();
+          if (txt.includes('password') && !txt.includes('confirm')) {
+            const container = lbl.parentElement || lbl.closest('.field, .form-group, .row, div');
+            if (container) {
+              const input = container.querySelector('input');
+              if (input && (input.value || input.getAttribute('value'))) {
+                return (input.value || input.getAttribute('value') || '').trim();
+              }
+              const valElem = container.querySelector('.val, .value, span:not(.label), b, strong, code');
+              if (valElem && valElem.textContent) {
+                const t = valElem.textContent.trim();
+                if (t && !t.toLowerCase().includes('password')) return t;
+              }
+            }
+          }
+        }
+
+        // 3. Dedicated selectors / badges
+        const badge = document.querySelector(
+          '.default-password, [data-testid="default-password"], [data-testid="temporary-password"], #defaultPassword, #tempPassword, #lblDefaultPassword'
+        );
+        if (badge && badge.textContent) {
+          return badge.textContent.trim();
+        }
+
+        // 4. Regex search on form container text
+        const formEl = document.querySelector('form, #addUserForm, .card, .content');
+        if (formEl && formEl.textContent) {
+          const m = formEl.textContent.match(/(?:default|temporary|initial)\s*password\s*[:=-]\s*([^\s\n\r,;]+)/i);
+          if (m && m[1]) return m[1].trim();
+        }
+
+        return null;
+      });
+
+      if (liveFormPassword) {
+        defaultPasswordCaptured = liveFormPassword;
+      }
+    } catch {}
 
     // 4. Fill text inputs with event dispatching for Angular / AngularJS reactive binding
     await usernameInput.fill(dto.username);
@@ -1424,7 +1521,7 @@ export class UserManagementExecutor {
       };
     }
 
-    // 8. Submit Form Exactly Once with Dialog and Error Banner Handling
+    // 8. Submit Form Action Button Discovery, Scroll, Enable Check, Single-Click & Double Confirmation
     let dialogMessage: string | null = null;
     const dialogHandler = async (dialog: any) => {
       dialogMessage = dialog.message();
@@ -1432,9 +1529,10 @@ export class UserManagementExecutor {
     };
     page.on('dialog', dialogHandler);
 
+    // Discover bottom action button matching positive labels and excluding negative labels
     const submitBtn = page
       .locator(
-        '#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), button:has-text("Save"), [data-testid="btn-save-user"], .btn-save, input[type="submit"][value*="Save" i]'
+        '#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), button:has-text("Save"), button:has-text("Add"), button:has-text("Create"), button:has-text("Submit"), button:has-text("Update"), [data-testid="btn-save-user"], .btn-save, input[type="submit"][value*="Save" i], input[type="submit"][value*="Add" i], input[type="submit"][value*="Create" i], input[type="submit"][value*="Submit" i]'
       )
       .first();
 
@@ -1443,45 +1541,131 @@ export class UserManagementExecutor {
       return {
         success: false,
         username: dto.username,
-        errorCode: 'REMOTE_SAVE_REJECTED',
-        errorMessage: 'Save button not found on remote Add User form.',
+        errorCode: 'REMOTE_SUBMIT_BUTTON_NOT_FOUND',
+        errorMessage: 'Submit button (Save/Add/Create/Submit/Update) not found on remote Add User form.',
       };
     }
 
-    await submitBtn.click();
-    await page.waitForTimeout(1000);
+    // Scroll action button into view
+    await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(200);
 
-    // Check dialog error
-    if (dialogMessage) {
-      page.off('dialog', dialogHandler);
-      const msgLower = (dialogMessage as string).toLowerCase();
-      if (msgLower.includes('already exists') || msgLower.includes('duplicate user') || msgLower.includes('username already')) {
+    // Check if button is disabled
+    const isDisabled = await submitBtn
+      .evaluate((el: HTMLElement) => {
+        return (
+          el.hasAttribute('disabled') ||
+          el.getAttribute('aria-disabled') === 'true' ||
+          el.classList.contains('disabled')
+        );
+      })
+      .catch(() => false);
+
+    if (isDisabled) {
+      // Wait up to 1.5s for reactive form validation settling
+      await page.waitForTimeout(1500);
+      const isStillDisabled = await submitBtn
+        .evaluate((el: HTMLElement) => {
+          return (
+            el.hasAttribute('disabled') ||
+            el.getAttribute('aria-disabled') === 'true' ||
+            el.classList.contains('disabled')
+          );
+        })
+        .catch(() => false);
+
+      if (isStillDisabled) {
+        page.off('dialog', dialogHandler);
         return {
           success: false,
           username: dto.username,
-          errorCode: 'DUPLICATE_USERNAME',
-          errorMessage: dialogMessage,
-        };
-      }
-      if (msgLower.includes('duplicate name') || msgLower.includes('name already exists')) {
-        return {
-          success: false,
-          username: dto.username,
-          errorCode: 'POTENTIAL_DUPLICATE_NAME',
-          errorMessage: dialogMessage,
-        };
-      }
-      if (msgLower.includes('error') || msgLower.includes('failed') || msgLower.includes('invalid') || msgLower.includes('cannot')) {
-        return {
-          success: false,
-          username: dto.username,
-          errorCode: 'REMOTE_SAVE_REJECTED',
-          errorMessage: dialogMessage,
+          errorCode: 'REMOTE_SUBMIT_BUTTON_DISABLED',
+          errorMessage: 'Remote Save button is disabled (form validation may be incomplete).',
         };
       }
     }
 
-    // Check error banner
+    // Click submit button once
+    await submitBtn.click();
+    await page.waitForTimeout(600);
+
+    // Handle DOM confirmation modals / alerts (e.g. Bootstrap modal, SweetAlert, Bootbox)
+    const modalConfirmBtn = page
+      .locator(
+        '.modal.show button:has-text("Confirm"), .modal.show button:has-text("Yes"), .modal.show button:has-text("OK"), .modal.show button:has-text("Save"), .modal.show button:has-text("Update"), [role="dialog"] button:has-text("Confirm"), [role="dialog"] button:has-text("Yes"), [role="dialog"] button:has-text("OK"), [role="dialog"] button:has-text("Save"), [role="dialog"] button:has-text("Update"), .swal2-confirm, .bootbox-accept, #btnConfirm'
+      )
+      .first();
+
+    if (await modalConfirmBtn.isVisible().catch(() => false)) {
+      try {
+        await modalConfirmBtn.click();
+        await page.waitForTimeout(500);
+      } catch (modalErr: any) {
+        page.off('dialog', dialogHandler);
+        return {
+          success: false,
+          username: dto.username,
+          errorCode: 'REMOTE_CONFIRMATION_NOT_COMPLETED',
+          errorMessage: `Failed to confirm remote save modal: ${modalErr.message}`,
+        };
+      }
+    }
+
+    // Check dialog message
+    let isRemoteSaveConfirmed = false;
+    const isSuccessText = (text: string): boolean => {
+      const lower = (text || '').toLowerCase();
+      return (
+        lower.includes('congrats') ||
+        lower.includes('added successfully') ||
+        lower.includes('created successfully') ||
+        lower.includes('successfully added') ||
+        lower.includes('successfully created') ||
+        lower.includes('saved successfully') ||
+        lower.includes('user created') ||
+        lower.includes('user added')
+      );
+    };
+
+    if (dialogMessage) {
+      page.off('dialog', dialogHandler);
+      const passMatch = (dialogMessage as string).match(/(?:default|temporary|initial)\s*password\s*(?:is)?\s*[:=-]?\s*([^\s\n\r,;]+)/i);
+      if (passMatch && passMatch[1]) {
+        defaultPasswordCaptured = passMatch[1].trim();
+      }
+
+      if (isSuccessText(dialogMessage)) {
+        isRemoteSaveConfirmed = true;
+      } else {
+        const msgLower = (dialogMessage as string).toLowerCase();
+        if (msgLower.includes('already exists') || msgLower.includes('duplicate user') || msgLower.includes('username already')) {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'DUPLICATE_USERNAME',
+            errorMessage: dialogMessage,
+          };
+        }
+        if (msgLower.includes('duplicate name') || msgLower.includes('name already exists')) {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'POTENTIAL_DUPLICATE_NAME',
+            errorMessage: dialogMessage,
+          };
+        }
+        if (msgLower.includes('error') || msgLower.includes('failed') || msgLower.includes('invalid') || msgLower.includes('cannot')) {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'REMOTE_SAVE_REJECTED',
+            errorMessage: dialogMessage,
+          };
+        }
+      }
+    }
+
+    // Check error banner or success banner
     const errorBanner = page
       .locator(
         '.alert-danger, .error-message, [data-testid="error-message"], .toast-error, .alert-warning, .text-danger:has-text("already exists"), .text-danger:has-text("error")'
@@ -1489,45 +1673,112 @@ export class UserManagementExecutor {
       .first();
 
     if (await errorBanner.isVisible().catch(() => false)) {
-      const errText = (await errorBanner.innerText().catch(() => 'Unknown remote error')).trim();
-      page.off('dialog', dialogHandler);
-      const errLower = errText.toLowerCase();
-      if (errLower.includes('already exists') || errLower.includes('duplicate user') || errLower.includes('duplicate username')) {
+      const bannerText = (await errorBanner.innerText().catch(() => 'Unknown remote error')).trim();
+      const bannerLower = bannerText.toLowerCase();
+
+      // If banner contains positive success text (e.g. "Congrats!! Added successfully"), treat as SUCCESS
+      if (isSuccessText(bannerText)) {
+        isRemoteSaveConfirmed = true;
+        const passMatch = bannerText.match(/(?:default|temporary|initial)\s*password\s*(?:is)?\s*[:=-]?\s*([^\s\n\r,;]+)/i);
+        if (passMatch && passMatch[1]) {
+          defaultPasswordCaptured = passMatch[1].trim();
+        }
+        // Proceed to remote list verification
+      } else {
+        page.off('dialog', dialogHandler);
+        if (bannerLower.includes('already exists') || bannerLower.includes('duplicate user') || bannerLower.includes('duplicate username')) {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'DUPLICATE_USERNAME',
+            errorMessage: bannerText,
+          };
+        }
+        if (bannerLower.includes('duplicate name')) {
+          return {
+            success: false,
+            username: dto.username,
+            errorCode: 'POTENTIAL_DUPLICATE_NAME',
+            errorMessage: bannerText,
+          };
+        }
         return {
           success: false,
           username: dto.username,
-          errorCode: 'DUPLICATE_USERNAME',
-          errorMessage: errText,
+          errorCode: 'REMOTE_SAVE_REJECTED',
+          errorMessage: bannerText,
         };
       }
-      if (errLower.includes('duplicate name')) {
-        return {
-          success: false,
-          username: dto.username,
-          errorCode: 'POTENTIAL_DUPLICATE_NAME',
-          errorMessage: errText,
-        };
+    }
+
+    const successBanner = page.locator('.alert-success, .toast-success, .success-message, [data-testid="success-message"]').first();
+    if (await successBanner.isVisible().catch(() => false)) {
+      isRemoteSaveConfirmed = true;
+      const sText = (await successBanner.innerText().catch(() => '')).trim();
+      const passMatch = sText.match(/(?:default|temporary|initial)\s*password\s*(?:is)?\s*[:=-]?\s*([^\s\n\r,;]+)/i);
+      if (passMatch && passMatch[1]) {
+        defaultPasswordCaptured = passMatch[1].trim();
       }
-      return {
-        success: false,
-        username: dto.username,
-        errorCode: 'REMOTE_FORM_VALIDATION_FAILED',
-        errorMessage: errText,
-      };
+    }
+
+    // Check for post-save DOM password element
+    const postSavePassElem = page
+      .locator(
+        '.default-password, [data-testid="default-password"], .temp-password, [data-testid="temporary-password"], #defaultPassword, #tempPassword'
+      )
+      .first();
+    if (!defaultPasswordCaptured && (await postSavePassElem.isVisible().catch(() => false))) {
+      defaultPasswordCaptured = (await postSavePassElem.innerText().catch(() => '')).trim();
     }
 
     page.off('dialog', dialogHandler);
 
     // 9. Verify User in Users List
-    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    try {
+      await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (listNavErr: any) {
+      if (isRemoteSaveConfirmed) {
+        return {
+          success: true,
+          isRemoteSaveConfirmed: true,
+          pendingReconciliation: true,
+          username: dto.username,
+          message: `User '${dto.username}' created on remote client. Pending final reconciliation.`,
+          status: 'ACTIVE',
+          defaultPassword: defaultPasswordCaptured,
+          temporaryPassword: defaultPasswordCaptured,
+        };
+      }
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'REMOTE_CREATE_VERIFICATION_FAILED',
+        errorMessage: `Failed to navigate to users directory for verification: ${listNavErr.message}`,
+      };
+    }
+
     const verifyLookup = await this.findExactUserRow(page, dto.username, usersListUrl);
 
     if (verifyLookup.success && verifyLookup.rowHandle) {
       return {
         success: true,
+        isRemoteSaveConfirmed: true,
         username: dto.username,
         message: `User ${dto.username} created successfully on client.`,
         status: verifyLookup.currentRemoteStatus || 'ACTIVE',
+        defaultPassword: defaultPasswordCaptured,
+        temporaryPassword: defaultPasswordCaptured,
+      };
+    } else if (isRemoteSaveConfirmed) {
+      return {
+        success: true,
+        isRemoteSaveConfirmed: true,
+        pendingReconciliation: true,
+        username: dto.username,
+        message: `User '${dto.username}' created on remote Simplex. Pending final reconciliation.`,
+        status: 'ACTIVE',
+        defaultPassword: defaultPasswordCaptured,
+        temporaryPassword: defaultPasswordCaptured,
       };
     } else {
       return {
@@ -1587,7 +1838,7 @@ export class UserManagementExecutor {
   public static async ensureAuthenticated(
     page: Page,
     options: {
-      targetUrl: string;
+      targetUrl?: string;
       loginUrl?: string;
       credentials?: { username: string; password?: string };
     }
@@ -1595,50 +1846,10 @@ export class UserManagementExecutor {
     const { targetUrl, loginUrl, credentials } = options;
 
     const targetLoginUrl =
-      loginUrl || targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login');
+      loginUrl || (targetUrl ? targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login') : '/login');
 
-    // 1. Check if the session is ALREADY authenticated
-    let isAlreadyAuthenticated = false;
-    try {
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-
-      // Wait a short time to check if an authenticated selector is present OR if redirected to /login
-      const authIndicator = await Promise.race([
-        page
-          .waitForSelector(
-            'table, #usersTable, [data-testid="users-table"], .header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, a[href*="logout" i], a[href*="signout" i], #addUserForm, .card, form',
-            { timeout: 3500 }
-          )
-          .then(() => 'AUTHENTICATED')
-          .catch(() => null),
-        page
-          .waitForSelector('#btnLogin, [data-testid="btn-login"], input[type="password"]', { timeout: 3500 })
-          .then(() => 'LOGIN_REQUIRED')
-          .catch(() => null),
-      ]);
-
-      const currentUrl = page.url();
-      if (authIndicator === 'AUTHENTICATED' && !currentUrl.includes('/login')) {
-        isAlreadyAuthenticated = true;
-      }
-    } catch {
-      isAlreadyAuthenticated = false;
-    }
-
-    if (isAlreadyAuthenticated) {
-      return { authenticated: true };
-    }
-
-    // 2. Authentication is required -> Perform auto-login
-    if (!credentials || !credentials.username || !credentials.password) {
-      return {
-        authenticated: false,
-        errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-        errorMessage: 'Client credentials are required for automatic authentication.',
-      };
-    }
-
-    if (!page.url().includes('/login')) {
+    if (credentials && credentials.username && credentials.password) {
+      // 1. Open configured login/base route first
       try {
         await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
       } catch (err: any) {
@@ -1648,70 +1859,128 @@ export class UserManagementExecutor {
           errorMessage: `Failed to navigate to login route: ${err.message}`,
         };
       }
-    }
 
-    const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
-    const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
-    const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
+      // 2. Detect whether the session is ALREADY authenticated
+      const authIndicator = await Promise.race([
+        page
+          .waitForSelector(
+            '.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, table, a[href*="logout" i]',
+            { timeout: 3000 }
+          )
+          .then(() => 'AUTHENTICATED')
+          .catch(() => null),
+        page
+          .waitForSelector('#btnLogin, [data-testid="btn-login"], input[type="password"]', { timeout: 3000 })
+          .then(() => 'LOGIN_REQUIRED')
+          .catch(() => null),
+      ]);
 
-    if (!userLoc || !passLoc || !submitLoc) {
-      return {
-        authenticated: false,
-        errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-        errorMessage: 'Login input controls or submit button not found on client login screen.',
-      };
-    }
+      const isLoginInputPresent = (await page.locator('#btnLogin, [data-testid="btn-login"], input[type="password"]').count()) > 0;
+      const isAlreadyAuthenticated = authIndicator === 'AUTHENTICATED' && !page.url().includes('/login') && !isLoginInputPresent;
 
-    await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
-    await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
-    await submitLoc.locator.click();
+      if (isAlreadyAuthenticated) {
+        if (targetUrl && page.url() !== targetUrl) {
+          try {
+            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          } catch (targetNavErr: any) {
+            return {
+              authenticated: false,
+              errorCode: 'CLIENT_USERS_SCREEN_FAILED',
+              errorMessage: `Failed to navigate to target URL: ${targetNavErr.message}`,
+            };
+          }
+        }
+        return { authenticated: true };
+      }
 
-    try {
-      await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+      // 3. Session is not authenticated -> Fill credentials and log in
+      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
+      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
+      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
 
-      // Check for error messages
-      const errorBanner = page.locator('.error, .alert-danger, [data-testid="error-message"], .text-danger:has-text("invalid"), .text-danger:has-text("incorrect"), .toast-error').first();
-      if (await errorBanner.isVisible().catch(() => false)) {
-        const errMsg = (await errorBanner.textContent().catch(() => '')) || 'Invalid credentials';
+      if (!userLoc || !passLoc || !submitLoc) {
         return {
           authenticated: false,
           errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-          errorMessage: `Client authentication rejected: ${errMsg.trim()}`,
+          errorMessage: 'Login input controls or submit button not found on client login screen.',
         };
       }
 
-      await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, table, a[href*="logout" i]', { timeout: 10000 });
-    } catch {
-      if (page.url().includes('/login') || ((await page.locator('#btnLogin, [data-testid="btn-login"]').count()) > 0 && (await page.locator('input[type="password"]').count()) > 0)) {
+      await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
+      await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
+      await submitLoc.locator.click();
+
+      try {
+        await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+
+        // Check for error messages
+        const errorBanner = page.locator('.error, .alert-danger, [data-testid="error-message"], .text-danger:has-text("invalid"), .text-danger:has-text("incorrect"), .toast-error').first();
+        if (await errorBanner.isVisible().catch(() => false)) {
+          const errMsg = (await errorBanner.textContent().catch(() => '')) || 'Invalid credentials';
+          return {
+            authenticated: false,
+            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+            errorMessage: `Client authentication rejected: ${errMsg.trim()}`,
+          };
+        }
+
+        await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, table, a[href*="logout" i]', { timeout: 10000 });
+      } catch {
+        if (page.url().includes('/login') || ((await page.locator('#btnLogin, [data-testid="btn-login"]').count()) > 0 && (await page.locator('input[type="password"]').count()) > 0)) {
+          return {
+            authenticated: false,
+            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+            errorMessage: 'Client auto-login failed: authenticated dashboard header did not appear.',
+          };
+        }
+      }
+
+      const stillOnLogin = page.url().includes('/login') && (await page.locator('#username, input[name="username"]').count()) > 0;
+      if (stillOnLogin) {
         return {
           authenticated: false,
           errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-          errorMessage: 'Client auto-login failed: authenticated dashboard header did not appear.',
+          errorMessage: 'Client auto-login failed: still on login page after credentials submission.',
         };
       }
-    }
 
-    const stillOnLogin = page.url().includes('/login') && (await page.locator('#username, input[name="username"]').count()) > 0;
-    if (stillOnLogin) {
-      return {
-        authenticated: false,
-        errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-        errorMessage: 'Client auto-login failed: still on login page after credentials submission.',
-      };
-    }
+      // 4. Navigate to targetUrl after successful authentication
+      if (targetUrl && page.url() !== targetUrl) {
+        try {
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch (targetNavErr: any) {
+          return {
+            authenticated: false,
+            errorCode: 'CLIENT_USERS_SCREEN_FAILED',
+            errorMessage: `Failed to open client application after login: ${targetNavErr.message}`,
+          };
+        }
+      }
 
-    // 3. Navigate to targetUrl after successful authentication
-    try {
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    } catch (targetNavErr: any) {
-      return {
-        authenticated: false,
-        errorCode: 'CLIENT_USERS_SCREEN_FAILED',
-        errorMessage: `Failed to open client application after login: ${targetNavErr.message}`,
-      };
-    }
+      return { authenticated: true };
+    } else {
+      // No credentials provided: check if targetUrl is accessible directly
+      if (targetUrl) {
+        try {
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch (err: any) {
+          return {
+            authenticated: false,
+            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+            errorMessage: `Failed to navigate to target route: ${err.message}`,
+          };
+        }
 
-    return { authenticated: true };
+        if (page.url().includes('/login')) {
+          return {
+            authenticated: false,
+            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+            errorMessage: 'Client credentials are required for automatic authentication.',
+          };
+        }
+      }
+      return { authenticated: true };
+    }
   }
 
   /**
@@ -1834,117 +2103,127 @@ export class UserManagementExecutor {
       return { matches };
     };
 
-    // 3. Attempt Angular search input filtering
-    const searchInput = page
-      .locator('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[id*="search" i], #userSearch')
-      .first();
-
-    let searchExecuted = false;
-    if (await searchInput.isVisible().catch(() => false)) {
-      try {
-        await searchInput.fill(targetUsername.trim());
-        await searchInput.evaluate((el: HTMLInputElement, val: string) => {
-          el.value = val;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
-        }, targetUsername.trim());
-        await searchInput.press('Enter').catch(() => {});
-        await searchInput.press('Tab').catch(() => {});
-        await page.waitForTimeout(600);
-        searchExecuted = true;
-      } catch {
-        searchExecuted = false;
-      }
-    }
-
-    if (searchExecuted) {
-      const { matches } = await inspectCurrentPageRows();
-      if (matches.length === 1) {
-        return {
-          success: true,
-          rowHandle: matches[0].row,
-          rowIndex: matches[0].index,
-          statusColIdx,
-          actionColIdx,
-          usernameColIdx,
-          fullNameColIdx,
-          currentRemoteStatus: matches[0].status,
-        };
-      }
-      if (matches.length > 1) {
-        return {
-          success: false,
-          errorCode: 'AMBIGUOUS_REMOTE_USER',
-          errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
-        };
-      }
-    }
-
-    // 4. If search didn't filter or match, clear search input and traverse pagination
-    if (searchExecuted && (await searchInput.isVisible().catch(() => false))) {
-      await searchInput.evaluate((el: HTMLInputElement) => {
-        el.value = '';
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-      });
-      await page.waitForTimeout(500);
-    }
-
-    const seenPageSignatures = new Set<string>();
-    let pageNum = 1;
-    const maxPages = 50;
-
-    while (pageNum <= maxPages) {
-      const rows = await page.$$('table tbody tr');
-      if (rows.length === 0) break;
-
-      const firstRowCells = await rows[0].$$('td');
-      const firstRowTexts = await Promise.all(firstRowCells.map((c) => c.textContent()));
-      const sig = `${pageNum}:${firstRowTexts.slice(0, 3).join('|')}`;
-      if (seenPageSignatures.has(sig)) break;
-      seenPageSignatures.add(sig);
-
-      const { matches } = await inspectCurrentPageRows();
-      if (matches.length === 1) {
-        return {
-          success: true,
-          rowHandle: matches[0].row,
-          rowIndex: matches[0].index,
-          statusColIdx,
-          actionColIdx,
-          usernameColIdx,
-          fullNameColIdx,
-          currentRemoteStatus: matches[0].status,
-        };
-      }
-      if (matches.length > 1) {
-        return {
-          success: false,
-          errorCode: 'AMBIGUOUS_REMOTE_USER',
-          errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
-        };
-      }
-
-      // Check next page control
-      const nextButton = page
-        .locator(
-          'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i], a[title*="next" i], .page-link:has-text("›")'
-        )
+    // Bounded retry attempts (up to 3 attempts with 800ms delay) to allow asynchronous rendering settling
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // 3. Attempt Angular search input filtering
+      const searchInput = page
+        .locator('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[id*="search" i], #userSearch')
         .first();
 
-      const hasNext = (await nextButton.count()) > 0 && (await nextButton.isVisible().catch(() => false));
-      if (!hasNext) break;
+      let searchExecuted = false;
+      if (await searchInput.isVisible().catch(() => false)) {
+        try {
+          await searchInput.fill(targetUsername.trim());
+          await searchInput.evaluate((el: HTMLInputElement, val: string) => {
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }, targetUsername.trim());
+          await searchInput.press('Enter').catch(() => {});
+          await searchInput.press('Tab').catch(() => {});
+          await page.waitForTimeout(400);
+          searchExecuted = true;
+        } catch {
+          searchExecuted = false;
+        }
+      }
 
-      const isDisabled = await nextButton.getAttribute('disabled');
-      const isAriaDisabled = await nextButton.getAttribute('aria-disabled');
-      if (isDisabled !== null || isAriaDisabled === 'true') break;
+      if (searchExecuted) {
+        const { matches } = await inspectCurrentPageRows();
+        if (matches.length === 1) {
+          return {
+            success: true,
+            rowHandle: matches[0].row,
+            rowIndex: matches[0].index,
+            statusColIdx,
+            actionColIdx,
+            usernameColIdx,
+            fullNameColIdx,
+            currentRemoteStatus: matches[0].status,
+          };
+        }
+        if (matches.length > 1) {
+          return {
+            success: false,
+            errorCode: 'AMBIGUOUS_REMOTE_USER',
+            errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
+          };
+        }
+      }
 
-      await nextButton.click().catch(() => {});
-      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(500);
-      pageNum++;
+      // 4. If search didn't filter or match, clear search input and traverse pagination
+      if (searchExecuted && (await searchInput.isVisible().catch(() => false))) {
+        await searchInput.evaluate((el: HTMLInputElement) => {
+          el.value = '';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        });
+        await page.waitForTimeout(400);
+      }
+
+      const seenPageSignatures = new Set<string>();
+      let pageNum = 1;
+      const maxPages = 50;
+
+      while (pageNum <= maxPages) {
+        const rows = await page.$$('table tbody tr');
+        if (rows.length === 0) break;
+
+        const firstRowCells = await rows[0].$$('td');
+        const firstRowTexts = await Promise.all(firstRowCells.map((c) => c.textContent()));
+        const sig = `${pageNum}:${firstRowTexts.slice(0, 3).join('|')}`;
+        if (seenPageSignatures.has(sig)) break;
+        seenPageSignatures.add(sig);
+
+        const { matches } = await inspectCurrentPageRows();
+        if (matches.length === 1) {
+          return {
+            success: true,
+            rowHandle: matches[0].row,
+            rowIndex: matches[0].index,
+            statusColIdx,
+            actionColIdx,
+            usernameColIdx,
+            fullNameColIdx,
+            currentRemoteStatus: matches[0].status,
+          };
+        }
+        if (matches.length > 1) {
+          return {
+            success: false,
+            errorCode: 'AMBIGUOUS_REMOTE_USER',
+            errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
+          };
+        }
+
+        // Check next page control
+        const nextButton = page
+          .locator(
+            'button:has-text("Next"), a:has-text("Next"), [data-testid="pagination-next"], .pagination-next:not(.disabled), li.next:not(.disabled) a, #nextArrowJS, input[value*="forward" i], a[title*="next" i], .page-link:has-text("›")'
+          )
+          .first();
+
+        const hasNext = (await nextButton.count()) > 0 && (await nextButton.isVisible().catch(() => false));
+        if (!hasNext) break;
+
+        const isDisabled = await nextButton.getAttribute('disabled');
+        const isAriaDisabled = await nextButton.getAttribute('aria-disabled');
+        if (isDisabled !== null || isAriaDisabled === 'true') break;
+
+        await nextButton.click().catch(() => {});
+        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(400);
+        pageNum++;
+      }
+
+      if (attempt < maxAttempts) {
+        await page.waitForTimeout(800);
+      }
     }
 
     return {

@@ -30,6 +30,7 @@ import {
   UpdateClientUserDto,
   ClientUserStatus,
   ExcelUserImportRow,
+  ExcelUserImportExecutionSummary,
 } from '@hmc/shared';
 
 @SkipThrottle()
@@ -57,21 +58,18 @@ export class ClientUsersController {
   }
 
   @Get('form-options')
-  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_CREATE)
   async getFormOptions(
     @Query('clientId') clientId: string,
-    @Query('refresh') refresh: string,
-    @CurrentUser() user: JwtPayload
+    @CurrentUser() user: JwtPayload,
+    @Query('refresh') refresh?: string
   ) {
-    return this.clientUsersService.getLiveFormOptions(
-      clientId,
-      user,
-      refresh === 'true' || refresh === '1'
-    );
+    return this.clientUsersService.getLiveFormOptions(clientId, user, refresh === 'true');
   }
 
   @Post('sync')
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @RequireClientAccess()
   @HttpCode(HttpStatus.OK)
   async syncClientUsers(
     @Body('clientId') clientId: string,
@@ -82,7 +80,8 @@ export class ClientUsersController {
 
   @Post('sync-job')
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
-  @HttpCode(HttpStatus.OK)
+  @RequireClientAccess()
+  @HttpCode(HttpStatus.ACCEPTED)
   async startSyncJob(
     @Body('clientId') clientId: string,
     @CurrentUser() user: JwtPayload
@@ -91,7 +90,7 @@ export class ClientUsersController {
   }
 
   @Get('sync-status/:jobId')
-  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
   async getSyncJobStatus(
     @Param('jobId') jobId: string,
     @CurrentUser() user: JwtPayload
@@ -109,8 +108,20 @@ export class ClientUsersController {
     return this.clientUsersService.cancelSyncJob(jobId, user);
   }
 
+  @Post('reconcile')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_CREATE)
+  @HttpCode(HttpStatus.OK)
+  async reconcileUser(
+    @Body('clientId') clientId: string,
+    @Body('username') username: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.reconcileCreatedUser(clientId, username, user);
+  }
+
   @Post()
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_CREATE)
+  @HttpCode(HttpStatus.CREATED)
   async createClientUser(
     @Body() dto: CreateClientUserDto,
     @CurrentUser() user: JwtPayload
@@ -164,10 +175,14 @@ export class ClientUsersController {
 
   @Get('import-template')
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_IMPORT)
-  async getImportTemplate(@Res() res: Response) {
-    const buffer = this.clientUsersService.getImportTemplate();
+  async getImportTemplate(
+    @Query('clientId') clientId: string,
+    @CurrentUser() user: JwtPayload,
+    @Res() res: Response
+  ) {
+    const buffer = await this.clientUsersService.getImportTemplate(clientId, user);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="hmc_user_import_template.xlsx"');
+    res.setHeader('Content-Disposition', `attachment; filename="client_user_import_template_${Date.now()}.xlsx"`);
     res.send(buffer);
   }
 
@@ -190,5 +205,19 @@ export class ClientUsersController {
     @CurrentUser() user: JwtPayload
   ) {
     return this.clientUsersService.importExecute(clientId, rows, user);
+  }
+
+  @Post('export-import-results')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_EXPORT)
+  async exportImportResults(
+    @Body('clientId') clientId: string,
+    @Body('summary') summary: ExcelUserImportExecutionSummary,
+    @CurrentUser() user: JwtPayload,
+    @Res() res: Response
+  ) {
+    const buffer = await this.clientUsersService.exportImportResults(clientId, summary, user);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="user_import_results_${Date.now()}.xlsx"`);
+    res.send(buffer);
   }
 }

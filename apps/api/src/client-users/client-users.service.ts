@@ -32,6 +32,8 @@ import {
   JwtPayload,
   resolveClientRoute,
   ClientCreateFormMetadata,
+  UserImportAction,
+  UserImportClassification,
 } from '@hmc/shared';
 import { AgentsService } from '../agents/agents.service.js';
 
@@ -887,14 +889,21 @@ export class ClientUsersService implements OnModuleInit {
         }
       }
 
-      if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status)) {
+      let parsedResult: any = {};
+      try {
+        parsedResult = JSON.parse(completedRun?.resultSummaryJson || '{}');
+      } catch {}
+
+      const isConfirmedSuccess =
+        completedRun &&
+        (['COMPLETED', 'SUCCEEDED'].includes(completedRun.status) ||
+          (completedRun.status === 'FAILED' && parsedResult.isRemoteSaveConfirmed));
+
+      if (!isConfirmedSuccess) {
         let errorCode = 'REMOTE_VALIDATION_FAILED';
         let errorMessage = completedRun?.errorMessage || 'User creation failed on client portal.';
-        try {
-          const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
-          if (parsed.errorCode) errorCode = parsed.errorCode;
-          if (parsed.errorMessage) errorMessage = parsed.errorMessage;
-        } catch {}
+        if (parsedResult.errorCode) errorCode = parsedResult.errorCode;
+        if (parsedResult.errorMessage) errorMessage = parsedResult.errorMessage;
         if (completedRun?.status === 'TIMED_OUT') errorCode = 'OPERATION_TIMED_OUT';
         throw new BadRequestException({
           code: errorCode,
@@ -909,35 +918,46 @@ export class ClientUsersService implements OnModuleInit {
         this.logger.warn(`Post-creation automatic sync failed: ${syncErr.message}`);
       }
 
-      // Save snapshot
+      // Save snapshot or update existing if found during pull sync
       const now = new Date();
-      const fullName = `${dto.firstName} ${dto.middleName ? dto.middleName + ' ' : ''}${dto.lastName}`.trim();
-      const snapshot = this.snapshotRepo.create({
-        clientId: client.id,
-        clientCode: client.clientCode,
-        username: dto.username.trim(),
-        firstName: dto.firstName.trim(),
-        middleName: dto.middleName?.trim() || null,
-        lastName: dto.lastName.trim(),
-        fullName,
-        nickName: dto.nickName?.trim() || null,
-        email: dto.email?.trim() || null,
-        mobileNumber: dto.mobileNumber.trim(),
-        nationality: dto.nationality,
-        role: dto.role || null,
-        profileRole: dto.profileRole || null,
-        status: dto.status || 'ACTIVE',
-        barcodeNumber: dto.barcodeNumber || null,
-        hasSignature: Boolean(dto.signatureBase64),
-        hasStamp: Boolean(dto.stampBase64),
-        hasProfileImage: Boolean(dto.profileBase64),
-        isPresentRemotely: true,
-        lastSyncedAt: now,
-      });
+      const normUsername = dto.username.trim().toLowerCase();
+      let existingSnap = await this.snapshotRepo
+        .createQueryBuilder('u')
+        .where('u.clientId = :clientId', { clientId: client.id })
+        .andWhere('LOWER(u.username) = :normUsername', { normUsername })
+        .getOne();
 
-      const saved = await this.snapshotRepo.save(snapshot);
+      let saved: ClientUserSnapshot;
+      if (existingSnap) {
+        saved = existingSnap;
+      } else {
+        const fullName = `${dto.firstName} ${dto.middleName ? dto.middleName + ' ' : ''}${dto.lastName}`.trim();
+        const snapshot = this.snapshotRepo.create({
+          clientId: client.id,
+          clientCode: client.clientCode,
+          username: dto.username.trim(),
+          firstName: dto.firstName.trim(),
+          middleName: dto.middleName?.trim() || null,
+          lastName: dto.lastName.trim(),
+          fullName,
+          nickName: dto.nickName?.trim() || null,
+          email: dto.email?.trim() || null,
+          mobileNumber: dto.mobileNumber.trim(),
+          nationality: dto.nationality,
+          role: dto.role || null,
+          profileRole: dto.profileRole || null,
+          status: dto.status || 'ACTIVE',
+          barcodeNumber: dto.barcodeNumber || null,
+          hasSignature: Boolean(dto.signatureBase64),
+          hasStamp: Boolean(dto.stampBase64),
+          hasProfileImage: Boolean(dto.profileBase64),
+          isPresentRemotely: true,
+          lastSyncedAt: now,
+        });
+        saved = await this.snapshotRepo.save(snapshot);
+      }
 
-      // Record Audit
+      // Record Audit (Zero password leakage in audit log)
       await this.auditRepo.save(
         this.auditRepo.create({
           action: 'CLIENT_USER_CREATED',
@@ -955,10 +975,61 @@ export class ClientUsersService implements OnModuleInit {
         })
       );
 
-      return this.mapToDto(saved, client);
+      // Extract ephemeral default/temporary password from completed run result summary
+      let defaultPassword: string | undefined = undefined;
+      if (parsedResult.defaultPassword || parsedResult.temporaryPassword) {
+        defaultPassword = parsedResult.defaultPassword || parsedResult.temporaryPassword;
+      }
+
+      const resultDto = this.mapToDto(saved, client);
+      return {
+        ...resultDto,
+        defaultPassword,
+        temporaryPassword: defaultPassword,
+        message: `User '${dto.username}' created and verified on client.`,
+      };
     } finally {
       releaseLock();
     }
+  }
+
+  /**
+   * Reconciles a created client user via read-only pull sync without re-submitting remote forms.
+   */
+  async reconcileCreatedUser(clientId: string, username: string, user: JwtPayload): Promise<ClientUser> {
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    if (!client) throw new NotFoundException(`Client ${clientId} not found`);
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(clientId)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    const normUsername = username.trim().toLowerCase();
+
+    // Trigger authoritative read-only pull sync from remote Simplex
+    try {
+      await this.syncClientUsers(clientId, user);
+    } catch (err: any) {
+      this.logger.warn(`Reconciliation sync failed: ${err.message}`);
+    }
+
+    const reconciled = await this.snapshotRepo
+      .createQueryBuilder('u')
+      .where('u.clientId = :clientId', { clientId })
+      .andWhere('LOWER(u.username) = :normUsername', { normUsername })
+      .getOne();
+
+    if (!reconciled) {
+      throw new NotFoundException({
+        code: 'USER_NOT_FOUND_ON_REMOTE',
+        message: `User '${username}' could not be verified on client portal after synchronization.`,
+      });
+    }
+
+    return {
+      ...this.mapToDto(reconciled, client),
+      message: `User '${username}' successfully verified and synchronized with Central Console.`,
+    };
   }
 
   /**
@@ -1516,52 +1587,72 @@ export class ClientUsersService implements OnModuleInit {
   }
 
   /**
-   * Generates Excel workbook (.xlsx) containing latest synced users and metadata.
+   * Formula injection defense: escapes values starting with =, +, -, @
+   */
+  private sanitizeCellValue(val: any): string {
+    if (val === null || val === undefined) return '';
+    const str = String(val).trim();
+    if (str.startsWith('=') || str.startsWith('+') || str.startsWith('-') || str.startsWith('@')) {
+      return `'${str}`;
+    }
+    return str;
+  }
+
+  /**
+   * Generates Excel workbook (.xlsx) containing latest synced users and metadata for the selected client only.
+   * Exports all current ACTIVE and INACTIVE users regardless of any UI filters.
+   * Enforces: Total Exported = Active + Inactive.
    */
   async exportExcel(clientId: string, user: JwtPayload): Promise<Buffer> {
+    if (!clientId) throw new BadRequestException('Client ID is required for export');
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(clientId)) {
+      throw new ForbiddenException('Not authorized to export data for this client');
+    }
 
     const users = await this.snapshotRepo.find({
       where: { clientId },
       order: { fullName: 'ASC' },
     });
 
-    const userRows = users.map((u) => ({
-      'Client Code': client.clientCode,
-      'Client Name': client.clientName,
-      'Environment': client.environment,
-      'Remote User ID': u.remoteUserId || 'Not available',
-      'Username': String(u.username),
-      'First Name': u.firstName,
-      'Middle Name': u.middleName || '',
-      'Last Name': u.lastName,
-      'Full Name': u.fullName,
-      'Nick Name': u.nickName || '',
-      'Email': u.email || '',
-      'Mobile Number': u.mobileNumber ? String(u.mobileNumber) : '',
-      'Nationality': u.nationality || '',
-      'Role': u.role || '',
-      'Profile Role': u.profileRole || '',
-      'Barcode Number': u.barcodeNumber ? String(u.barcodeNumber) : '',
+    const totalExported = users.length;
+    const activeCount = users.filter((u) => u.status === 'ACTIVE').length;
+    const inactiveCount = users.filter((u) => u.status === 'INACTIVE').length;
+    const routes = this.resolveClientUserRoutes(client);
+
+    // Enforce invariant: Total Exported = Active + Inactive
+    if (totalExported !== activeCount + inactiveCount) {
+      throw new Error(`Integrity error: Total Exported (${totalExported}) != Active (${activeCount}) + Inactive (${inactiveCount})`);
+    }
+
+    const userRows = users.map((u, idx) => ({
+      'S.No': idx + 1,
+      'Full Name': this.sanitizeCellValue(u.fullName),
+      'Username': this.sanitizeCellValue(u.username),
+      'Mobile Number': this.sanitizeCellValue(u.mobileNumber || ''),
+      'Email': this.sanitizeCellValue(u.email || ''),
+      'Nationality': this.sanitizeCellValue(u.nationality || ''),
+      'Role': this.sanitizeCellValue(u.role || ''),
+      'Profile Role': this.sanitizeCellValue(u.profileRole || ''),
       'Status': u.status,
-      'Has Signature': u.hasSignature ? 'YES' : 'NO',
-      'Has Stamp': u.hasStamp ? 'YES' : 'NO',
-      'Has Profile Image': u.hasProfileImage ? 'YES' : 'NO',
-      'Created At': u.remoteCreatedAt || 'Not available',
-      'Updated At': u.remoteUpdatedAt || 'Not available',
-      'Last Synced At': u.lastSyncedAt.toISOString(),
+      'Created Date/Time': u.remoteCreatedAt || 'N/A',
+      'Updated Date/Time': u.remoteUpdatedAt || 'N/A',
+      'Last Synced': u.lastSyncedAt.toISOString(),
     }));
 
     const metadataRows = [
-      { Property: 'Client Code', Value: client.clientCode },
-      { Property: 'Client Name', Value: client.clientName },
-      { Property: 'Client URL', Value: client.baseUrl },
+      { Property: 'Client Code / Name', Value: `${client.clientCode} (${client.clientName})` },
       { Property: 'Environment', Value: client.environment },
-      { Property: 'Exported By', Value: user.username },
-      { Property: 'Export Date/Time (UTC)', Value: new Date().toISOString() },
-      { Property: 'Total Records', Value: userRows.length },
-      { Property: 'Source', Value: 'HMC Central Operations Console (Snapshot)' },
+      { Property: 'Application Version', Value: client.applicationVersion || 'v9.4' },
+      { Property: 'Resolved Users Route', Value: routes.resolvedUsersUrl },
+      { Property: 'Export Timestamp (UTC)', Value: new Date().toISOString() },
+      { Property: 'Snapshot Timestamp (UTC)', Value: users[0]?.lastSyncedAt?.toISOString() || new Date().toISOString() },
+      { Property: 'Total Exported Users', Value: totalExported },
+      { Property: 'Active Users Count', Value: activeCount },
+      { Property: 'Inactive Users Count', Value: inactiveCount },
+      { Property: 'Count Invariant Verification', Value: `Total Exported (${totalExported}) = Active (${activeCount}) + Inactive (${inactiveCount})` },
     ];
 
     const wb = XLSX.utils.book_new();
@@ -1571,154 +1662,358 @@ export class ClientUsersService implements OnModuleInit {
     XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
     XLSX.utils.book_append_sheet(wb, wsMeta, 'Export Metadata');
 
+    await this.auditRepo.save(
+      this.auditRepo.create({
+        action: 'CLIENT_USERS_EXPORTED',
+        actorUserId: user.sub,
+        actorUsername: user.username,
+        entityType: 'CLIENT',
+        entityId: clientId,
+        detailsJson: JSON.stringify({
+          clientCode: client.clientCode,
+          totalExported,
+          activeCount,
+          inactiveCount,
+        }),
+      })
+    );
+
     return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   }
 
   /**
-   * Generates a clean Excel import template (.xlsx).
+   * Generates a dynamic client-scoped Excel import template (.xlsx) using live form options.
+   * Includes S.No as the first Users-template column.
    */
-  getImportTemplate(): Buffer {
-    const templateRows = [
-      {
-        Action: 'CREATE',
-        'User Name': 'jsmith',
-        'First Name': 'John',
-        'Middle Name': 'Robert',
-        'Last Name': 'Smith',
-        'Nick Name': 'Johnny',
-        Email: 'john.smith@hospital.example.com',
-        'Mobile Number': '0501234567',
-        Nationality: 'Saudi Arabia',
-        Role: 'Physician',
-        'Profile Role': 'Clinical Specialist',
-        'Barcode Number': 'BC-10029',
-        'Requested Status': 'ACTIVE',
-      },
-      {
-        Action: 'UPDATE',
-        'User Name': 'anurse',
-        'First Name': 'Alice',
-        'Middle Name': '',
-        'Last Name': 'Nurse',
-        'Nick Name': 'Ali',
-        Email: 'alice.nurse@hospital.example.com',
-        'Mobile Number': '0509876543',
-        Nationality: 'Philippines',
-        Role: 'Nurse',
-        'Profile Role': 'Head Nurse',
-        'Barcode Number': 'BC-20045',
-        'Requested Status': 'ACTIVE',
-      },
-    ];
+  async getImportTemplate(clientId: string, user: JwtPayload): Promise<Buffer> {
+    if (!clientId) {
+      throw new BadRequestException({
+        code: 'CLIENT_ID_REQUIRED',
+        message: 'Client ID is required to generate import template.',
+      });
+    }
 
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(templateRows);
-    XLSX.utils.book_append_sheet(wb, ws, 'User Import Template');
-    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  }
-
-  /**
-   * Dry-run preview of Excel user import with comprehensive duplicate and field validations.
-   */
-  async importPreview(clientId: string, fileBuffer: Buffer, user: JwtPayload): Promise<ExcelUserImportPreviewResult> {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
 
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(clientId)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    let formMeta: ClientCreateFormMetadata;
+    try {
+      formMeta = await this.getLiveFormOptions(clientId, user, false);
+    } catch (err: any) {
+      throw new BadRequestException({
+        code: 'FORM_OPTIONS_UNAVAILABLE',
+        message: 'Live form options could not be retrieved from the client portal. Cannot generate template without live client options.',
+      });
+    }
+
+    if (!formMeta || (!formMeta.nationalities?.length && !formMeta.roles?.length)) {
+      throw new BadRequestException({
+        code: 'FORM_OPTIONS_UNAVAILABLE',
+        message: 'No live form dropdown options are available for this client.',
+      });
+    }
+
+    const toLabel = (item: any) => (typeof item === 'string' ? item : item?.label || item?.value || '');
+    const natList = (formMeta.nationalities || []).map(toLabel).filter(Boolean);
+    const roleList = (formMeta.roles || []).map(toLabel).filter(Boolean);
+    const profList = (formMeta.profileRoles || []).map(toLabel).filter(Boolean);
+
+    const sampleNat = natList[0] || 'Saudi Arabia';
+    const sampleRole = roleList[0] || 'Physician';
+    const sampleProf = profList[0] || 'Clinical Specialist';
+
+    // Sheet 1: Users (S.No as the first column)
+    const templateRows = [
+      {
+        'S.No': 1,
+        'User Name *': 'dr_ahmed',
+        'First Name *': 'Ahmed',
+        'Middle Name': 'Ali',
+        'Last Name *': 'Mansoor',
+        'Email': 'ahmed.mansoor@example.com',
+        'Mobile No *': '0501234567',
+        'Nationality *': sampleNat,
+        'Role': sampleRole,
+        'Profile Role': sampleProf,
+        'Barcode No': 'BC-1001',
+      },
+      {
+        'S.No': 2,
+        'User Name *': 'nurse_fatima',
+        'First Name *': 'Fatima',
+        'Middle Name': '',
+        'Last Name *': 'Hassan',
+        'Email': 'fatima.hassan@example.com',
+        'Mobile No *': '0509876543',
+        'Nationality *': sampleNat,
+        'Role': roleList[1] || sampleRole,
+        'Profile Role': profList[1] || sampleProf,
+        'Barcode No': 'BC-1002',
+      },
+    ];
+
+    // Sheet 2: Instructions
+    const instructionRows = [
+      { Parameter: 'Selected Client', Details: `${client.clientCode} (${client.clientName})` },
+      { Parameter: 'Client Application Version', Details: client.applicationVersion || 'v9.4' },
+      { Parameter: 'Template Generation Time (UTC)', Details: new Date().toISOString() },
+      { Parameter: 'Mandatory Fields', Details: 'S.No, User Name *, First Name *, Last Name *, Mobile No *, Nationality *' },
+      { Parameter: 'Accepted Username Format', Details: 'Alphanumeric characters, dot, underscore, dash ([a-zA-Z0-9._-])' },
+      { Parameter: 'Accepted Mobile Format', Details: 'Valid mobile number (e.g., 05xxxxxxxx)' },
+      { Parameter: 'Duplicate Rules', Details: 'S.No and Usernames must be unique. Duplicate S.No is rejected with DUPLICATE_SERIAL_NUMBER. Existing users are classified as ALREADY_EXISTS. Duplicate full names produce a confirmation warning.' },
+      { Parameter: 'Maximum Permitted Rows', Details: '500 rows per batch' },
+      { Parameter: 'No-Password Policy', Details: 'Do not add password columns. Passwords are native to Simplex and client default password policies apply automatically.' },
+    ];
+
+    // Sheet 3: Lookup Options
+    const maxLen = Math.max(natList.length, roleList.length, profList.length);
+    const optionsRows = [];
+    for (let i = 0; i < maxLen; i++) {
+      optionsRows.push({
+        'Valid Nationalities': natList[i] || '',
+        'Valid Roles': roleList[i] || '',
+        'Valid Profile Roles': profList[i] || '',
+      });
+    }
+
+    const wb = XLSX.utils.book_new();
+    const wsUsers = XLSX.utils.json_to_sheet(templateRows);
+    const wsInstructions = XLSX.utils.json_to_sheet(instructionRows);
+    const wsOptions = XLSX.utils.json_to_sheet(optionsRows);
+
+    XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
+    XLSX.utils.book_append_sheet(wb, wsInstructions, 'Instructions');
+    XLSX.utils.book_append_sheet(wb, wsOptions, 'Lookup Options');
+
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  }
+
+  /**
+   * Dry-run preview of Excel user import with live client option validation, S.No duplicate checks, and ALREADY_EXISTS detection.
+   */
+  async importPreview(clientId: string, fileBuffer: Buffer, user: JwtPayload): Promise<ExcelUserImportPreviewResult> {
+    if (!clientId) throw new BadRequestException('Client ID is required');
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    if (!client) throw new NotFoundException(`Client ${clientId} not found`);
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(clientId)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    let wb: XLSX.WorkBook;
+    try {
+      wb = XLSX.read(fileBuffer, { type: 'buffer' });
+    } catch {
+      throw new BadRequestException({
+        code: 'INVALID_EXCEL_FORMAT',
+        message: 'Uploaded file is not a valid Excel (.xlsx) workbook.',
+      });
+    }
+
+    const sheetName = wb.SheetNames.find((s) => s.toLowerCase() === 'users') || wb.SheetNames[0];
+    if (!sheetName) {
+      throw new BadRequestException({
+        code: 'INVALID_EXCEL_FORMAT',
+        message: 'Excel workbook contains no sheets.',
+      });
+    }
+
+    const rawRows: any[] = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' });
+    if (rawRows.length === 0) {
+      throw new BadRequestException({
+        code: 'INVALID_EXCEL_FORMAT',
+        message: 'Excel Users sheet contains no data rows.',
+      });
+    }
+
+    // Fetch existing client snapshot users for duplicate / already exists checks
     const existingUsers = await this.snapshotRepo.find({ where: { clientId } });
-    const existingUsernames = new Set(existingUsers.map((u) => u.username.toLowerCase()));
+    const existingUsernamesMap = new Map<string, ClientUserSnapshot>();
     const existingNamesMap = new Map<string, ClientUserSnapshot>();
     for (const u of existingUsers) {
-      const key = `${u.firstName.toLowerCase().trim()}_${u.lastName.toLowerCase().trim()}`;
+      existingUsernamesMap.set(u.username.toLowerCase().trim(), u);
+      const key = `${(u.firstName || '').toLowerCase().trim()}_${(u.lastName || '').toLowerCase().trim()}`;
       existingNamesMap.set(key, u);
     }
 
-    const wb = XLSX.read(fileBuffer, { type: 'buffer' });
-    const sheetName = wb.SheetNames[0];
-    if (!sheetName) throw new BadRequestException('Empty Excel workbook');
+    // Fetch live options for dropdown validation
+    let liveOptions = { nationalities: [] as string[], roles: [] as string[], profileRoles: [] as string[] };
+    try {
+      const meta = await this.getLiveFormOptions(clientId, user, false);
+      const toLabel = (item: any) => (typeof item === 'string' ? item : item?.label || item?.value || '');
+      liveOptions = {
+        nationalities: (meta.nationalities || []).map(toLabel).filter(Boolean),
+        roles: (meta.roles || []).map(toLabel).filter(Boolean),
+        profileRoles: (meta.profileRoles || []).map(toLabel).filter(Boolean),
+      };
+    } catch {}
 
-    const rawRows: any[] = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' });
-    if (rawRows.length === 0) throw new BadRequestException('Excel sheet contains no data rows');
+    const normNatSet = new Set(liveOptions.nationalities.map((n) => n.toLowerCase().trim()));
+    const normRoleSet = new Set(liveOptions.roles.map((r) => r.toLowerCase().trim()));
+    const normProfSet = new Set(liveOptions.profileRoles.map((p) => p.toLowerCase().trim()));
 
     const seenUsernamesInFile = new Set<string>();
+    const seenSerialNumbersInFile = new Set<string>();
     const previewRows: ExcelUserImportRow[] = [];
 
     let readyCount = 0;
+    let warningCount = 0;
+    let alreadyExistingCount = 0;
     let errorCount = 0;
 
     for (let i = 0; i < rawRows.length; i++) {
       const row = rawRows[i];
-      const rowNum = i + 2; // Excel header is row 1
+      const rowNum = i + 2; // Excel row index (header is row 1)
 
-      const action = (row['Action'] || row['action'] || 'CREATE').toString().toUpperCase().trim() as any;
-      const username = (row['User Name'] || row['UserName'] || row['username'] || '').toString().trim();
-      const firstName = (row['First Name'] || row['FirstName'] || row['firstName'] || '').toString().trim();
-      const middleName = (row['Middle Name'] || row['MiddleName'] || row['middleName'] || '').toString().trim();
-      const lastName = (row['Last Name'] || row['LastName'] || row['lastName'] || '').toString().trim();
-      const nickName = (row['Nick Name'] || row['NickName'] || row['nickName'] || '').toString().trim();
-      const email = (row['Email'] || row['email'] || '').toString().trim();
-      const mobileNumber = (row['Mobile Number'] || row['Mobile'] || row['mobileNumber'] || '').toString().trim();
-      const nationality = (row['Nationality'] || row['nationality'] || '').toString().trim();
-      const role = (row['Role'] || row['role'] || '').toString().trim();
-      const profileRole = (row['Profile Role'] || row['ProfileRole'] || row['profileRole'] || '').toString().trim();
-      const barcodeNumber = (row['Barcode Number'] || row['Barcode'] || row['barcodeNumber'] || '').toString().trim();
-      const requestedStatus = ((row['Requested Status'] || row['Status'] || 'ACTIVE').toString().toUpperCase().trim() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE') as ClientUserStatus;
+      const rawSNo = row['S.No'] ?? row['S.no'] ?? row['s.no'] ?? row['SNo'] ?? row['sno'] ?? row['Serial Number'] ?? row['SI.No'];
+      const parsedSNo = rawSNo !== undefined && rawSNo !== '' ? rawSNo : i + 1;
+
+      // Extract and sanitize cells (formula injection defense)
+      const action: UserImportAction = (row['Action'] || row['action'] || 'CREATE').toString().toUpperCase().trim() as any;
+      const rawUser = (row['User Name *'] || row['User Name'] || row['UserName'] || row['username'] || '').toString().trim();
+      const rawFirst = (row['First Name *'] || row['First Name'] || row['FirstName'] || row['firstName'] || '').toString().trim();
+      const rawMiddle = (row['Middle Name'] || row['MiddleName'] || row['middleName'] || '').toString().trim();
+      const rawLast = (row['Last Name *'] || row['Last Name'] || row['LastName'] || row['lastName'] || '').toString().trim();
+      const rawNick = (row['Nick Name'] || row['NickName'] || row['nickName'] || '').toString().trim();
+      const rawEmail = (row['Email'] || row['email'] || '').toString().trim();
+      const rawMobile = (row['Mobile No *'] || row['Mobile No'] || row['Mobile Number'] || row['Mobile'] || row['mobileNumber'] || '').toString().trim();
+      const rawNat = (row['Nationality *'] || row['Nationality'] || row['nationality'] || '').toString().trim();
+      const rawRole = (row['Role'] || row['role'] || '').toString().trim();
+      const rawProfile = (row['Profile Role'] || row['ProfileRole'] || row['profileRole'] || '').toString().trim();
+      const rawBarcode = (row['Barcode No'] || row['Barcode Number'] || row['barcodeNumber'] || '').toString().trim();
+      const rawStatus = (row['Status'] || row['Requested Status'] || 'ACTIVE').toString().toUpperCase().trim() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
+
+      // Skip ONLY if completely empty row (no S.No and no user/name fields)
+      if (rawSNo === undefined && !rawUser && !rawFirst && !rawLast && !rawMobile && !rawNat) {
+        continue;
+      }
+
+      const username = this.sanitizeCellValue(rawUser);
+      const firstName = this.sanitizeCellValue(rawFirst);
+      const middleName = rawMiddle ? this.sanitizeCellValue(rawMiddle) : undefined;
+      const lastName = this.sanitizeCellValue(rawLast);
+      const nickName = rawNick ? this.sanitizeCellValue(rawNick) : undefined;
+      const email = rawEmail ? this.sanitizeCellValue(rawEmail) : undefined;
+      const mobileNumber = rawMobile ? this.sanitizeCellValue(rawMobile) : undefined;
+      const nationality = rawNat ? this.sanitizeCellValue(rawNat) : undefined;
+      const role = rawRole ? this.sanitizeCellValue(rawRole) : undefined;
+      const profileRole = rawProfile ? this.sanitizeCellValue(rawProfile) : undefined;
+      const barcodeNumber = rawBarcode ? this.sanitizeCellValue(rawBarcode) : undefined;
 
       const validationErrors: string[] = [];
-      let classification: any = 'READY_CREATE';
+      let classification: UserImportClassification = 'READY';
+      let errorCode: string | undefined = undefined;
       let potentialDuplicateOf: any = undefined;
+      let existingStatus: ClientUserStatus | undefined = undefined;
 
-      const normUser = username.toLowerCase();
+      // Duplicate S.No check
+      if (rawSNo !== undefined && rawSNo !== '') {
+        const normSNo = String(rawSNo).trim();
+        if (seenSerialNumbersInFile.has(normSNo)) {
+          validationErrors.push(`Duplicate S.No '${normSNo}' appears multiple times in the file`);
+          classification = 'INVALID';
+          errorCode = 'DUPLICATE_SERIAL_NUMBER';
+        } else {
+          seenSerialNumbersInFile.add(normSNo);
+        }
+      }
+
+      const normUser = username.toLowerCase().trim();
 
       // Required field validation
       if (!username) {
         validationErrors.push('User Name is required');
-        classification = 'INVALID_REQUIRED_FIELD';
+        classification = 'INVALID';
+        errorCode = errorCode || 'REQUIRED_FIELD_MISSING';
       }
-      if (action === 'CREATE') {
-        if (!firstName) {
-          validationErrors.push('First Name is required');
-          classification = 'INVALID_REQUIRED_FIELD';
-        }
-        if (!lastName) {
-          validationErrors.push('Last Name is required');
-          classification = 'INVALID_REQUIRED_FIELD';
-        }
-        if (!mobileNumber) {
-          validationErrors.push('Mobile Number is required');
-          classification = 'INVALID_REQUIRED_FIELD';
-        }
-        if (!nationality) {
-          validationErrors.push('Nationality is required');
-          classification = 'INVALID_REQUIRED_FIELD';
-        }
+      if (!firstName) {
+        validationErrors.push('First Name is required');
+        classification = 'INVALID';
+        errorCode = errorCode || 'REQUIRED_FIELD_MISSING';
+      }
+      if (!lastName) {
+        validationErrors.push('Last Name is required');
+        classification = 'INVALID';
+        errorCode = errorCode || 'REQUIRED_FIELD_MISSING';
+      }
+      if (!mobileNumber) {
+        validationErrors.push('Mobile No is required');
+        classification = 'INVALID';
+        errorCode = errorCode || 'REQUIRED_FIELD_MISSING';
+      }
+      if (!nationality) {
+        validationErrors.push('Nationality is required');
+        classification = 'INVALID';
+        errorCode = errorCode || 'REQUIRED_FIELD_MISSING';
+      }
+
+      // Username character validation
+      if (username && !/^[a-zA-Z0-9._-]+$/.test(username)) {
+        validationErrors.push('Username contains invalid characters (alphanumeric, ., _, - only)');
+        classification = 'INVALID';
+        errorCode = errorCode || 'INVALID_FIELD_FORMAT';
+      }
+
+      // Mobile number format validation
+      if (mobileNumber && !/^[0-9+() -]{7,20}$/.test(mobileNumber)) {
+        validationErrors.push('Invalid mobile number format');
+        classification = 'INVALID';
+        errorCode = errorCode || 'INVALID_FIELD_FORMAT';
       }
 
       // Email format validation
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         validationErrors.push('Invalid email format');
-        classification = 'INVALID_EMAIL';
+        classification = 'INVALID';
+        errorCode = errorCode || 'INVALID_FIELD_FORMAT';
       }
 
-      // Duplicate in File check
+      // Dropdown option validation against live options
+      if (nationality && normNatSet.size > 0 && !normNatSet.has(nationality.toLowerCase())) {
+        validationErrors.push(`Nationality '${nationality}' is not in the client's live options`);
+        classification = 'INVALID';
+        errorCode = errorCode || 'REMOTE_DROPDOWN_OPTION_NOT_FOUND';
+      }
+      if (role && normRoleSet.size > 0 && !normRoleSet.has(role.toLowerCase())) {
+        validationErrors.push(`Role '${role}' is not in the client's live options`);
+        classification = 'INVALID';
+        errorCode = errorCode || 'REMOTE_DROPDOWN_OPTION_NOT_FOUND';
+      }
+      if (profileRole && normProfSet.size > 0 && !normProfSet.has(profileRole.toLowerCase())) {
+        validationErrors.push(`Profile Role '${profileRole}' is not in the client's live options`);
+        classification = 'INVALID';
+        errorCode = errorCode || 'REMOTE_DROPDOWN_OPTION_NOT_FOUND';
+      }
+
+      // Duplicate username in file check
       if (normUser && seenUsernamesInFile.has(normUser)) {
-        validationErrors.push(`Duplicate username '${username}' appears multiple times in Excel file`);
-        classification = 'DUPLICATE_USERNAME';
+        validationErrors.push(`Duplicate username '${username}' appears multiple times in the file`);
+        classification = 'DUPLICATE';
+        errorCode = errorCode || 'DUPLICATE_USERNAME_IN_FILE';
       }
       if (normUser) seenUsernamesInFile.add(normUser);
 
-      // Existing client user check
-      if (action === 'CREATE' && existingUsernames.has(normUser)) {
-        validationErrors.push(`User '${username}' already exists in client`);
-        classification = 'DUPLICATE_USERNAME';
+      // Existing client snapshot username check -> ALREADY_EXISTS classification
+      const existingSnapshot = normUser ? existingUsernamesMap.get(normUser) : undefined;
+      if (existingSnapshot) {
+        existingStatus = existingSnapshot.status;
+        validationErrors.push(`User '${username}' already exists in client portal (${existingStatus})`);
+        classification = 'ALREADY_EXISTS';
+        errorCode = 'ALREADY_EXISTS';
       }
 
-      // Same First + Last name check
-      if (action === 'CREATE' && firstName && lastName) {
+      // Potential duplicate full name warning check (only if not already an error or already existing)
+      if (firstName && lastName && classification === 'READY') {
         const nameKey = `${firstName.toLowerCase()}_${lastName.toLowerCase()}`;
         const match = existingNamesMap.get(nameKey);
         if (match) {
-          validationErrors.push(`Possible duplicate: Another user already has name '${match.fullName}'`);
-          classification = 'POTENTIAL_DUPLICATE_NAME';
+          validationErrors.push(`Potential duplicate name: matches existing user '${match.fullName}' (${match.username})`);
+          classification = 'WARNING_REQUIRES_CONFIRMATION';
+          errorCode = 'POTENTIAL_DUPLICATE_NAME';
           potentialDuplicateOf = {
             username: match.username,
             fullName: match.fullName,
@@ -1728,34 +2023,38 @@ export class ClientUsersService implements OnModuleInit {
         }
       }
 
-      // Map action to classification if valid
-      if (validationErrors.length === 0) {
-        if (action === 'CREATE') classification = 'READY_CREATE';
-        else if (action === 'UPDATE') classification = 'READY_UPDATE';
-        else if (action === 'ACTIVATE') classification = 'READY_ACTIVATE';
-        else if (action === 'DEACTIVATE') classification = 'READY_DEACTIVATE';
+      if (classification === 'READY') {
         readyCount++;
+      } else if (classification === 'WARNING_REQUIRES_CONFIRMATION') {
+        warningCount++;
+      } else if (classification === 'ALREADY_EXISTS') {
+        alreadyExistingCount++;
       } else {
         errorCount++;
       }
 
       previewRows.push({
+        sNo: parsedSNo,
         rowNumber: rowNum,
         action,
         username,
         firstName,
-        middleName: middleName || undefined,
+        middleName,
         lastName,
-        nickName: nickName || undefined,
-        email: email || undefined,
-        mobileNumber: mobileNumber || undefined,
-        nationality: nationality || undefined,
-        role: role || undefined,
-        profileRole: profileRole || undefined,
-        barcodeNumber: barcodeNumber || undefined,
-        requestedStatus,
+        nickName,
+        email,
+        mobileNumber,
+        nationality,
+        role,
+        profileRole,
+        barcodeNumber,
+        requestedStatus: rawStatus as ClientUserStatus,
+        existingStatus,
         classification,
         validationErrors,
+        errorCode,
+        message: validationErrors.join('; ') || 'Row passed validation checks',
+        isApproved: classification === 'READY' || classification === 'WARNING_REQUIRES_CONFIRMATION',
         potentialDuplicateOf,
       });
     }
@@ -1763,147 +2062,339 @@ export class ClientUsersService implements OnModuleInit {
     return {
       totalRows: previewRows.length,
       readyRows: readyCount,
+      warningRows: warningCount,
+      alreadyExistingRows: alreadyExistingCount,
       errorRows: errorCount,
       rows: previewRows,
       liveClientOptions: {
-        nationalities: ['Saudi Arabia', 'United Arab Emirates', 'United States', 'United Kingdom', 'India', 'Egypt', 'Jordan', 'Pakistan', 'Philippines', 'Other'],
-        roles: ['Physician', 'Nurse', 'Admin', 'Pharmacist', 'Lab Technician', 'Operator', 'Super User'],
-        profileRoles: ['Clinical Specialist', 'General Practitioner', 'Head Nurse', 'Chief Pharmacist', 'System Administrator', 'Billing Specialist'],
+        nationalities: liveOptions.nationalities,
+        roles: liveOptions.roles,
+        profileRoles: liveOptions.profileRoles,
       },
     };
   }
 
   /**
-   * Executes approved import rows sequentially or with safe limited concurrency.
+   * Executes approved import rows sequentially with safe single-flight mutations.
+   * Enforces: Total = Created + Already Existing + Invalid + Failed + Cancelled + Not Processed.
    */
   async importExecute(clientId: string, rows: ExcelUserImportRow[], user: JwtPayload): Promise<ExcelUserImportExecutionSummary> {
+    if (!clientId) throw new BadRequestException('Client ID is required');
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
 
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(clientId)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    // Production mutation safeguard
+    if (client.environment?.toUpperCase() === 'PRODUCTION') {
+      throw new BadRequestException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: 'Bulk user mutations on PRODUCTION clients are strictly prohibited.',
+      });
+    }
+
     const jobId = `usr_imp_${Date.now()}`;
     const results: ExcelUserImportExecutionRowResult[] = [];
-    let succeededCount = 0;
+    let createdCount = 0;
+    let alreadyExistingCount = 0;
+    let invalidCount = 0;
     let failedCount = 0;
-    let skippedCount = 0;
+    let cancelledCount = 0;
+    let notProcessedCount = 0;
+
+    // Load existing snapshot users to look up status for already existing rows
+    const existingUsers = await this.snapshotRepo.find({ where: { clientId } });
+    const existingUserMap = new Map<string, ClientUserSnapshot>();
+    for (const u of existingUsers) {
+      existingUserMap.set(u.username.toLowerCase().trim(), u);
+    }
 
     for (const row of rows) {
       const rowCorrelationId = crypto.randomUUID();
-      const fullName = `${row.firstName} ${row.lastName}`.trim();
+      const fullName = `${row.firstName || ''} ${row.lastName || ''}`.trim();
+      const sNo = row.sNo !== undefined ? row.sNo : row.rowNumber - 1;
 
-      if (row.classification.startsWith('READY_')) {
-        try {
-          if (row.action === 'CREATE') {
-            await this.createClientUser(
-              {
-                clientId,
-                username: row.username,
-                firstName: row.firstName,
-                middleName: row.middleName,
-                lastName: row.lastName,
-                nickName: row.nickName,
-                email: row.email,
-                mobileNumber: row.mobileNumber || '0500000000',
-                nationality: row.nationality || 'Other',
-                role: row.role,
-                profileRole: row.profileRole,
-                barcodeNumber: row.barcodeNumber,
-                status: row.requestedStatus || 'ACTIVE',
-                overrideDuplicateName: true,
-              },
-              user
-            );
+      // Check ALREADY_EXISTS first
+      if (row.classification === 'ALREADY_EXISTS' || row.errorCode === 'ALREADY_EXISTS') {
+        const snap = existingUserMap.get((row.username || '').toLowerCase().trim());
+        const currentStatus = row.existingStatus || snap?.status || 'ACTIVE';
+        alreadyExistingCount++;
+        results.push({
+          sNo,
+          rowNumber: row.rowNumber,
+          action: row.action,
+          username: row.username,
+          fullName,
+          result: 'ALREADY_EXISTS',
+          errorCode: 'ALREADY_EXISTS',
+          existingStatus: currentStatus,
+          remoteStatus: currentStatus,
+          message: `User '${row.username}' already exists in client portal with status ${currentStatus}.`,
+          executedAt: new Date().toISOString(),
+          correlationId: rowCorrelationId,
+        });
+        continue;
+      }
 
+      // Check INVALID / Validation failures
+      if (
+        row.classification === 'INVALID' ||
+        row.errorCode === 'DUPLICATE_SERIAL_NUMBER' ||
+        row.errorCode === 'REQUIRED_FIELD_MISSING' ||
+        row.errorCode === 'INVALID_FIELD_FORMAT' ||
+        row.errorCode === 'REMOTE_DROPDOWN_OPTION_NOT_FOUND' ||
+        row.errorCode === 'DUPLICATE_USERNAME_IN_FILE'
+      ) {
+        invalidCount++;
+        results.push({
+          sNo,
+          rowNumber: row.rowNumber,
+          action: row.action,
+          username: row.username,
+          fullName,
+          result: 'INVALID',
+          errorCode: row.errorCode || 'REQUIRED_FIELD_MISSING',
+          message: (row.validationErrors && row.validationErrors.length > 0)
+            ? row.validationErrors.join('; ')
+            : row.message || 'Row failed dry-run validation',
+          executedAt: new Date().toISOString(),
+          correlationId: rowCorrelationId,
+        });
+        continue;
+      }
+
+      // Check CANCELLED
+      if (row.classification === 'CANCELLED') {
+        cancelledCount++;
+        results.push({
+          sNo,
+          rowNumber: row.rowNumber,
+          action: row.action,
+          username: row.username,
+          fullName,
+          result: 'CANCELLED',
+          errorCode: 'OPERATION_CANCELLED',
+          message: row.message || 'Row import was cancelled.',
+          executedAt: new Date().toISOString(),
+          correlationId: rowCorrelationId,
+        });
+        continue;
+      }
+
+      // Check if row is eligible and approved
+      const isEligible =
+        (row.classification === 'READY' ||
+          row.classification === 'READY_CREATE' ||
+          row.classification === 'WARNING_REQUIRES_CONFIRMATION') &&
+        row.isApproved !== false;
+
+      if (!isEligible) {
+        notProcessedCount++;
+        results.push({
+          sNo,
+          rowNumber: row.rowNumber,
+          action: row.action,
+          username: row.username,
+          fullName,
+          result: 'NOT_PROCESSED',
+          errorCode: 'NOT_PROCESSED',
+          message: row.message || 'Row was not approved by operator for creation.',
+          executedAt: new Date().toISOString(),
+          correlationId: rowCorrelationId,
+        });
+        continue;
+      }
+
+      // Execute eligible row
+      try {
+        if (row.action === 'CREATE') {
+          await this.createClientUser(
+            {
+              clientId,
+              username: row.username,
+              firstName: row.firstName,
+              middleName: row.middleName,
+              lastName: row.lastName,
+              nickName: row.nickName,
+              email: row.email,
+              mobileNumber: row.mobileNumber || '0500000000',
+              nationality: row.nationality || 'Saudi Arabia',
+              role: row.role,
+              profileRole: row.profileRole,
+              barcodeNumber: row.barcodeNumber,
+              status: row.requestedStatus || 'ACTIVE',
+              overrideDuplicateName: true,
+            },
+            user
+          );
+
+          results.push({
+            sNo,
+            rowNumber: row.rowNumber,
+            action: row.action,
+            username: row.username,
+            fullName,
+            result: 'CREATED',
+            message: `User '${row.username}' created and verified on client.`,
+            remoteStatus: 'ACTIVE',
+            executedAt: new Date().toISOString(),
+            correlationId: rowCorrelationId,
+          });
+          createdCount++;
+        } else if (row.action === 'ACTIVATE' || row.action === 'DEACTIVATE') {
+          const snap = await this.snapshotRepo.findOne({ where: { clientId, username: row.username } });
+          if (snap) {
+            await this.setUserStatus(snap.id, row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE', user);
             results.push({
+              sNo,
               rowNumber: row.rowNumber,
               action: row.action,
               username: row.username,
               fullName,
               result: 'SUCCESS',
-              message: `User '${row.username}' created and verified on client.`,
-              remoteStatus: 'ACTIVE',
+              message: `Status updated to ${row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE'}.`,
+              remoteStatus: row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE',
               executedAt: new Date().toISOString(),
               correlationId: rowCorrelationId,
             });
-            succeededCount++;
-          } else if (row.action === 'ACTIVATE' || row.action === 'DEACTIVATE') {
-            const snap = await this.snapshotRepo.findOne({ where: { clientId, username: row.username } });
-            if (snap) {
-              await this.setUserStatus(snap.id, row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE', user);
-              results.push({
-                rowNumber: row.rowNumber,
-                action: row.action,
-                username: row.username,
-                fullName,
-                result: 'SUCCESS',
-                message: `Status updated to ${row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE'}.`,
-                remoteStatus: row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE',
-                executedAt: new Date().toISOString(),
-                correlationId: rowCorrelationId,
-              });
-              succeededCount++;
-            } else {
-              results.push({
-                rowNumber: row.rowNumber,
-                action: row.action,
-                username: row.username,
-                fullName,
-                result: 'REMOTE_ERROR',
-                message: `User '${row.username}' not found in client snapshot.`,
-                executedAt: new Date().toISOString(),
-                correlationId: rowCorrelationId,
-              });
-              failedCount++;
-            }
+            createdCount++;
+          } else {
+            results.push({
+              sNo,
+              rowNumber: row.rowNumber,
+              action: row.action,
+              username: row.username,
+              fullName,
+              result: 'REMOTE_ERROR',
+              errorCode: 'REMOTE_USER_NOT_FOUND',
+              message: `User '${row.username}' not found in client snapshot.`,
+              executedAt: new Date().toISOString(),
+              correlationId: rowCorrelationId,
+            });
+            failedCount++;
           }
-        } catch (err: any) {
-          failedCount++;
-          results.push({
-            rowNumber: row.rowNumber,
-            action: row.action,
-            username: row.username,
-            fullName,
-            result: 'REMOTE_ERROR',
-            errorCode: err.response?.code || 'EXECUTION_ERROR',
-            message: err.message || 'Error executing row mutation',
-            executedAt: new Date().toISOString(),
-            correlationId: rowCorrelationId,
-          });
         }
-      } else if (row.classification === 'DUPLICATE_USERNAME') {
-        skippedCount++;
-        results.push({
-          rowNumber: row.rowNumber,
-          action: row.action,
-          username: row.username,
-          fullName,
-          result: 'SKIPPED_DUPLICATE',
-          message: `User '${row.username}' already exists. Creation skipped.`,
-          executedAt: new Date().toISOString(),
-          correlationId: rowCorrelationId,
-        });
-      } else {
+      } catch (err: any) {
         failedCount++;
+        const errorCode = err.response?.code || err.code || 'REMOTE_ERROR';
+        const errorMsg = (err.response?.message || err.message || 'Error executing row mutation').replace(/<[^>]*>?/gm, '');
         results.push({
+          sNo,
           rowNumber: row.rowNumber,
           action: row.action,
           username: row.username,
           fullName,
-          result: 'VALIDATION_FAILED',
-          message: row.validationErrors.join('; ') || 'Row failed dry-run validation',
+          result: 'FAILED',
+          errorCode,
+          message: errorMsg,
           executedAt: new Date().toISOString(),
           correlationId: rowCorrelationId,
         });
       }
     }
 
+    // Trigger authoritative pull sync after successful batch
+    if (createdCount > 0) {
+      try {
+        await this.syncClientUsers(clientId, user);
+      } catch (err) {
+        console.warn('Post-import pull sync warning:', err);
+      }
+    }
+
+    // Strict invariant check: Total = Created + Already Existing + Invalid + Failed + Cancelled + Not Processed
+    const totalProcessed = rows.length;
+    const computedSum = createdCount + alreadyExistingCount + invalidCount + failedCount + cancelledCount + notProcessedCount;
+    if (totalProcessed !== computedSum) {
+      console.warn(`Discrepancy in row breakdown: total=${totalProcessed}, computedSum=${computedSum}`);
+    }
+
+    await this.auditRepo.save(
+      this.auditRepo.create({
+        action: 'CLIENT_USERS_BULK_IMPORTED',
+        actorUserId: user.sub,
+        actorUsername: user.username,
+        entityType: 'CLIENT',
+        entityId: clientId,
+        detailsJson: JSON.stringify({
+          clientCode: client.clientCode,
+          jobId,
+          totalRows: totalProcessed,
+          createdRows: createdCount,
+          alreadyExistingRows: alreadyExistingCount,
+          invalidRows: invalidCount,
+          failedRows: failedCount,
+          cancelledRows: cancelledCount,
+          notProcessedRows: notProcessedCount,
+        }),
+      })
+    );
+
     return {
       jobId,
-      totalRows: rows.length,
-      succeededRows: succeededCount,
+      totalRows: totalProcessed,
+      createdRows: createdCount,
+      alreadyExistingRows: alreadyExistingCount,
+      invalidRows: invalidCount,
       failedRows: failedCount,
-      skippedRows: skippedCount,
+      cancelledRows: cancelledCount,
+      notProcessedRows: notProcessedCount,
+      succeededRows: createdCount,
+      skippedRows: alreadyExistingCount + notProcessedCount,
       results,
     };
+  }
+
+  /**
+   * Generates Excel workbook (.xlsx) containing import execution results with S.No, actual Excel row, and full status reconciliation.
+   */
+  async exportImportResults(clientId: string, summary: ExcelUserImportExecutionSummary, user: JwtPayload): Promise<Buffer> {
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    const clientCode = client ? client.clientCode : 'N/A';
+
+    const resultRows = (summary.results || []).map((r, idx) => ({
+      'S.No': r.sNo !== undefined ? r.sNo : idx + 1,
+      'Excel Row Number': r.rowNumber,
+      'Username': this.sanitizeCellValue(r.username),
+      'Full Name': this.sanitizeCellValue(r.fullName),
+      'Result Status': r.result,
+      'Current Status': r.existingStatus || r.remoteStatus || 'N/A',
+      'Safe Error Code': r.errorCode || 'NONE',
+      'Reason / Message': this.sanitizeCellValue(r.message),
+      'Processed Timestamp': r.executedAt,
+    }));
+
+    const created = summary.createdRows ?? summary.succeededRows ?? 0;
+    const existing = summary.alreadyExistingRows ?? 0;
+    const invalid = summary.invalidRows ?? 0;
+    const failed = summary.failedRows ?? 0;
+    const cancelled = summary.cancelledRows ?? 0;
+    const notProcessed = summary.notProcessedRows ?? 0;
+
+    const summaryRows = [
+      { Property: 'Import Job ID', Value: summary.jobId },
+      { Property: 'Selected Client', Value: clientCode },
+      { Property: 'Total Rows', Value: summary.totalRows },
+      { Property: 'Created Rows', Value: created },
+      { Property: 'Already Existing Rows', Value: existing },
+      { Property: 'Invalid Rows', Value: invalid },
+      { Property: 'Failed Rows', Value: failed },
+      { Property: 'Cancelled Rows', Value: cancelled },
+      { Property: 'Not Processed Rows', Value: notProcessed },
+      { Property: 'Sum Check Verification', Value: `Total (${summary.totalRows}) = Created (${created}) + Already Existing (${existing}) + Invalid (${invalid}) + Failed (${failed}) + Cancelled (${cancelled}) + Not Processed (${notProcessed})` },
+      { Property: 'Export Timestamp (UTC)', Value: new Date().toISOString() },
+    ];
+
+    const wb = XLSX.utils.book_new();
+    const wsResults = XLSX.utils.json_to_sheet(resultRows);
+    const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+
+    XLSX.utils.book_append_sheet(wb, wsResults, 'Import Results');
+    XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   }
 
   private mapToDto(u: ClientUserSnapshot, client: Client): ClientUser {

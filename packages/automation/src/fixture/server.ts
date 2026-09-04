@@ -454,6 +454,76 @@ export function createFixtureApp(): express.Express {
     `);
   });
 
+  app.get('/MasterV9.4/addUsers-no-button', (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Add User No Button</title></head>
+      <body>
+        <form id="addUserForm">
+          <label for="username">User Name *</label>
+          <input type="text" id="username" name="username" />
+          <label for="firstName">First Name *</label>
+          <input type="text" id="firstName" name="firstName" />
+          <label for="lastName">Last Name *</label>
+          <input type="text" id="lastName" name="lastName" />
+          <label for="mobileNo">Mobile No *</label>
+          <input type="tel" id="mobileNo" name="mobileNumber" />
+        </form>
+      </body>
+      </html>
+    `);
+  });
+
+  app.get('/MasterV9.4/addUsers-disabled-button', (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Add User Disabled Button</title></head>
+      <body>
+        <form id="addUserForm">
+          <label for="username">User Name *</label>
+          <input type="text" id="username" name="username" />
+          <label for="firstName">First Name *</label>
+          <input type="text" id="firstName" name="firstName" />
+          <label for="lastName">Last Name *</label>
+          <input type="text" id="lastName" name="lastName" />
+          <label for="mobileNo">Mobile No *</label>
+          <input type="tel" id="mobileNo" name="mobileNumber" />
+          <button type="submit" id="btnSave" disabled>Save</button>
+        </form>
+      </body>
+      </html>
+    `);
+  });
+
+  app.get('/MasterV9.4/addUsers-no-verify', (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Add User No Verify</title></head>
+      <body>
+        <form id="addUserForm" method="POST" action="/MasterV9.4/addUsers-no-verify">
+          <label for="username">User Name *</label>
+          <input type="text" id="username" name="username" />
+          <label for="firstName">First Name *</label>
+          <input type="text" id="firstName" name="firstName" />
+          <label for="lastName">Last Name *</label>
+          <input type="text" id="lastName" name="lastName" />
+          <label for="mobileNo">Mobile No *</label>
+          <input type="tel" id="mobileNo" name="mobileNumber" />
+          <button type="submit" id="btnSave">Save</button>
+        </form>
+      </body>
+      </html>
+    `);
+  });
+
+  app.post('/MasterV9.4/addUsers-no-verify', (req: Request, res: Response) => {
+    // Deliberately do not add user to clientUsers list so verification fails
+    res.redirect('/MasterV9.4/users');
+  });
+
   app.get('/MasterV9.4/addUsers-missing-field', (req: Request, res: Response) => {
     res.send(`
       <!DOCTYPE html>
@@ -492,6 +562,99 @@ export function createFixtureApp(): express.Express {
       </body>
       </html>
     `);
+  });
+
+  app.get('/MasterV9.4/addUsers-congrats-banner', (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Add User Congrats</title></head>
+      <body>
+        <div class="content">
+          <form id="addUserForm" method="POST" action="/MasterV9.4/addUsers-congrats-banner">
+            <label for="username">User Name *</label>
+            <input type="text" id="username" name="username" required />
+            <label>Password</label>
+            <input type="text" id="txtPassword" disabled value="DefaultSimplexPass!99" />
+            <label for="firstName">First Name *</label>
+            <input type="text" id="firstName" name="firstName" required />
+            <label for="lastName">Last Name *</label>
+            <input type="text" id="lastName" name="lastName" required />
+            <label for="mobileNo">Mobile No *</label>
+            <input type="tel" id="mobileNo" name="mobileNumber" required />
+            <button type="submit" id="btnSave">Save</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+  });
+
+  app.post('/MasterV9.4/addUsers-congrats-banner', (req: Request, res: Response) => {
+    const { username, firstName, lastName, mobileNumber } = req.body;
+    clientUsers.push({
+      username: username || 'congrats_user',
+      firstName: firstName || 'Congrats',
+      lastName: lastName || 'User',
+      fullName: `${firstName || 'Congrats'} ${lastName || 'User'}`.trim(),
+      email: 'congrats@test.com',
+      mobileNumber: mobileNumber || '5551234567',
+      nationality: 'Saudi Arabia',
+      role: 'Physician',
+      profileRole: 'Specialist',
+      status: 'ACTIVE',
+    });
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Success</title></head>
+      <body>
+        <div class="alert-warning">Congrats!! Added successfully</div>
+        <script>setTimeout(() => { window.location.href = '/MasterV9.4/users'; }, 100);</script>
+      </body>
+      </html>
+    `);
+  });
+
+  app.get('/MasterV9.4/addUsers-no-password', (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Add User No Password</title></head>
+      <body>
+        <div class="content">
+          <form id="addUserForm" method="POST" action="/MasterV9.4/addUsers-no-password">
+            <label for="username">User Name *</label>
+            <input type="text" id="username" name="username" required />
+            <label for="firstName">First Name *</label>
+            <input type="text" id="firstName" name="firstName" required />
+            <label for="lastName">Last Name *</label>
+            <input type="text" id="lastName" name="lastName" required />
+            <label for="mobileNo">Mobile No *</label>
+            <input type="tel" id="mobileNo" name="mobileNumber" required />
+            <button type="submit" id="btnSave">Save</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+  });
+
+  app.post('/MasterV9.4/addUsers-no-password', (req: Request, res: Response) => {
+    const { username, firstName, lastName, mobileNumber } = req.body;
+    clientUsers.push({
+      username: username || 'nopass_user',
+      firstName: firstName || 'NoPass',
+      lastName: lastName || 'User',
+      fullName: `${firstName || 'NoPass'} ${lastName || 'User'}`.trim(),
+      email: 'nopass@test.com',
+      mobileNumber: mobileNumber || '5551234567',
+      nationality: 'Saudi Arabia',
+      role: 'Physician',
+      profileRole: 'Specialist',
+      status: 'ACTIVE',
+    });
+    res.redirect('/MasterV9.4/users');
   });
 
   app.post('/MasterV9.4/addUsers', (req: Request, res: Response) => {

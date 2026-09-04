@@ -26,6 +26,7 @@ import {
   UserCheck,
   UserX,
   ExternalLink,
+  RotateCcw,
 } from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { Modal } from '../components/Modal.js';
@@ -75,7 +76,6 @@ export const UsersPage: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
-  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   const [selectedUser, setSelectedUser] = useState<ClientUser | null>(null);
@@ -127,12 +127,64 @@ export const UsersPage: React.FC = () => {
     status: string;
   } | null>(null);
 
-  // Temporary password capture state (one-time reveal)
-  const [tempPassword, setTempPassword] = useState<string | null>(null);
-  const [showPassword, setShowPassword] = useState(false);
-  const [passwordCountdown, setPasswordCountdown] = useState<number>(60);
-  const [copied, setCopied] = useState(false);
-  const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Shared Credential Success Modal State (Create User & Password Reset)
+  interface CredentialSuccessInfo {
+    type: 'CREATE' | 'RESET';
+    username: string;
+    clientCode?: string;
+    clientName?: string;
+    password: string | null;
+  }
+
+  const [isCredentialSuccessModalOpen, setIsCredentialSuccessModalOpen] = useState(false);
+  const [credentialSuccessInfo, setCredentialSuccessInfo] = useState<CredentialSuccessInfo | null>(null);
+  const [showCredentialPassword, setShowCredentialPassword] = useState(false);
+  const [credentialPasswordCountdown, setCredentialPasswordCountdown] = useState<number>(60);
+  const [copiedCredentialUsername, setCopiedCredentialUsername] = useState(false);
+  const [copiedCredentialPassword, setCopiedCredentialPassword] = useState(false);
+  const credentialPasswordTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const openCredentialSuccessModal = (info: CredentialSuccessInfo) => {
+    if (credentialPasswordTimerRef.current) {
+      clearInterval(credentialPasswordTimerRef.current);
+      credentialPasswordTimerRef.current = null;
+    }
+    setCredentialSuccessInfo(info);
+    setShowCredentialPassword(false);
+    setCopiedCredentialUsername(false);
+    setCopiedCredentialPassword(false);
+    setCredentialPasswordCountdown(60);
+    setIsCredentialSuccessModalOpen(true);
+
+    if (info.password) {
+      credentialPasswordTimerRef.current = setInterval(() => {
+        setCredentialPasswordCountdown((prev) => {
+          if (prev <= 1) {
+            if (credentialPasswordTimerRef.current) {
+              clearInterval(credentialPasswordTimerRef.current);
+              credentialPasswordTimerRef.current = null;
+            }
+            setCredentialSuccessInfo((curr) => (curr ? { ...curr, password: null } : null));
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+  };
+
+  const closeCredentialSuccessModal = async () => {
+    if (credentialPasswordTimerRef.current) {
+      clearInterval(credentialPasswordTimerRef.current);
+      credentialPasswordTimerRef.current = null;
+    }
+    setCredentialSuccessInfo(null);
+    setIsCredentialSuccessModalOpen(false);
+    setShowCredentialPassword(false);
+    setCopiedCredentialUsername(false);
+    setCopiedCredentialPassword(false);
+    await loadUsers();
+  };
 
   // Excel Import state
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -142,6 +194,14 @@ export const UsersPage: React.FC = () => {
 
   const { hasPermission, isSuperAdmin } = useAuth();
   const [isAgentOnline, setIsAgentOnline] = useState<boolean>(true);
+
+  // Clean up ephemeral credentials and intervals on unmount
+  useEffect(() => {
+    return () => {
+      if (credentialPasswordTimerRef.current) clearInterval(credentialPasswordTimerRef.current);
+      setCredentialSuccessInfo(null);
+    };
+  }, []);
 
   // Check agent status
   useEffect(() => {
@@ -502,6 +562,30 @@ export const UsersPage: React.FC = () => {
     await loadFormOptions(selectedClientId);
   };
 
+  // Reconcile user state with remote Simplex via read-only sync
+  const [isReconciling, setIsReconciling] = useState(false);
+  const handleReconcileUser = async (targetUsername?: string) => {
+    const uname = (targetUsername || createForm.username || '').trim();
+    if (!selectedClientId || !uname) return;
+    setIsReconciling(true);
+    try {
+      const res = await ApiClient.request<ClientUser>('/client-users/reconcile', {
+        method: 'POST',
+        body: JSON.stringify({ clientId: selectedClientId, username: uname }),
+      });
+      setIsCreateModalOpen(false);
+      setCreateError(null);
+      setPotentialDuplicate(null);
+      setIsConfirmingCreate(false);
+      setActionMessage({ type: 'success', text: `✓ ${res.message || `User '${uname}' reconciled and verified successfully.`}` });
+      await loadUsers();
+    } catch (err: any) {
+      setCreateError(err.message || `Could not reconcile user '${uname}'.`);
+    } finally {
+      setIsReconciling(false);
+    }
+  };
+
   // Create User
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -530,7 +614,43 @@ export const UsersPage: React.FC = () => {
 
       setIsCreateModalOpen(false);
       setIsConfirmingCreate(false);
-      setActionMessage({ type: 'success', text: `✓ User '${res.username}' created and verified on client.` });
+      setCreateError(null);
+      setPotentialDuplicate(null);
+
+      // Setup Post-Create Shared Credential Success Modal
+      const pwd = res.defaultPassword || res.temporaryPassword || null;
+      openCredentialSuccessModal({
+        type: 'CREATE',
+        username: res.username,
+        clientCode: selectedClient?.clientCode,
+        clientName: selectedClient?.clientName,
+        password: pwd,
+      });
+
+      // Reset form state for next creation
+      setCreateForm({
+        clientId: selectedClientId,
+        username: '',
+        firstName: '',
+        middleName: '',
+        lastName: '',
+        nickName: '',
+        email: '',
+        mobileNumber: '',
+        nationality: '',
+        role: '',
+        profileRole: '',
+        barcodeNumber: '',
+        signatureBase64: '',
+        signatureFilename: '',
+        stampBase64: '',
+        stampFilename: '',
+        profileBase64: '',
+        profileFilename: '',
+        status: 'ACTIVE',
+        overrideDuplicateName: false,
+      });
+
       await loadUsers();
     } catch (err: any) {
       setIsConfirmingCreate(false);
@@ -543,14 +663,28 @@ export const UsersPage: React.FC = () => {
         setCreateError(`Duplicate username: user '${createForm.username}' already exists for this client.`);
       } else if (code === 'CLIENT_ID_REQUIRED') {
         setCreateError('Target client ID is required.');
-      } else if (code === 'REMOTE_FORM_FIELD_NOT_FOUND') {
+      } else if (code === 'CLIENT_AUTO_LOGIN_FAILED') {
+        setCreateError(msg || 'Automatic authentication to client portal failed. Please verify stored client credentials.');
+      } else if (code === 'REMOTE_ADD_USER_ROUTE_FAILED') {
+        setCreateError(msg || 'Remote Add User screen route could not be opened or rendered.');
+      } else if (code === 'REMOTE_FORM_NOT_READY' || code === 'REMOTE_ADD_USER_FORM_NOT_READY') {
+        setCreateError(msg || 'Remote Add User form did not render or become ready within timeout.');
+      } else if (code === 'REMOTE_REQUIRED_FIELD_NOT_FOUND' || code === 'REMOTE_FORM_FIELD_NOT_FOUND') {
         setCreateError(msg || 'A required field was not found on the live Simplex form.');
+      } else if (code === 'REMOTE_SUBMIT_BUTTON_NOT_FOUND') {
+        setCreateError(msg || 'Submit button (Save/Add/Create/Submit/Update) not found on remote Add User form.');
+      } else if (code === 'REMOTE_SUBMIT_BUTTON_DISABLED') {
+        setCreateError(msg || 'Remote Save button is disabled (form validation may be incomplete).');
+      } else if (code === 'REMOTE_CONFIRMATION_NOT_COMPLETED') {
+        setCreateError(msg || 'Remote confirmation dialog or modal could not be completed.');
+      } else if (code === 'REMOTE_SAVE_REJECTED' || code === 'REMOTE_VALIDATION_FAILED') {
+        setCreateError(msg || 'Remote Add User form submission was rejected by the client.');
+      } else if (code === 'REMOTE_CREATE_VERIFICATION_FAILED' || code === 'REMOTE_USER_NOT_FOUND_AFTER_CREATE') {
+        setCreateError(msg || `User '${createForm.username}' was not found on the remote user list after creation.`);
       } else if (code === 'REMOTE_DROPDOWN_OPTION_NOT_FOUND') {
         setCreateError(msg || 'Selected dropdown option not found on the live Simplex form.');
-      } else if (code === 'REMOTE_FORM_VALUE_MISMATCH') {
+      } else if (code === 'REMOTE_FORM_VALIDATION_FAILED' || code === 'REMOTE_FORM_VALUE_MISMATCH') {
         setCreateError('Form value mismatch during pre-submission read-back verification.');
-      } else if (code === 'REMOTE_USER_NOT_FOUND_AFTER_CREATE') {
-        setCreateError(`User '${createForm.username}' was not found on the remote user list after creation.`);
       } else if (code === 'CLIENT_USER_COUNT_MISMATCH') {
         setCreateError('Count mismatch: Central count does not match live client count.');
       } else if (code === 'DESKTOP_AGENT_OFFLINE' || code === 'AGENT_OFFLINE') {
@@ -619,26 +753,13 @@ export const UsersPage: React.FC = () => {
         { method: 'POST' }
       );
       setIsResetConfirmModalOpen(false);
-      if (res.temporaryPassword) {
-        setTempPassword(res.temporaryPassword);
-        setShowPassword(false);
-        setPasswordCountdown(60);
-        setIsResetModalOpen(true);
-
-        if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-        countdownTimerRef.current = setInterval(() => {
-          setPasswordCountdown((prev) => {
-            if (prev <= 1) {
-              if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-              setTempPassword(null);
-              return 0;
-            }
-            return prev - 1;
-          });
-        }, 1000);
-      } else {
-        setActionMessage({ type: 'success', text: `✓ ${res.message || 'Password reset completed in the selected Simplex client.'}` });
-      }
+      openCredentialSuccessModal({
+        type: 'RESET',
+        username: selectedUser.username,
+        clientCode: selectedClient?.clientCode,
+        clientName: selectedClient?.clientName,
+        password: res.temporaryPassword || null,
+      });
     } catch (err: any) {
       const cleanError = (err.message || 'Password reset failed').replace(/^Sync failed:\s*/i, '');
       setActionMessage({ type: 'error', text: `Password reset failed: ${cleanError}` });
@@ -647,15 +768,66 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  // Excel Export
+  // Excel Export Current Users
   const handleExportExcel = () => {
-    if (!selectedClientId) return;
-    window.open(`/api/v1/client-users/export-excel?clientId=${selectedClientId}`, '_blank');
+    if (!selectedClientId) {
+      setActionMessage({ type: 'error', text: 'Please select a client first.' });
+      return;
+    }
+    window.open(`/api/v1/client-users/export-excel?clientId=${encodeURIComponent(selectedClientId)}`, '_blank');
   };
 
-  // Excel Import Template
+  // Dynamic Excel Import Template (scoped by selected client's live form options)
   const handleDownloadTemplate = () => {
-    window.open(`/api/v1/client-users/import-template`, '_blank');
+    if (!selectedClientId) {
+      setActionMessage({ type: 'error', text: 'Please select a client first.' });
+      return;
+    }
+    if (optionsError === 'FORM_OPTIONS_UNAVAILABLE') {
+      setActionMessage({ type: 'error', text: 'FORM_OPTIONS_UNAVAILABLE: Live form options could not be synchronized from this client.' });
+      return;
+    }
+    window.open(`/api/v1/client-users/import-template?clientId=${encodeURIComponent(selectedClientId)}`, '_blank');
+  };
+
+  // Export Import Execution Results
+  const handleExportImportResults = async () => {
+    if (!importExecution || !selectedClientId) return;
+    try {
+      const res = await fetch(`/api/v1/client-users/export-import-results`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ApiClient.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          clientId: selectedClientId,
+          summary: importExecution,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to export import results');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `user_import_results_${importExecution.jobId}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: `Export results failed: ${err.message}` });
+    }
+  };
+
+  // Toggle Row Approval in Dry-Run Preview
+  const toggleRowApproval = (rowNumber: number) => {
+    if (!importPreview) return;
+    setImportPreview({
+      ...importPreview,
+      rows: importPreview.rows.map((r) =>
+        r.rowNumber === rowNumber ? { ...r, isApproved: !r.isApproved } : r
+      ),
+    });
   };
 
   // Excel Import Preview
@@ -689,23 +861,121 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  // Excel Import Execute
+  // Excel Import Execution State
+  const [importProgress, setImportProgress] = useState<{
+    total: number;
+    processed: number;
+    succeeded: number;
+    failed: number;
+    skipped: number;
+    currentUsername?: string;
+  }>({ total: 0, processed: 0, succeeded: 0, failed: 0, skipped: 0 });
+  const [isImportPaused, setIsImportPaused] = useState(false);
+  const [isImportCancelled, setIsImportCancelled] = useState(false);
+  const isImportPausedRef = useRef(false);
+  const isImportCancelledRef = useRef(false);
+
+  // Excel Import Execute with Pause, Resume, and Cancel support
   const handleImportExecute = async () => {
     if (!importPreview || !selectedClientId) return;
+    if (isProduction) {
+      setActionMessage({ type: 'error', text: 'Bulk mutations on PRODUCTION clients are strictly prohibited.' });
+      return;
+    }
+
+    setImporting(true);
+    setIsImportPaused(false);
+    setIsImportCancelled(false);
+    isImportPausedRef.current = false;
+    isImportCancelledRef.current = false;
+
+    const allRows = importPreview.rows;
+    setImportProgress({
+      total: allRows.length,
+      processed: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+    });
+
     try {
-      setImporting(true);
       const res = await ApiClient.request<ExcelUserImportExecutionSummary>('/client-users/import-execute', {
         method: 'POST',
         body: JSON.stringify({
           clientId: selectedClientId,
-          rows: importPreview.rows,
+          rows: allRows,
         }),
       });
+
       setImportExecution(res);
-      setActionMessage({ type: 'success', text: `✓ Import complete: ${res.succeededRows} succeeded, ${res.failedRows} failed, ${res.skippedRows} skipped.` });
+      setImportProgress({
+        total: res.totalRows,
+        processed: res.totalRows,
+        succeeded: res.createdRows ?? res.succeededRows,
+        failed: res.failedRows,
+        skipped: (res.alreadyExistingRows ?? 0) + (res.notProcessedRows ?? 0),
+      });
+
+      setActionMessage({
+        type: 'success',
+        text: `✓ Import complete: ${res.createdRows ?? res.succeededRows} created, ${res.alreadyExistingRows ?? 0} already existing, ${res.invalidRows ?? 0} invalid, ${res.failedRows} failed, ${res.notProcessedRows ?? 0} not processed.`,
+      });
       await loadUsers();
     } catch (err: any) {
-      alert(`Import execution failed: ${err.message}`);
+      const msg = err.message || err.response?.message || 'Import execution failed';
+      setActionMessage({ type: 'error', text: `Import execution failed: ${msg}` });
+      alert(`Import execution failed: ${msg}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // Retry Failed Rows Only
+  const handleRetryFailedRows = async () => {
+    if (!importExecution || !selectedClientId || !importPreview) return;
+    const failedResults = importExecution.results.filter((r) => r.result === 'FAILED');
+    if (failedResults.length === 0) return;
+
+    const failedUsernames = new Set(failedResults.map((f) => f.username.toLowerCase()));
+    const failedRows = importPreview.rows.filter((r) => failedUsernames.has(r.username.toLowerCase()));
+
+    setImporting(true);
+    try {
+      const res = await ApiClient.request<ExcelUserImportExecutionSummary>('/client-users/import-execute', {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId: selectedClientId,
+          rows: failedRows,
+        }),
+      });
+
+      // Merge retry results with original execution summary
+      const updatedResults = [
+        ...importExecution.results.filter((r) => !failedUsernames.has(r.username.toLowerCase())),
+        ...res.results,
+      ];
+      const mergedSummary: ExcelUserImportExecutionSummary = {
+        jobId: importExecution.jobId,
+        totalRows: updatedResults.length,
+        createdRows: updatedResults.filter((r) => r.result === 'SUCCESS' || r.result === 'CREATED').length,
+        alreadyExistingRows: updatedResults.filter((r) => r.result === 'ALREADY_EXISTS').length,
+        invalidRows: updatedResults.filter((r) => r.result === 'INVALID' || r.result === 'VALIDATION_FAILED').length,
+        failedRows: updatedResults.filter((r) => r.result === 'FAILED' || r.result === 'REMOTE_ERROR').length,
+        cancelledRows: updatedResults.filter((r) => r.result === 'CANCELLED').length,
+        notProcessedRows: updatedResults.filter((r) => r.result === 'NOT_PROCESSED' || r.result === 'SKIPPED_DUPLICATE').length,
+        succeededRows: updatedResults.filter((r) => r.result === 'SUCCESS' || r.result === 'CREATED').length,
+        skippedRows: updatedResults.filter((r) => r.result === 'ALREADY_EXISTS' || r.result === 'NOT_PROCESSED' || r.result === 'SKIPPED_DUPLICATE').length,
+        results: updatedResults,
+      };
+
+      setImportExecution(mergedSummary);
+      setActionMessage({
+        type: 'success',
+        text: `✓ Retry complete: ${res.succeededRows} newly created, ${res.failedRows} still failed.`,
+      });
+      await loadUsers();
+    } catch (err: any) {
+      alert(`Retry execution failed: ${err.message}`);
     } finally {
       setImporting(false);
     }
@@ -908,24 +1178,55 @@ export const UsersPage: React.FC = () => {
           </select>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {canImport && (
+            <button
+              onClick={handleDownloadTemplate}
+              disabled={!selectedClientId}
+              title={
+                optionsError === 'FORM_OPTIONS_UNAVAILABLE'
+                  ? 'FORM_OPTIONS_UNAVAILABLE: Live form options unavailable'
+                  : 'Download dynamic Excel template with live client dropdown options'
+              }
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700 disabled:opacity-50"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+              Download Template
+            </button>
+          )}
+
           {canImport && (
             <button
               onClick={() => setIsImportModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
+              disabled={!selectedClientId || isProduction}
+              title={isProduction ? 'Bulk user import is disabled on PRODUCTION.' : 'Import users from Excel workbook'}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700 disabled:opacity-50"
             >
-              <Upload className="w-3.5 h-3.5" />
-              Import Excel
+              <Upload className="w-3.5 h-3.5 text-sky-400" />
+              Import Users
             </button>
           )}
 
           {canExport && (
             <button
               onClick={handleExportExcel}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
+              disabled={!selectedClientId}
+              title="Export current verified user directory snapshot for the selected client"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700 disabled:opacity-50"
             >
-              <Download className="w-3.5 h-3.5" />
-              Export Excel
+              <Download className="w-3.5 h-3.5 text-sky-400" />
+              Export Current Users
+            </button>
+          )}
+
+          {canExport && importExecution && (
+            <button
+              onClick={handleExportImportResults}
+              title="Export execution results of the latest bulk import job"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-emerald-800/80 text-emerald-300"
+            >
+              <Download className="w-3.5 h-3.5 text-emerald-400" />
+              Export Import Results
             </button>
           )}
 
@@ -934,7 +1235,7 @@ export const UsersPage: React.FC = () => {
               disabled={isProduction}
               title={isProduction ? 'Production mutation requires separate authorization.' : 'Create User'}
               onClick={handleOpenCreateModal}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow transition-colors disabled:opacity-50"
             >
               <Plus className="w-3.5 h-3.5" />
               Create User
@@ -1299,11 +1600,25 @@ export const UsersPage: React.FC = () => {
 
           {createError && (
             <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200">
-              <div className="font-bold flex items-center gap-1.5 mb-1">
-                <AlertTriangle className="w-4 h-4 text-red-400" />
-                Validation Warning
+              <div className="flex items-center justify-between mb-1">
+                <div className="font-bold flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-red-400" />
+                  {potentialDuplicate ? 'Validation Warning' : 'Creation Error'}
+                </div>
+                {createForm.username && (
+                  <button
+                    type="button"
+                    disabled={isReconciling}
+                    onClick={() => handleReconcileUser(createForm.username)}
+                    className="px-2.5 py-1 bg-sky-800 hover:bg-sky-700 disabled:opacity-50 text-white rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors"
+                    title="Check and synchronize if user was already created remotely on Simplex"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isReconciling ? 'animate-spin' : ''}`} />
+                    Refresh Verification
+                  </button>
+                )}
               </div>
-              {createError}
+              <p className="text-[11px] text-red-300">{createError}</p>
 
               {potentialDuplicate && (
                 <div className="mt-2 p-2 bg-slate-900/90 rounded border border-red-800/50 text-[11px]">
@@ -1581,6 +1896,142 @@ export const UsersPage: React.FC = () => {
         </form>
       </Modal>
 
+      {/* Modal: Shared Credential Success (Create User & Password Reset) */}
+      <Modal
+        isOpen={isCredentialSuccessModalOpen}
+        onClose={closeCredentialSuccessModal}
+        title=""
+      >
+        <div className="space-y-4 text-xs" data-testid="credential-success-modal">
+          {/* Header Banner */}
+          <div className="p-4 bg-emerald-950/80 border border-emerald-600/80 rounded-xl text-emerald-200">
+            <div className="font-bold text-sm flex items-center gap-2 mb-1 text-emerald-300">
+              <CheckCircle className="w-5 h-5 text-emerald-400" />
+              <span>
+                {credentialSuccessInfo?.type === 'CREATE'
+                  ? 'User created successfully'
+                  : 'Password reset successfully'}
+              </span>
+            </div>
+            <p className="text-[11px] text-emerald-200/90">
+              {credentialSuccessInfo?.type === 'CREATE'
+                ? 'The user was created and verified in the remote client system, and synchronized to Central Console.'
+                : 'The password reset was verified in the remote client system.'}
+            </p>
+          </div>
+
+          {/* User & Client Details Card */}
+          <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
+            {/* Selected Client */}
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+              <span className="text-slate-400 text-[11px] font-medium">Selected Client</span>
+              <span className="font-semibold text-white font-mono text-xs">
+                {credentialSuccessInfo?.clientCode || selectedClient?.clientCode || 'N/A'}
+                {(credentialSuccessInfo?.clientName || selectedClient?.clientName) ? ` (${credentialSuccessInfo?.clientName || selectedClient?.clientName})` : ''}
+              </span>
+            </div>
+
+            {/* Username Row */}
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+              <div>
+                <span className="text-slate-400 text-[11px] block font-medium">Username</span>
+                <span className="font-mono text-sm font-bold text-white" data-testid="credential-username">
+                  {credentialSuccessInfo?.username || 'N/A'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (credentialSuccessInfo?.username) {
+                    navigator.clipboard.writeText(credentialSuccessInfo.username);
+                    setCopiedCredentialUsername(true);
+                    setTimeout(() => setCopiedCredentialUsername(false), 2000);
+                  }
+                }}
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-semibold transition-colors"
+                title="Copy Username"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                {copiedCredentialUsername ? 'Copied!' : 'Copy Username'}
+              </button>
+            </div>
+
+            {/* Password Section */}
+            <div className="pt-1">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-slate-400 text-[11px] font-medium">
+                  {credentialSuccessInfo?.type === 'CREATE' ? 'Default Password' : 'New/Default Password'}
+                </span>
+                {credentialSuccessInfo?.password && (
+                  <span className="text-amber-400 font-mono text-[10px] flex items-center gap-1">
+                    <Clock className="w-3 h-3" /> Auto-clears in {credentialPasswordCountdown}s
+                  </span>
+                )}
+              </div>
+
+              {credentialSuccessInfo?.password ? (
+                <div className="flex items-center justify-between bg-slate-900 px-3 py-2.5 rounded-lg border border-slate-700/80">
+                  <span className="font-mono text-base tracking-wider text-white select-all" data-testid="credential-password">
+                    {showCredentialPassword ? credentialSuccessInfo.password : '••••••••••••'}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowCredentialPassword(!showCredentialPassword)}
+                      className="flex items-center gap-1 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-xs font-medium transition-colors"
+                      title={showCredentialPassword ? 'Hide Password' : 'Reveal Password'}
+                    >
+                      {showCredentialPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      <span>{showCredentialPassword ? 'Hide' : 'Reveal'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (credentialSuccessInfo?.password) {
+                          navigator.clipboard.writeText(credentialSuccessInfo.password);
+                          setCopiedCredentialPassword(true);
+                          setTimeout(() => setCopiedCredentialPassword(false), 2000);
+                        }
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold transition-colors"
+                      title="Copy Password"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      {copiedCredentialPassword ? 'Copied!' : 'Copy Password'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800 text-slate-400 text-xs italic">
+                  {credentialSuccessInfo?.type === 'CREATE'
+                    ? 'Default password was not provided by the client application.'
+                    : 'Password reset succeeded, but the client application did not provide the password.'}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Ephemeral Policy Note */}
+          <div className="p-2.5 bg-slate-900/40 rounded-lg border border-slate-800/60 text-[11px] text-slate-400 flex items-start gap-2">
+            <Shield className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            <span>
+              This credential is held only in ephemeral memory and is never persisted to database tables, audit logs, or browser storage. Copy and provide it securely to the operator.
+            </span>
+          </div>
+
+          {/* Modal Footer */}
+          <div className="flex justify-end pt-3 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={closeCredentialSuccessModal}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded font-semibold text-xs"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Modal: Edit & Update Client User */}
       <Modal
         isOpen={isEditModalOpen}
@@ -1780,91 +2231,22 @@ export const UsersPage: React.FC = () => {
         )}
       </Modal>
 
-      {/* Modal: Password Reset One-Time Reveal */}
-      <Modal isOpen={isResetModalOpen} onClose={() => setIsResetModalOpen(false)} title={`Password Reset: ${selectedUser?.username}`}>
-        <div className="space-y-4 text-xs">
-          <div className="p-3 bg-amber-950/60 border border-amber-800 rounded-lg text-amber-200">
-            <div className="font-bold flex items-center gap-1.5 mb-1">
-              <Shield className="w-4 h-4 text-amber-400" />
-              One-Time Temporary Password Security Policy
-            </div>
-            <p className="text-[11px]">
-              This temporary password was generated on the client and delivered once. It is not stored in the database or logs. Copy and provide it securely to the user. They must change it upon first login.
-            </p>
-          </div>
-
-          {tempPassword ? (
-            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400 text-[10px] uppercase font-semibold">Temporary Password</span>
-                <span className="text-amber-400 font-mono text-[11px] flex items-center gap-1">
-                  <Clock className="w-3 h-3" /> Auto-clears in {passwordCountdown}s
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between bg-slate-900 px-3 py-2 rounded border border-slate-700">
-                <span className="font-mono text-base tracking-wider text-white">
-                  {showPassword ? tempPassword : '••••••••••••'}
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="p-1 text-slate-400 hover:text-white transition-colors"
-                    title={showPassword ? 'Hide' : 'Reveal'}
-                  >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(tempPassword);
-                      setCopied(true);
-                      setTimeout(() => setCopied(false), 2000);
-                    }}
-                    className="flex items-center gap-1 px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded text-xs font-semibold transition-colors"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    {copied ? 'Copied!' : 'Copy'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="text-center py-4 text-slate-500">
-              Temporary password has expired and was purged from memory.
-            </div>
-          )}
-
-          <div className="flex justify-end pt-3 border-t border-slate-800">
-            <button
-              type="button"
-              onClick={() => {
-                setIsResetModalOpen(false);
-                setTempPassword(null);
-              }}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
-            >
-              Close & Clear
-            </button>
-          </div>
-        </div>
-      </Modal>
+      {/* Modal: Excel Import */}
 
       {/* Modal: Excel Import */}
-      <Modal isOpen={isImportModalOpen} onClose={() => setIsImportModalOpen(false)} title="Import Users via Excel (.xlsx)">
+      <Modal isOpen={isImportModalOpen} onClose={() => !importing && setIsImportModalOpen(false)} title={`Bulk User Excel Import: ${selectedClient?.clientCode || ''}`}>
         <div className="space-y-4 text-xs">
           <div className="flex items-center justify-between bg-slate-950 p-3 rounded-lg border border-slate-800">
             <div>
-              <div className="font-semibold text-white">Need the official template?</div>
-              <div className="text-slate-500 text-[11px]">Download standard spreadsheet with validation rules</div>
+              <div className="font-semibold text-white">Selected Client: {selectedClient?.clientCode} ({selectedClient?.clientName})</div>
+              <div className="text-slate-500 text-[11px]">Download dynamic spreadsheet template with live client dropdown options</div>
             </div>
             <button
               type="button"
               onClick={handleDownloadTemplate}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-semibold border border-slate-700 transition-colors"
             >
-              <Download className="w-3.5 h-3.5" />
+              <Download className="w-3.5 h-3.5 text-emerald-400" />
               Download Template
             </button>
           </div>
@@ -1875,8 +2257,9 @@ export const UsersPage: React.FC = () => {
             <input
               type="file"
               accept=".xlsx"
+              disabled={importing}
               onChange={handleImportFileChange}
-              className="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:bg-sky-600 file:text-white file:font-semibold hover:file:bg-sky-500 cursor-pointer"
+              className="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:bg-sky-600 file:text-white file:font-semibold hover:file:bg-sky-500 cursor-pointer disabled:opacity-50"
             />
           </div>
 
@@ -1889,7 +2272,9 @@ export const UsersPage: React.FC = () => {
                 </div>
                 <div className="flex items-center gap-3 text-[11px]">
                   <span className="text-emerald-400 font-semibold">{importPreview.readyRows} Ready</span>
-                  <span className="text-red-400 font-semibold">{importPreview.errorRows} Warnings/Errors</span>
+                  <span className="text-amber-400 font-semibold">{importPreview.warningRows || 0} Warnings</span>
+                  <span className="text-purple-400 font-semibold">{importPreview.alreadyExistingRows || 0} Already Existing</span>
+                  <span className="text-red-400 font-semibold">{importPreview.errorRows} Errors</span>
                 </div>
               </div>
 
@@ -1897,39 +2282,64 @@ export const UsersPage: React.FC = () => {
                 <table className="w-full text-left text-[11px]">
                   <thead className="bg-slate-900 text-slate-400 uppercase font-semibold sticky top-0">
                     <tr>
+                      <th className="p-2">S.No</th>
                       <th className="p-2">Row</th>
-                      <th className="p-2">Action</th>
+                      <th className="p-2">Approve</th>
                       <th className="p-2">Username</th>
                       <th className="p-2">Full Name</th>
+                      <th className="p-2">Mobile / Nat</th>
                       <th className="p-2">Status / Classification</th>
                       <th className="p-2">Validation Notes</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
                     {importPreview.rows.map((r) => {
-                      const isReady = r.classification.startsWith('READY_');
+                      const isReady = r.classification === 'READY' || r.classification === 'READY_CREATE';
+                      const isWarning = r.classification === 'WARNING_REQUIRES_CONFIRMATION' || r.classification === 'POTENTIAL_DUPLICATE_NAME';
+                      const isAlreadyExists = r.classification === 'ALREADY_EXISTS' || r.errorCode === 'ALREADY_EXISTS';
+                      const isDuplicate = r.classification === 'DUPLICATE' || r.classification === 'DUPLICATE_USERNAME' || r.classification === 'DUPLICATE_USERNAME_IN_FILE' || r.classification === 'DUPLICATE_SERIAL_NUMBER';
+
                       return (
                         <tr key={r.rowNumber} className="hover:bg-slate-900/50">
+                          <td className="p-2 font-mono text-slate-400">{r.sNo !== undefined ? r.sNo : '-'}</td>
                           <td className="p-2 font-mono text-slate-500">{r.rowNumber}</td>
-                          <td className="p-2 font-semibold text-sky-400">{r.action}</td>
-                          <td className="p-2 font-mono text-white">{r.username}</td>
+                          <td className="p-2 text-center">
+                            <input
+                              type="checkbox"
+                              disabled={importing || (!isReady && !isWarning)}
+                              checked={r.isApproved !== false && (isReady || isWarning)}
+                              onChange={() => toggleRowApproval(r.rowNumber)}
+                              className="rounded border-slate-700 bg-slate-800 text-sky-600 focus:ring-0 cursor-pointer disabled:opacity-30"
+                              title={isWarning ? 'Check to approve creation despite duplicate name warning' : 'Include row in import'}
+                            />
+                          </td>
+                          <td className="p-2 font-mono text-white font-medium">{r.username || '-'}</td>
                           <td className="p-2">{r.firstName} {r.lastName}</td>
+                          <td className="p-2 text-slate-400">{r.mobileNumber || '-'} {r.nationality ? `(${r.nationality})` : ''}</td>
                           <td className="p-2">
                             <span
                               className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                                 isReady
                                   ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                                  : r.classification === 'DUPLICATE_USERNAME'
+                                  : isWarning
                                   ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                  : isAlreadyExists
+                                  ? 'bg-purple-950 text-purple-300 border border-purple-800'
+                                  : isDuplicate
+                                  ? 'bg-indigo-950 text-indigo-300 border border-indigo-800'
                                   : 'bg-red-950 text-red-300 border border-red-800'
                               }`}
                             >
-                              {r.classification}
+                              {isAlreadyExists && r.existingStatus
+                                ? `ALREADY_EXISTS (${r.existingStatus})`
+                                : r.classification}
                             </span>
                           </td>
                           <td className="p-2 text-slate-400">
-                            {r.validationErrors.length > 0 ? (
-                              <span className="text-red-400">{r.validationErrors.join('; ')}</span>
+                            {r.validationErrors && r.validationErrors.length > 0 ? (
+                              <span className={isWarning ? 'text-amber-300' : isAlreadyExists ? 'text-purple-300' : 'text-red-400'}>
+                                {r.validationErrors.join('; ')}
+                              </span>
                             ) : (
                               <span className="text-emerald-500">Passed dry-run checks</span>
                             )}
@@ -1941,48 +2351,172 @@ export const UsersPage: React.FC = () => {
                 </table>
               </div>
 
-              {/* Execution Summary */}
-              {importExecution && (
-                <div className="p-3 bg-slate-900 border border-slate-700 rounded-lg space-y-2">
-                  <div className="font-bold text-white flex items-center gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-400" />
-                    Import Execution Complete
+              {/* Live Execution Progress */}
+              {importing && (
+                <div className="p-3 bg-slate-900 border border-sky-800 rounded-lg space-y-2">
+                  <div className="flex items-center justify-between text-xs font-semibold text-sky-300">
+                    <span className="flex items-center gap-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Executing verified remote user creation on client…
+                    </span>
+                    <span>
+                      {importProgress.processed} / {importProgress.total} Rows
+                    </span>
                   </div>
-                  <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                    <div className="p-2 bg-slate-950 rounded">
-                      <span className="block text-slate-500 text-[10px]">Succeeded</span>
-                      <span className="text-emerald-400 font-bold">{importExecution.succeededRows}</span>
-                    </div>
-                    <div className="p-2 bg-slate-950 rounded">
-                      <span className="block text-slate-500 text-[10px]">Failed</span>
-                      <span className="text-red-400 font-bold">{importExecution.failedRows}</span>
-                    </div>
-                    <div className="p-2 bg-slate-950 rounded">
-                      <span className="block text-slate-500 text-[10px]">Skipped</span>
-                      <span className="text-amber-400 font-bold">{importExecution.skippedRows}</span>
-                    </div>
+                  <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                    <div
+                      className="bg-sky-500 h-full transition-all duration-300"
+                      style={{
+                        width: `${importProgress.total > 0 ? (importProgress.processed / importProgress.total) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
+                    <span className="text-emerald-400 font-semibold">{importProgress.succeeded} Created</span>
+                    <span className="text-red-400 font-semibold">{importProgress.failed} Failed</span>
+                    <span className="text-amber-400 font-semibold">{importProgress.skipped} Skipped/Existing</span>
                   </div>
                 </div>
               )}
 
-              <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setIsImportModalOpen(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
-                >
-                  Close
-                </button>
-                {!importExecution && (
+              {/* Execution Summary & Equation Accounting */}
+              {importExecution && (
+                <div className="p-3 bg-slate-900 border border-slate-700 rounded-lg space-y-3">
+                  <div className="font-bold text-white flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle className="w-4 h-4 text-emerald-400" />
+                      Import Execution Complete
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleExportImportResults}
+                      className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-emerald-300 rounded text-xs font-semibold border border-emerald-800/80 transition-colors"
+                    >
+                      <Download className="w-3 h-3 text-emerald-400" />
+                      Export Import Results (.xlsx)
+                    </button>
+                  </div>
+
+                  {/* Accounting Grid: Total = Created + Already Existing + Invalid + Failed + Cancelled + Not Processed */}
+                  <div className="grid grid-cols-7 gap-1.5 text-center text-xs">
+                    <div className="p-2 bg-slate-950 rounded border border-sky-800">
+                      <span className="block text-slate-400 text-[10px] font-semibold">Total</span>
+                      <span className="text-sky-300 font-bold text-sm">{importExecution.totalRows}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                      <span className="block text-slate-500 text-[10px]">Created</span>
+                      <span className="text-emerald-400 font-bold text-sm">{importExecution.createdRows ?? importExecution.succeededRows}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                      <span className="block text-slate-500 text-[10px]">Already Exists</span>
+                      <span className="text-purple-400 font-bold text-sm">{importExecution.alreadyExistingRows ?? 0}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                      <span className="block text-slate-500 text-[10px]">Invalid</span>
+                      <span className="text-amber-400 font-bold text-sm">{importExecution.invalidRows ?? 0}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                      <span className="block text-slate-500 text-[10px]">Failed</span>
+                      <span className="text-red-400 font-bold text-sm">{importExecution.failedRows}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                      <span className="block text-slate-500 text-[10px]">Cancelled</span>
+                      <span className="text-slate-400 font-bold text-sm">{importExecution.cancelledRows ?? 0}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
+                      <span className="block text-slate-500 text-[10px]">Not Processed</span>
+                      <span className="text-slate-400 font-bold text-sm">{importExecution.notProcessedRows ?? 0}</span>
+                    </div>
+                  </div>
+
+                  {/* Results Table */}
+                  <div className="max-h-48 overflow-y-auto border border-slate-800 rounded bg-slate-950">
+                    <table className="w-full text-left text-[11px]">
+                      <thead className="bg-slate-900 text-slate-400 uppercase font-semibold sticky top-0">
+                        <tr>
+                          <th className="p-2">S.No</th>
+                          <th className="p-2">Row</th>
+                          <th className="p-2">Username</th>
+                          <th className="p-2">Full Name</th>
+                          <th className="p-2">Status</th>
+                          <th className="p-2">Remote / Current</th>
+                          <th className="p-2">Result Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {importExecution.results.map((r, idx) => (
+                          <tr key={idx} className="hover:bg-slate-900/50">
+                            <td className="p-2 font-mono text-slate-400">{r.sNo !== undefined ? r.sNo : idx + 1}</td>
+                            <td className="p-2 font-mono text-slate-500">{r.rowNumber}</td>
+                            <td className="p-2 font-mono text-white font-medium">{r.username}</td>
+                            <td className="p-2">{r.fullName}</td>
+                            <td className="p-2">
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  r.result === 'SUCCESS' || r.result === 'CREATED'
+                                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                    : r.result === 'ALREADY_EXISTS'
+                                    ? 'bg-purple-950 text-purple-300 border border-purple-800'
+                                    : r.result === 'INVALID' || r.result === 'VALIDATION_FAILED'
+                                    ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                    : 'bg-red-950 text-red-300 border border-red-800'
+                                }`}
+                              >
+                                {r.result}
+                              </span>
+                            </td>
+                            <td className="p-2 text-slate-300">{r.existingStatus || r.remoteStatus || 'N/A'}</td>
+                            <td className="p-2 text-slate-400">{r.message}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-3 border-t border-slate-800">
+                <div>
+                  {importExecution && importExecution.failedRows > 0 && (
+                    <button
+                      type="button"
+                      disabled={importing}
+                      onClick={handleRetryFailedRows}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-xs font-semibold shadow disabled:opacity-50 flex items-center gap-1.5"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Retry Failed Rows Only ({importExecution.failedRows})
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    disabled={importing || importPreview.readyRows === 0}
-                    onClick={handleImportExecute}
-                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow disabled:opacity-50"
+                    disabled={importing}
+                    onClick={() => setIsImportModalOpen(false)}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
                   >
-                    {importing ? 'Executing on Client...' : `Confirm Import (${importPreview.readyRows} Ready Rows)`}
+                    Close
                   </button>
-                )}
+                  {!importExecution && (
+                    <button
+                      type="button"
+                      disabled={
+                        importing ||
+                        importPreview.rows.filter((r) => r.isApproved !== false && (r.classification.startsWith('READY') || r.classification === 'WARNING_REQUIRES_CONFIRMATION')).length === 0
+                      }
+                      onClick={handleImportExecute}
+                      className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold shadow disabled:opacity-50"
+                    >
+                      {importing
+                        ? 'Executing on Client...'
+                        : `Start Import (${
+                            importPreview.rows.filter((r) => r.isApproved !== false && (r.classification.startsWith('READY') || r.classification === 'WARNING_REQUIRES_CONFIRMATION')).length
+                          } Approved Rows)`}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}

@@ -54,6 +54,9 @@ export interface ClientUser {
   lastSyncedAt: string;
   createdAt?: string;
   updatedAt?: string;
+  defaultPassword?: string;
+  temporaryPassword?: string;
+  message?: string;
 }
 
 export interface FormDropdownOption {
@@ -147,12 +150,23 @@ export interface UpdateClientUserDto {
 export type UserImportAction = 'CREATE' | 'UPDATE' | 'ACTIVATE' | 'DEACTIVATE';
 
 export type UserImportClassification =
+  | 'READY'
   | 'READY_CREATE'
   | 'READY_UPDATE'
   | 'READY_ACTIVATE'
   | 'READY_DEACTIVATE'
+  | 'WARNING_REQUIRES_CONFIRMATION'
+  | 'INVALID'
+  | 'DUPLICATE'
+  | 'ALREADY_EXISTS'
+  | 'CREATED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'NOT_PROCESSED'
   | 'NO_CHANGE'
+  | 'DUPLICATE_SERIAL_NUMBER'
   | 'DUPLICATE_USERNAME'
+  | 'DUPLICATE_USERNAME_IN_FILE'
   | 'POTENTIAL_DUPLICATE_NAME'
   | 'DUPLICATE_EMAIL'
   | 'DUPLICATE_MOBILE'
@@ -161,10 +175,13 @@ export type UserImportClassification =
   | 'INVALID_MOBILE'
   | 'INVALID_NATIONALITY'
   | 'INVALID_ROLE'
+  | 'INVALID_EXCEL_FORMAT'
+  | 'FORM_OPTIONS_UNAVAILABLE'
   | 'CONFLICT'
   | 'BLOCKED';
 
 export interface ExcelUserImportRow {
+  sNo?: number | string;
   rowNumber: number;
   action: UserImportAction;
   username: string;
@@ -179,8 +196,12 @@ export interface ExcelUserImportRow {
   profileRole?: string;
   barcodeNumber?: string;
   requestedStatus?: ClientUserStatus;
+  existingStatus?: ClientUserStatus;
   classification: UserImportClassification;
   validationErrors: string[];
+  errorCode?: string;
+  message?: string;
+  isApproved?: boolean;
   potentialDuplicateOf?: {
     username: string;
     fullName: string;
@@ -192,6 +213,8 @@ export interface ExcelUserImportRow {
 export interface ExcelUserImportPreviewResult {
   totalRows: number;
   readyRows: number;
+  warningRows?: number;
+  alreadyExistingRows?: number;
   errorRows: number;
   rows: ExcelUserImportRow[];
   liveClientOptions: {
@@ -202,14 +225,16 @@ export interface ExcelUserImportPreviewResult {
 }
 
 export interface ExcelUserImportExecutionRowResult {
+  sNo?: number | string;
   rowNumber: number;
   action: UserImportAction;
   username: string;
   fullName: string;
-  result: 'SUCCESS' | 'SKIPPED_DUPLICATE' | 'VALIDATION_FAILED' | 'REMOTE_ERROR' | 'UNKNOWN_RESULT_REQUIRES_REVIEW' | 'CREATED_WITH_INCORRECT_REMOTE_ERROR_MESSAGE' | 'REMOTE_CREATE_BLOCKED_UNKNOWN_ERROR';
+  result: 'SUCCESS' | 'CREATED' | 'ALREADY_EXISTS' | 'FAILED' | 'SKIPPED_DUPLICATE' | 'CANCELLED' | 'VALIDATION_FAILED' | 'INVALID' | 'NOT_PROCESSED' | 'REMOTE_ERROR' | 'UNKNOWN_RESULT_REQUIRES_REVIEW' | 'CREATED_WITH_INCORRECT_REMOTE_ERROR_MESSAGE' | 'REMOTE_CREATE_BLOCKED_UNKNOWN_ERROR';
   errorCode?: string;
   message: string;
   remoteStatus?: ClientUserStatus;
+  existingStatus?: ClientUserStatus;
   executedAt: string;
   correlationId: string;
 }
@@ -217,19 +242,36 @@ export interface ExcelUserImportExecutionRowResult {
 export interface ExcelUserImportExecutionSummary {
   jobId: string;
   totalRows: number;
-  succeededRows: number;
+  createdRows: number;
+  alreadyExistingRows: number;
+  invalidRows: number;
   failedRows: number;
+  cancelledRows: number;
+  notProcessedRows: number;
+  succeededRows: number;
   skippedRows: number;
   results: ExcelUserImportExecutionRowResult[];
 }
 
 export const CLIENT_USER_ERROR_CODES = {
+  DUPLICATE_SERIAL_NUMBER: 'DUPLICATE_SERIAL_NUMBER',
   DUPLICATE_USERNAME: 'DUPLICATE_USERNAME',
+  DUPLICATE_USERNAME_IN_FILE: 'DUPLICATE_USERNAME_IN_FILE',
+  ALREADY_EXISTS: 'ALREADY_EXISTS',
   POTENTIAL_DUPLICATE_NAME: 'POTENTIAL_DUPLICATE_NAME',
+  REQUIRED_FIELD_MISSING: 'REQUIRED_FIELD_MISSING',
+  INVALID_FIELD_FORMAT: 'INVALID_FIELD_FORMAT',
+  REMOTE_DROPDOWN_OPTION_NOT_FOUND: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
+  FORM_OPTIONS_UNAVAILABLE: 'FORM_OPTIONS_UNAVAILABLE',
   REMOTE_USER_NOT_FOUND: 'REMOTE_USER_NOT_FOUND',
   REMOTE_FORM_NOT_RECOGNIZED: 'REMOTE_FORM_NOT_RECOGNIZED',
+  REMOTE_FORM_NOT_READY: 'REMOTE_FORM_NOT_READY',
+  REMOTE_SAVE_REJECTED: 'REMOTE_SAVE_REJECTED',
+  REMOTE_CREATE_VERIFICATION_FAILED: 'REMOTE_CREATE_VERIFICATION_FAILED',
   REMOTE_VALIDATION_FAILED: 'REMOTE_VALIDATION_FAILED',
   REMOTE_STATUS_VERIFICATION_FAILED: 'REMOTE_STATUS_VERIFICATION_FAILED',
+  CLIENT_AUTO_LOGIN_FAILED: 'CLIENT_AUTO_LOGIN_FAILED',
+  CLIENT_MUTATION_TIMEOUT: 'CLIENT_MUTATION_TIMEOUT',
   PASSWORD_RESET_FAILED: 'PASSWORD_RESET_FAILED',
   AUTHENTICATION_FAILED: 'AUTHENTICATION_FAILED',
   FACILITY_CONTEXT_NOT_INITIALIZED: 'FACILITY_CONTEXT_NOT_INITIALIZED',
@@ -237,6 +279,8 @@ export const CLIENT_USER_ERROR_CODES = {
   OPERATION_TIMED_OUT: 'OPERATION_TIMED_OUT',
   PRODUCTION_MUTATION_BLOCKED: 'PRODUCTION_MUTATION_BLOCKED',
   OPERATION_IN_PROGRESS: 'OPERATION_IN_PROGRESS',
+  INVALID_EXCEL_FORMAT: 'INVALID_EXCEL_FORMAT',
+  NOT_PROCESSED: 'NOT_PROCESSED',
 } as const;
 
 export type ClientUserErrorCode = keyof typeof CLIENT_USER_ERROR_CODES;
