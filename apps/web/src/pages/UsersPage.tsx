@@ -82,6 +82,8 @@ export const UsersPage: React.FC = () => {
   const [exportMode, setExportMode] = useState<'ALL_USERS' | 'ACTIVE_ONLY'>('ALL_USERS');
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [isDownloadingTemplate, setIsDownloadingTemplate] = useState(false);
+  const [templateDownloadError, setTemplateDownloadError] = useState<string | null>(null);
   const [exportCounts, setExportCounts] = useState<{ total: number; active: number; inactive: number }>({
     total: 0,
     active: 0,
@@ -959,16 +961,59 @@ export const UsersPage: React.FC = () => {
   };
 
   // Dynamic Excel Import Template (scoped by selected client's live form options)
-  const handleDownloadTemplate = () => {
+  const handleDownloadTemplate = async () => {
     if (!selectedClientId) {
       setActionMessage({ type: 'error', text: 'Please select a client first.' });
       return;
     }
     if (optionsError === 'FORM_OPTIONS_UNAVAILABLE') {
-      setActionMessage({ type: 'error', text: 'FORM_OPTIONS_UNAVAILABLE: Live form options could not be synchronized from this client.' });
+      setActionMessage({
+        type: 'error',
+        text: 'FORM_OPTIONS_UNAVAILABLE: Live form options could not be synchronized from this client.',
+      });
+      setTemplateDownloadError('FORM_OPTIONS_UNAVAILABLE: Live form options could not be synchronized.');
       return;
     }
-    window.open(`/api/v1/client-users/import-template?clientId=${encodeURIComponent(selectedClientId)}`, '_blank');
+
+    setIsDownloadingTemplate(true);
+    setTemplateDownloadError(null);
+
+    try {
+      const { blob, filename } = await ApiClient.downloadBlob(
+        `/client-users/import-template?clientId=${encodeURIComponent(selectedClientId)}`
+      );
+
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || `${selectedClient?.clientCode || 'Client'}_User_Import_Template.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      setActionMessage({
+        type: 'success',
+        text: 'Sample Excel downloaded successfully',
+      });
+    } catch (err: any) {
+      const msg = err.message || 'Failed to download sample document.';
+      if (msg.includes('SESSION_EXPIRED') || msg.includes('401')) {
+        setActionMessage({
+          type: 'error',
+          text: 'SESSION_EXPIRED — Please sign in again.',
+        });
+        setTemplateDownloadError('SESSION_EXPIRED — Please sign in again.');
+      } else {
+        setActionMessage({
+          type: 'error',
+          text: msg,
+        });
+        setTemplateDownloadError(msg);
+      }
+    } finally {
+      setIsDownloadingTemplate(false);
+    }
   };
 
   // Export Import Execution Results
@@ -1381,7 +1426,7 @@ export const UsersPage: React.FC = () => {
           {canImport && (
             <button
               onClick={handleDownloadTemplate}
-              disabled={!selectedClientId}
+              disabled={!selectedClientId || isDownloadingTemplate}
               title={
                 optionsError === 'FORM_OPTIONS_UNAVAILABLE'
                   ? 'FORM_OPTIONS_UNAVAILABLE: Live form options unavailable'
@@ -1389,8 +1434,17 @@ export const UsersPage: React.FC = () => {
               }
               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors border border-slate-700 disabled:opacity-50"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-              Download Template
+              {isDownloadingTemplate ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                  Preparing Sample…
+                </>
+              ) : (
+                <>
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                  Download Template
+                </>
+              )}
             </button>
           )}
 
@@ -2637,24 +2691,48 @@ export const UsersPage: React.FC = () => {
       {/* Modal: Excel Import */}
       <Modal isOpen={isImportModalOpen} onClose={() => !importing && setIsImportModalOpen(false)} title={`Bulk User Excel Import: ${selectedClient?.clientCode || ''}`}>
         <div className="space-y-4 text-xs">
-          <div className="flex items-center justify-between bg-slate-950 p-3 rounded-lg border border-slate-800">
-            <div>
-              <div className="font-semibold text-white">Selected Client: {selectedClient?.clientCode} ({selectedClient?.clientName})</div>
-              <div className="text-slate-500 text-[11px]">Download dynamic spreadsheet template with live client dropdown options</div>
+          <div className="bg-slate-950 p-3.5 rounded-lg border border-slate-800 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-semibold text-white">Selected Client: {selectedClient?.clientCode} ({selectedClient?.clientName})</div>
+                <div className="text-slate-400 text-[11px] mt-0.5">Download sample workbook formatted with live client dropdown options and required column guidelines.</div>
+              </div>
+              <button
+                type="button"
+                onClick={handleDownloadTemplate}
+                disabled={isDownloadingTemplate || !selectedClientId}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded text-xs font-semibold transition-colors disabled:opacity-50"
+              >
+                {isDownloadingTemplate ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Preparing Sample…
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    Download Sample Document
+                  </>
+                )}
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={handleDownloadTemplate}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-semibold border border-slate-700 transition-colors"
-            >
-              <Download className="w-3.5 h-3.5 text-emerald-400" />
-              Download Template
-            </button>
+            {templateDownloadError && (
+              <div className="text-red-400 text-xs bg-red-950/40 p-2 rounded border border-red-800/50 flex items-center justify-between">
+                <span>{templateDownloadError}</span>
+                <button
+                  type="button"
+                  onClick={handleDownloadTemplate}
+                  className="underline text-red-300 hover:text-red-200 text-xs font-medium ml-2"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* File Upload Selector */}
-          <div>
-            <label className="block text-slate-400 mb-1 font-semibold">Select Excel File (.xlsx)</label>
+          {/* Step 2: Choose Excel File */}
+          <div className="bg-slate-950 p-3.5 rounded-lg border border-slate-800 space-y-1.5">
+            <label className="block text-slate-300 font-semibold text-xs">Choose Excel File (.xlsx)</label>
             <input
               type="file"
               accept=".xlsx"

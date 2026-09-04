@@ -181,9 +181,9 @@ export class ClientUsersController {
     @CurrentUser() user: JwtPayload,
     @Res() res: Response
   ) {
-    const buffer = await this.clientUsersService.getImportTemplate(clientId, user);
+    const { buffer, filename } = await this.clientUsersService.getImportTemplate(clientId, user);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="client_user_import_template_${Date.now()}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(buffer);
   }
 

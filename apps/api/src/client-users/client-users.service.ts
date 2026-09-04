@@ -1844,9 +1844,9 @@ export class ClientUsersService implements OnModuleInit {
 
   /**
    * Generates a dynamic client-scoped Excel import template (.xlsx) using live form options.
-   * Includes S.No as the first Users-template column.
+   * Exactly 2 sheets: 'Users' (with 1 SAMPLE row, header formatting, and cell comments) and 'Dropdown Options'.
    */
-  async getImportTemplate(clientId: string, user: JwtPayload): Promise<Buffer> {
+  async getImportTemplate(clientId: string, user: JwtPayload): Promise<{ buffer: Buffer; filename: string }> {
     if (!clientId) {
       throw new BadRequestException({
         code: 'CLIENT_ID_REQUIRED',
@@ -1887,70 +1887,137 @@ export class ClientUsersService implements OnModuleInit {
     const sampleRole = roleList[0] || 'Physician';
     const sampleProf = profList[0] || 'Clinical Specialist';
 
-    // Sheet 1: Users (S.No as the first column)
+    // 1. Sheet 1: Users (Headers in exact order, 1 SAMPLE row, no Password column)
+    const headers = [
+      'S.No',
+      'User Name *',
+      'First Name *',
+      'Middle Name',
+      'Last Name *',
+      'Email',
+      'Mobile No *',
+      'Nationality *',
+      'Role',
+      'Profile Role',
+      'Barcode No',
+    ];
+
     const templateRows = [
       {
-        'S.No': 1,
-        'User Name *': 'dr_ahmed',
-        'First Name *': 'Ahmed',
-        'Middle Name': 'Ali',
-        'Last Name *': 'Mansoor',
-        'Email': 'ahmed.mansoor@example.com',
+        'S.No': 'SAMPLE',
+        'User Name *': 'sample.user',
+        'First Name *': 'Sample',
+        'Middle Name': 'A',
+        'Last Name *': 'User',
+        'Email': 'sample.user@example.com',
         'Mobile No *': '0501234567',
         'Nationality *': sampleNat,
         'Role': sampleRole,
         'Profile Role': sampleProf,
         'Barcode No': 'BC-1001',
       },
-      {
-        'S.No': 2,
-        'User Name *': 'nurse_fatima',
-        'First Name *': 'Fatima',
-        'Middle Name': '',
-        'Last Name *': 'Hassan',
-        'Email': 'fatima.hassan@example.com',
-        'Mobile No *': '0509876543',
-        'Nationality *': sampleNat,
-        'Role': roleList[1] || sampleRole,
-        'Profile Role': profList[1] || sampleProf,
-        'Barcode No': 'BC-1002',
-      },
     ];
 
-    // Sheet 2: Instructions
-    const instructionRows = [
-      { Parameter: 'Selected Client', Details: `${client.clientCode} (${client.clientName})` },
-      { Parameter: 'Client Application Version', Details: client.applicationVersion || 'v9.4' },
-      { Parameter: 'Template Generation Time (UTC)', Details: new Date().toISOString() },
-      { Parameter: 'Mandatory Fields', Details: 'S.No, User Name *, First Name *, Last Name *, Mobile No *, Nationality *' },
-      { Parameter: 'Accepted Username Format', Details: 'Alphanumeric characters, dot, underscore, dash ([a-zA-Z0-9._-])' },
-      { Parameter: 'Accepted Mobile Format', Details: 'Valid mobile number (e.g., 05xxxxxxxx)' },
-      { Parameter: 'Duplicate Rules', Details: 'S.No and Usernames must be unique. Duplicate S.No is rejected with DUPLICATE_SERIAL_NUMBER. Existing users are classified as ALREADY_EXISTS. Duplicate full names produce a confirmation warning.' },
-      { Parameter: 'Maximum Permitted Rows', Details: '500 rows per batch' },
-      { Parameter: 'No-Password Policy', Details: 'Do not add password columns. Passwords are native to Simplex and client default password policies apply automatically.' },
+    const wsUsers = XLSX.utils.json_to_sheet(templateRows, { header: headers });
+
+    // Set column widths
+    wsUsers['!cols'] = [
+      { wch: 10 }, // S.No
+      { wch: 20 }, // User Name *
+      { wch: 18 }, // First Name *
+      { wch: 16 }, // Middle Name
+      { wch: 18 }, // Last Name *
+      { wch: 28 }, // Email
+      { wch: 18 }, // Mobile No *
+      { wch: 24 }, // Nationality *
+      { wch: 24 }, // Role
+      { wch: 26 }, // Profile Role
+      { wch: 18 }, // Barcode No
     ];
 
-    // Sheet 3: Lookup Options
-    const maxLen = Math.max(natList.length, roleList.length, profList.length);
-    const optionsRows = [];
-    for (let i = 0; i < maxLen; i++) {
-      optionsRows.push({
-        'Valid Nationalities': natList[i] || '',
-        'Valid Roles': roleList[i] || '',
-        'Valid Profile Roles': profList[i] || '',
+    // Freeze top row
+    wsUsers['!views'] = [{ state: 'frozen', ySplit: 1 }];
+
+    // Auto-filter
+    wsUsers['!autofilter'] = { ref: 'A1:K2' };
+
+    // Cell comments explaining required formats
+    const addComment = (cellRef: string, commentText: string) => {
+      if (!wsUsers[cellRef]) return;
+      wsUsers[cellRef].c = [{ t: commentText, a: 'Central Console' }];
+    };
+
+    addComment('A1', 'Unique serial number or identifier per row. Unchanged SAMPLE row will be ignored.');
+    addComment('B1', 'Required. Alphanumeric characters, dot, dash, and underscore only ([a-zA-Z0-9._-]).');
+    addComment('C1', "Required. User's given first name.");
+    addComment('D1', "Optional. User's middle name.");
+    addComment('E1', "Required. User's last or family name.");
+    addComment('F1', 'Optional. Valid email address format.');
+    addComment('G1', 'Required. Valid mobile phone number.');
+    addComment('H1', "Required. Must match a valid nationality from the 'Dropdown Options' sheet.");
+    addComment('I1', "Optional. Must match a valid role from the 'Dropdown Options' sheet.");
+    addComment('J1', "Optional. Must match a valid profile role from the 'Dropdown Options' sheet.");
+    addComment('K1', 'Optional. Barcode identification number.');
+
+    // 2. Sheet 2: Dropdown Options (Column A: Nationality, Column B: Role, Column C: Profile Role, Column D: Parent Role for Profile Role)
+    const rawProfileRoles = formMeta.profileRoles || [];
+    const profileRoleEntries = rawProfileRoles
+      .map((pr: any) => {
+        const label = typeof pr === 'string' ? pr : pr?.label || pr?.value || '';
+        const parentRole = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
+        return { label: label.trim(), parentRole: parentRole.trim() };
+      })
+      .filter((e) => e.label && !e.label.toLowerCase().includes('select'));
+
+    const nationalities = Array.from(
+      new Set(
+        (formMeta.nationalities || [])
+          .map((n: any) => (typeof n === 'string' ? n : n?.label || n?.value || '').trim())
+          .filter((n) => n && !n.toLowerCase().includes('select'))
+      )
+    );
+
+    const roles = Array.from(
+      new Set(
+        (formMeta.roles || [])
+          .map((r: any) => (typeof r === 'string' ? r : r?.label || r?.value || '').trim())
+          .filter((r) => r && !r.toLowerCase().includes('select'))
+      )
+    );
+
+    const maxOptionRows = Math.max(nationalities.length, roles.length, profileRoleEntries.length, 1);
+    const dropdownRows = [];
+    for (let i = 0; i < maxOptionRows; i++) {
+      dropdownRows.push({
+        'Nationality': nationalities[i] || '',
+        'Role': roles[i] || '',
+        'Profile Role': profileRoleEntries[i]?.label || '',
+        'Parent Role for Profile Role': profileRoleEntries[i]?.parentRole || '',
       });
     }
 
+    const wsDropdown = XLSX.utils.json_to_sheet(dropdownRows, {
+      header: ['Nationality', 'Role', 'Profile Role', 'Parent Role for Profile Role'],
+    });
+
+    wsDropdown['!cols'] = [
+      { wch: 25 }, // Nationality
+      { wch: 25 }, // Role
+      { wch: 28 }, // Profile Role
+      { wch: 28 }, // Parent Role for Profile Role
+    ];
+
+    wsDropdown['!views'] = [{ state: 'frozen', ySplit: 1 }];
+    wsDropdown['!autofilter'] = { ref: `A1:D${Math.max(2, dropdownRows.length + 1)}` };
+
     const wb = XLSX.utils.book_new();
-    const wsUsers = XLSX.utils.json_to_sheet(templateRows);
-    const wsInstructions = XLSX.utils.json_to_sheet(instructionRows);
-    const wsOptions = XLSX.utils.json_to_sheet(optionsRows);
-
     XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
-    XLSX.utils.book_append_sheet(wb, wsInstructions, 'Instructions');
-    XLSX.utils.book_append_sheet(wb, wsOptions, 'Lookup Options');
+    XLSX.utils.book_append_sheet(wb, wsDropdown, 'Dropdown Options');
 
-    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = `${client.clientCode}_User_Import_Template_${Date.now()}.xlsx`;
+
+    return { buffer, filename };
   }
 
   /**
@@ -2031,7 +2098,6 @@ export class ClientUsersService implements OnModuleInit {
       const rowNum = i + 2; // Excel row index (header is row 1)
 
       const rawSNo = row['S.No'] ?? row['S.no'] ?? row['s.no'] ?? row['SNo'] ?? row['sno'] ?? row['Serial Number'] ?? row['SI.No'];
-      const parsedSNo = rawSNo !== undefined && rawSNo !== '' ? rawSNo : i + 1;
 
       // Extract and sanitize cells (formula injection defense)
       const action: UserImportAction = (row['Action'] || row['action'] || 'CREATE').toString().toUpperCase().trim() as any;
@@ -2048,11 +2114,19 @@ export class ClientUsersService implements OnModuleInit {
       const rawBarcode = (row['Barcode No'] || row['Barcode Number'] || row['barcodeNumber'] || '').toString().trim();
       const rawStatus = (row['Status'] || row['Requested Status'] || 'ACTIVE').toString().toUpperCase().trim() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
 
+      // Ignore unchanged SAMPLE row
+      const isSampleSNo = rawSNo !== undefined && String(rawSNo).toUpperCase().trim() === 'SAMPLE';
+      const isSampleUser = rawUser.toLowerCase() === 'sample.user' || rawUser.toLowerCase() === 'sample_user';
+      if (isSampleSNo && (isSampleUser || !rawUser || rawFirst.toLowerCase() === 'sample')) {
+        continue;
+      }
+
       // Skip ONLY if completely empty row (no S.No and no user/name fields)
       if (rawSNo === undefined && !rawUser && !rawFirst && !rawLast && !rawMobile && !rawNat) {
         continue;
       }
 
+      const parsedSNo = rawSNo !== undefined && rawSNo !== '' ? rawSNo : i + 1;
       const username = this.sanitizeCellValue(rawUser);
       const firstName = this.sanitizeCellValue(rawFirst);
       const middleName = rawMiddle ? this.sanitizeCellValue(rawMiddle) : undefined;

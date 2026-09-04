@@ -67,14 +67,17 @@ export class ApiClient {
           });
         } else {
           this.clearTokens();
-          window.location.href = '/login';
-          throw new Error('Session expired');
+          throw new Error('SESSION_EXPIRED — Please sign in again.');
         }
-      } catch {
+      } catch (err: any) {
         this.clearTokens();
-        window.location.href = '/login';
-        throw new Error('Session expired');
+        throw new Error('SESSION_EXPIRED — Please sign in again.');
       }
+    }
+
+    if (res.status === 401) {
+      this.clearTokens();
+      throw new Error('SESSION_EXPIRED — Please sign in again.');
     }
 
     if (!res.ok) {
@@ -87,12 +90,93 @@ export class ApiClient {
       throw new Error(errBody.message || errBody.error || `HTTP error ${res.status}`);
     }
 
-    // Handle CSV or file blob responses
+    // Handle CSV, Excel, or file blob responses
     const contentType = res.headers.get('content-type');
-    if (contentType && (contentType.includes('text/csv') || contentType.includes('application/octet-stream'))) {
+    if (
+      contentType &&
+      (contentType.includes('text/csv') ||
+        contentType.includes('application/octet-stream') ||
+        contentType.includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') ||
+        contentType.includes('application/vnd.ms-excel'))
+    ) {
       return (await res.blob()) as unknown as T;
     }
 
     return res.json();
+  }
+
+  public static async downloadBlob(
+    path: string,
+    options: RequestInit = {}
+  ): Promise<{ blob: Blob; filename?: string }> {
+    const token = this.getAccessToken();
+    const headers: Record<string, string> = {
+      ...(options.headers as Record<string, string>),
+    };
+
+    if (token && !headers['Authorization']) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    let res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+    });
+
+    // If 401, attempt refresh token rotation
+    if (res.status === 401 && this.getRefreshToken()) {
+      const refreshToken = this.getRefreshToken();
+      try {
+        const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refreshToken }),
+        });
+
+        if (refreshRes.ok) {
+          const data = await refreshRes.json();
+          this.setTokens(data.accessToken, data.refreshToken);
+          headers['Authorization'] = `Bearer ${data.accessToken}`;
+
+          res = await fetch(`${API_BASE}${path}`, {
+            ...options,
+            headers,
+          });
+        } else {
+          this.clearTokens();
+          throw new Error('SESSION_EXPIRED — Please sign in again.');
+        }
+      } catch (err: any) {
+        this.clearTokens();
+        throw new Error('SESSION_EXPIRED — Please sign in again.');
+      }
+    }
+
+    if (res.status === 401) {
+      this.clearTokens();
+      throw new Error('SESSION_EXPIRED — Please sign in again.');
+    }
+
+    if (!res.ok) {
+      let errBody: any;
+      try {
+        errBody = await res.json();
+      } catch {
+        errBody = { message: res.statusText };
+      }
+      throw new Error(errBody.message || errBody.error || `HTTP error ${res.status}`);
+    }
+
+    const disposition = res.headers.get('content-disposition');
+    let filename: string | undefined = undefined;
+    if (disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      if (match && match[1]) {
+        filename = match[1];
+      }
+    }
+
+    const blob = await res.blob();
+    return { blob, filename };
   }
 }
