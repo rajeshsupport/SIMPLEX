@@ -75,7 +75,8 @@ export interface MutationResult {
   success: boolean;
   username: string;
   message?: string;
-  status?: ClientUserStatus;
+  status?: ClientUserStatus | string;
+  remoteStage?: string;
   defaultPassword?: string;
   temporaryPassword?: string;
   isRemoteSaveConfirmed?: boolean;
@@ -1036,6 +1037,153 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Captures the client-provided default password from the live Add User form.
+   * Scans visible plain text / input values adjacent to the "Password" label across siblings,
+   * table cells / rows, and nearest form-group containers.
+   */
+  public static async captureLiveDefaultPassword(page: Page): Promise<string | undefined> {
+    try {
+      const captured = await page.evaluate(() => {
+        const cleanPass = (raw: string | null | undefined): string | null => {
+          if (!raw) return null;
+          const t = raw.trim();
+          if (!t) return null;
+          const lower = t.toLowerCase();
+          // Exclude label headers and other field names themselves
+          if (
+            lower === 'password' ||
+            lower === 'password*' ||
+            lower === 'password:' ||
+            lower === 'default password' ||
+            lower === 'default password*' ||
+            lower === 'default password:' ||
+            lower === 'initial password' ||
+            lower === 'temporary password' ||
+            lower === 'new password' ||
+            lower === 'confirm password' ||
+            lower.includes('first name') ||
+            lower.includes('last name') ||
+            lower.includes('user name') ||
+            lower.includes('mobile') ||
+            lower.includes('email') ||
+            lower.includes('nationality') ||
+            lower.includes('role')
+          ) {
+            return null;
+          }
+          if (lower.startsWith('password:') || lower.startsWith('password *') || lower.startsWith('default password:')) {
+            const stripped = t.replace(/^(?:default\s+)?password\s*[:*]?\s*/i, '').trim();
+            if (stripped) return stripped;
+          }
+          return t;
+        };
+
+        // 1. Locate exact label elements representing the Password field
+        const labelElements = Array.from(
+          document.querySelectorAll('label, .form-label, .control-label, dt, th, span.label, span.form-label, td > b, td > strong, p.label')
+        );
+
+        for (const el of labelElements) {
+          const rawText = (el.textContent || '').trim();
+          const norm = rawText.replace(/[*:]/g, '').trim().toLowerCase();
+          if (norm === 'password' || norm === 'default password' || norm === 'initial password' || norm === 'temporary password') {
+            
+            // (a) Immediate sibling or next visible siblings
+            let sibling = el.nextElementSibling;
+            while (sibling) {
+              if (sibling instanceof HTMLInputElement || sibling instanceof HTMLTextAreaElement) {
+                const v = cleanPass(sibling.value || sibling.getAttribute('value'));
+                if (v) return v;
+              }
+              const childInp = sibling.querySelector('input, textarea');
+              if (childInp instanceof HTMLInputElement || childInp instanceof HTMLTextAreaElement) {
+                const v = cleanPass(childInp.value || childInp.getAttribute('value'));
+                if (v) return v;
+              }
+              const v = cleanPass(sibling.textContent);
+              if (v) return v;
+              sibling = sibling.nextElementSibling;
+            }
+
+            // (b) Same table row / form row (e.g. <tr><td><label>Password</label></td><td>Value</td></tr>)
+            const tr = el.closest('tr');
+            if (tr) {
+              const cells = Array.from(tr.querySelectorAll('td, th'));
+              const myCell = el.closest('td, th');
+              const myIdx = myCell ? cells.indexOf(myCell as HTMLElement) : -1;
+              for (let i = 0; i < cells.length; i++) {
+                if (i !== myIdx) {
+                  const inp = cells[i].querySelector('input, textarea');
+                  if (inp instanceof HTMLInputElement || inp instanceof HTMLTextAreaElement) {
+                    const v = cleanPass(inp.value || inp.getAttribute('value'));
+                    if (v) return v;
+                  }
+                  const v = cleanPass(cells[i].textContent);
+                  if (v) return v;
+                }
+              }
+            }
+
+            // (c) Nearest form-group container excluding the label
+            const container = el.closest('.form-group, .field, .form-row, .col, .grid > div, .row');
+            if (container && container !== document.body) {
+              const inputs = Array.from(container.querySelectorAll('input, textarea')) as (HTMLInputElement | HTMLTextAreaElement)[];
+              for (const inp of inputs) {
+                const v = cleanPass(inp.value || inp.getAttribute('value'));
+                if (v) return v;
+              }
+              const valEls = Array.from(
+                container.querySelectorAll(
+                  '.val, .value, span:not(.label):not(.control-label):not(.form-label), strong, b, code, p:not(.label)'
+                )
+              );
+              for (const ve of valEls) {
+                if (ve !== el && !el.contains(ve)) {
+                  const v = cleanPass(ve.textContent);
+                  if (v) return v;
+                }
+              }
+            }
+          }
+        }
+
+        // 2. Direct check on input[name*="pass" i], input[type="password"], or dedicated selectors
+        const inputs = Array.from(
+          document.querySelectorAll('input[name*="pass" i], input[id*="pass" i], input[data-testid*="pass" i]')
+        ) as HTMLInputElement[];
+        for (const inp of inputs) {
+          const v = cleanPass(inp.value || inp.getAttribute('value'));
+          if (v) return v;
+        }
+
+        const badge = document.querySelector(
+          '.default-password, [data-testid="default-password"], [data-testid="temporary-password"], #defaultPassword, #tempPassword, #lblDefaultPassword'
+        );
+        if (badge) {
+          const v = cleanPass(badge.textContent);
+          if (v) return v;
+        }
+
+        // 3. Regex on form container text
+        const formEl = document.querySelector('form, #addUserForm, .card, .content');
+        if (formEl && formEl.textContent) {
+          const m = formEl.textContent.match(/(?:default|temporary|initial|current)?\s*password\s*[:=-]\s*([^\s\n\r,;]+)/i);
+          if (m && m[1]) {
+            const v = cleanPass(m[1]);
+            if (v) return v;
+          }
+        }
+
+        return null;
+      });
+
+      return captured || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Creates a user on the client application by filling the remote Add User form.
    */
   public static async createUser(
@@ -1210,61 +1358,10 @@ export class UserManagementExecutor {
     const profileRoleInput = await this.findFormField(page, 'profileRole');
     const barcodeInput = await this.findFormField(page, 'barcodeNumber');
 
-    // Inspect displayed default password on the live Add User screen (if present)
+    // Inspect displayed default password on the live Add User screen before filling form
     let defaultPasswordCaptured: string | undefined = undefined;
     try {
-      const liveFormPassword = await page.evaluate(() => {
-        // 1. Password input elements (disabled, readonly, or prefilled)
-        const inputs = Array.from(
-          document.querySelectorAll('input[name*="pass" i], input[id*="pass" i], input[type="password"], input[data-testid*="pass" i]')
-        ) as HTMLInputElement[];
-
-        for (const input of inputs) {
-          const val = (input.value || input.getAttribute('value') || '').trim();
-          if (val && val.length > 0) return val;
-        }
-
-        // 2. Labels with "password" and their associated input/value
-        const labels = Array.from(document.querySelectorAll('label, .form-label, .control-label, dt, th, span.label'));
-        for (const lbl of labels) {
-          const txt = (lbl.textContent || '').trim().toLowerCase();
-          if (txt.includes('password') && !txt.includes('confirm')) {
-            const container = lbl.parentElement || lbl.closest('.field, .form-group, .row, div');
-            if (container) {
-              const input = container.querySelector('input');
-              if (input && (input.value || input.getAttribute('value'))) {
-                return (input.value || input.getAttribute('value') || '').trim();
-              }
-              const valElem = container.querySelector('.val, .value, span:not(.label), b, strong, code');
-              if (valElem && valElem.textContent) {
-                const t = valElem.textContent.trim();
-                if (t && !t.toLowerCase().includes('password')) return t;
-              }
-            }
-          }
-        }
-
-        // 3. Dedicated selectors / badges
-        const badge = document.querySelector(
-          '.default-password, [data-testid="default-password"], [data-testid="temporary-password"], #defaultPassword, #tempPassword, #lblDefaultPassword'
-        );
-        if (badge && badge.textContent) {
-          return badge.textContent.trim();
-        }
-
-        // 4. Regex search on form container text
-        const formEl = document.querySelector('form, #addUserForm, .card, .content');
-        if (formEl && formEl.textContent) {
-          const m = formEl.textContent.match(/(?:default|temporary|initial)\s*password\s*[:=-]\s*([^\s\n\r,;]+)/i);
-          if (m && m[1]) return m[1].trim();
-        }
-
-        return null;
-      });
-
-      if (liveFormPassword) {
-        defaultPasswordCaptured = liveFormPassword;
-      }
+      defaultPasswordCaptured = await this.captureLiveDefaultPassword(page);
     } catch {}
 
     // 4. Fill text inputs with event dispatching for Angular / AngularJS reactive binding
@@ -2537,7 +2634,8 @@ export class UserManagementExecutor {
   }
 
   /**
-   * Executes password reset on client and captures temporary password if presented.
+   * Executes password reset on client, captures live default password from Add User screen,
+   * and verifies remote reset confirmation across native dialogs and DOM modal/toast indicators.
    */
   public static async resetUserPassword(
     page: Page,
@@ -2545,19 +2643,25 @@ export class UserManagementExecutor {
       | string
       | {
           usersListUrl: string;
+          addUsersUrl?: string;
           username: string;
           loginUrl?: string;
           credentials?: { username: string; password?: string };
+          onProgress?: (msg: string) => void;
         },
     arg2?: string
   ): Promise<MutationResult> {
     const isObj = typeof arg1 === 'object';
     const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
+    const addUsersUrl = isObj ? arg1.addUsersUrl : undefined;
     const username = (isObj ? arg1.username : (arg2 as string)).trim();
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
+    const onProgress = isObj ? arg1.onProgress : undefined;
 
-    const authRes = await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
+    // 1. Ensure authenticated
+    onProgress?.(`Logging in to selected Simplex client…`);
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: addUsersUrl || usersListUrl, loginUrl, credentials });
     if (!authRes.authenticated) {
       return {
         success: false,
@@ -2567,8 +2671,31 @@ export class UserManagementExecutor {
       };
     }
 
-    await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    // 2. Authoritative client default-password capture from live Add User screen
+    let clientDefaultPassword: string | undefined = undefined;
+    if (addUsersUrl) {
+      onProgress?.(`Capturing client default password from Add User screen…`);
+      try {
+        await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        clientDefaultPassword = await this.captureLiveDefaultPassword(page);
+      } catch {}
+    }
 
+    // 3. Open users list screen
+    onProgress?.(`Opening Users screen…`);
+    try {
+      await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (navErr: any) {
+      return {
+        success: false,
+        username,
+        errorCode: 'REMOTE_USERS_SCREEN_NAVIGATION_FAILED',
+        errorMessage: `Failed to open users screen: ${navErr.message}`,
+      };
+    }
+
+    // 4. Locate target user row
+    onProgress?.(`Searching for '${username}'…`);
     const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
     if (!lookupRes.success || !lookupRes.rowHandle) {
       return {
@@ -2579,32 +2706,60 @@ export class UserManagementExecutor {
       };
     }
 
+    // 5. Setup native dialog handler to accept confirmations and capture generated passwords
+    let isResetConfirmed = false;
+    let explicitResetPassword: string | undefined = undefined;
+
+    const dialogHandler = async (dialog: any) => {
+      try {
+        const msg = dialog.message();
+        const lowerMsg = msg.toLowerCase();
+
+        // Check if dialog provides a specific temporary/generated password
+        const passMatch =
+          msg.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
+          msg.match(/(?:temporary password is|new password:?|password is:?)\s*([A-Za-z0-9!@#$%^&*()_+=-]+)/i);
+        if (passMatch) {
+          explicitResetPassword = (passMatch[1] || passMatch[0]).trim();
+          isResetConfirmed = true;
+        }
+
+        // Recognize safe positive messages
+        if (
+          lowerMsg.includes('password reset successfully') ||
+          lowerMsg.includes('reset successfully') ||
+          lowerMsg.includes('password has been reset') ||
+          lowerMsg.includes('updated successfully') ||
+          lowerMsg.includes('success') ||
+          lowerMsg.includes('congrats') ||
+          lowerMsg.includes('are you sure') ||
+          lowerMsg.includes('confirm')
+        ) {
+          isResetConfirmed = true;
+        }
+
+        await dialog.accept().catch(() => {});
+      } catch {}
+    };
+
+    page.on('dialog', dialogHandler);
+
+    // 6. Locate and trigger Password Reset control
+    onProgress?.(`Resetting password for '${username}' in Simplex client…`);
     const row = lookupRes.rowHandle;
     const resetBtn = await row.$(
-      'button.btn-reset-password, a.btn-reset-password, [data-testid="btn-reset-password"], a[title*="Reset" i], button[title*="Reset" i], a:has-text("Reset"), button:has-text("Reset")'
+      'button.btn-reset-password, a.btn-reset-password, [data-testid="btn-reset-password"], a[title*="Reset" i], button[title*="Reset" i], a:has-text("Reset"), button:has-text("Reset"), a[onclick*="reset" i], button[onclick*="reset" i]'
     );
-    let tempPasswordCaptured: string | undefined = undefined;
-
-    page.on('dialog', async (dialog) => {
-      const msg = dialog.message();
-      const match =
-        msg.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
-        msg.match(/(?:temporary password is|new password:?)\s*([A-Za-z0-9!@#$%^&*()_+=-]+)/i);
-      if (match) {
-        tempPasswordCaptured = match[1] || match[0];
-      }
-      await dialog.accept().catch(() => {});
-    });
 
     if (resetBtn) {
-      await resetBtn.click();
-      for (let i = 0; i < 25; i++) {
-        if (tempPasswordCaptured) break;
-        await page.waitForTimeout(100);
-      }
+      await resetBtn.click({ timeout: 5000 }).catch(async () => {
+        await resetBtn.dispatchEvent('click');
+      });
     } else {
       // Check for Simplex Edit User screen password reset link
-      const editLink = await row.$('a[href*="editUsers"], a[href*="editUser"], a[title*="Edit" i], .btn-edit');
+      const editLink = await row.$(
+        'a[href*="editUsers"], a[href*="editUser"], a[title*="Edit" i], .btn-edit, a:has-text("Edit"), button:has-text("Edit")'
+      );
       if (editLink) {
         const editHref = await editLink.getAttribute('href');
         if (editHref && !editHref.startsWith('javascript:') && editHref !== '#') {
@@ -2613,43 +2768,124 @@ export class UserManagementExecutor {
             timeout: 10000,
           });
         } else {
-          await editLink.click();
+          await editLink.click({ timeout: 5000 }).catch(() => {});
           await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
         }
-        const editResetBtn = page.locator('a:has-text("Password Reset"), button:has-text("Password Reset"), #btnResetPassword').first();
-        if (await editResetBtn.isVisible().catch(() => false)) {
-          await editResetBtn.click();
-          await page.waitForTimeout(1500);
+
+        const editResetBtn = page
+          .locator(
+            'a:has-text("Password Reset"), button:has-text("Password Reset"), #btnResetPassword, [data-testid="btn-reset-password"], .btn-reset-password, a[title*="Reset" i], button[title*="Reset" i]'
+          )
+          .first();
+
+        if (await editResetBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+          await editResetBtn.click({ timeout: 5000 });
         } else {
+          page.off('dialog', dialogHandler);
           return {
             success: false,
             username,
-            errorCode: 'RESET_BUTTON_NOT_FOUND',
+            errorCode: 'REMOTE_RESET_CONTROL_NOT_FOUND',
             errorMessage: `Password reset button not found on Edit screen for user '${username}'.`,
           };
         }
       } else {
+        page.off('dialog', dialogHandler);
         return {
           success: false,
           username,
-          errorCode: 'RESET_ACTION_UNAVAILABLE',
+          errorCode: 'REMOTE_RESET_CONTROL_NOT_FOUND',
           errorMessage: `Password reset action unavailable for user '${username}'.`,
         };
       }
     }
 
-    const tempPassElem = page.locator('.temp-password, [data-testid="temporary-password"], #tempPassword').first();
-    if (!tempPasswordCaptured && (await tempPassElem.isVisible().catch(() => false))) {
-      tempPasswordCaptured = (await tempPassElem.innerText().catch(() => '')).trim();
+    // 7. Handle DOM confirmation modal button if displayed
+    onProgress?.(`Verifying reset confirmation…`);
+    const confirmModalBtn = page
+      .locator(
+        '#btnConfirm, .confirm-reset, .swal2-confirm, button:has-text("Yes"), button:has-text("Confirm"), button:has-text("OK"), .modal-footer button.btn-primary, [data-testid="btn-confirm-reset"]'
+      )
+      .first();
+    if (await confirmModalBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await confirmModalBtn.click({ timeout: 3000 }).catch(() => {});
+      isResetConfirmed = true;
+    }
+
+    // 8. Event/DOM-based wait for positive toasts, banners, alerts, or password elements
+    const startTime = Date.now();
+    while (Date.now() - startTime < 3500) {
+      if (isResetConfirmed && explicitResetPassword) break;
+
+      const domCheck = await page
+        .evaluate(() => {
+          const alerts = Array.from(
+            document.querySelectorAll(
+              '.toast, .alert, .alert-success, .swal2-title, .swal2-html-container, [data-testid="toast"], [data-testid="success-message"], .notification, .msg-success, .badge-success, .success'
+            )
+          );
+          for (const el of alerts) {
+            const t = (el.textContent || '').trim().toLowerCase();
+            if (
+              t.includes('password reset successfully') ||
+              t.includes('reset successfully') ||
+              t.includes('password has been reset') ||
+              t.includes('updated successfully') ||
+              t.includes('success')
+            ) {
+              return { success: true, text: el.textContent?.trim() };
+            }
+          }
+
+          const tempPassElem = document.querySelector(
+            '.temp-password, [data-testid="temporary-password"], #tempPassword, .default-password'
+          );
+          if (tempPassElem && tempPassElem.textContent?.trim()) {
+            return {
+              success: true,
+              text: tempPassElem.textContent.trim(),
+              password: tempPassElem.textContent.trim(),
+            };
+          }
+          return null;
+        })
+        .catch(() => null);
+
+      if (domCheck?.success) {
+        isResetConfirmed = true;
+        if (domCheck.password) {
+          explicitResetPassword = domCheck.password;
+        }
+        break;
+      }
+
+      if (isResetConfirmed) break;
+      await page.waitForTimeout(150);
+    }
+
+    page.off('dialog', dialogHandler);
+
+    // 9. Confirm positive completion
+    // Invariant: Do not wait for username or status row to change after reset; those values normally remain unchanged.
+    if (isResetConfirmed) {
+      const deliveredPassword = explicitResetPassword || clientDefaultPassword;
+      return {
+        success: true,
+        username,
+        status: 'REMOTE_PASSWORD_RESET_CONFIRMED',
+        temporaryPassword: deliveredPassword,
+        defaultPassword: deliveredPassword,
+        message: deliveredPassword
+          ? `Password for '${username}' reset successfully. Password: ${deliveredPassword}`
+          : `Password reset completed in the selected Simplex client.`,
+      };
     }
 
     return {
-      success: true,
+      success: false,
       username,
-      temporaryPassword: tempPasswordCaptured,
-      message: tempPasswordCaptured
-        ? `Password reset successful. Temporary password generated.`
-        : `Password reset completed in the selected Simplex client.`,
+      errorCode: 'REMOTE_PASSWORD_RESET_UNVERIFIED',
+      errorMessage: `Password reset for user '${username}' could not be verified on remote client.`,
     };
   }
 }

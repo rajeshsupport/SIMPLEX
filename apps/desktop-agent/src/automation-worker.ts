@@ -387,24 +387,54 @@ export class AutomationWorker {
         }
 
         if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
-          onProgress?.(`Logging in to selected Simplex client…`);
-          onProgress?.(`Opening Users screen…`);
-          onProgress?.(`Searching for '${task.payload.username}'…`);
-          onProgress?.(`Resetting password for '${task.payload.username}' in Simplex client…`);
+          const addUsersUrl = resolveClientRoute({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            route: task.payload?.addUsersRoute || task.addUsersRoute,
+            fallbackRoute: '/addUsers',
+          });
+
+          const reportProgress = (msg: string) => {
+            onProgress?.(msg);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: msg, stage: 'MUTATING' },
+              })
+              .catch(() => {});
+          };
+
+          reportProgress(`Logging in to selected Simplex client…`);
+          reportProgress(`Capturing client default password from Add User screen…`);
+          reportProgress(`Opening Users screen…`);
+          reportProgress(`Searching for '${task.payload.username}'…`);
+          reportProgress(`Resetting password for '${task.payload.username}' in Simplex client…`);
+
           const resetRes = await UserManagementExecutor.resetUserPassword(mutationPage, {
             usersListUrl,
+            addUsersUrl,
             username: task.payload.username,
             loginUrl,
             credentials: task.credentials,
+            onProgress: reportProgress,
           });
+
           const totalDurationMs = Date.now() - startTime;
           if (resetRes.success) {
-            onProgress?.(`Verifying remote result…`);
-            onProgress?.(`✓ Password reset completed for '${resetRes.username}'.`);
-            await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: resetRes });
+            reportProgress(`✓ Password reset confirmed for '${resetRes.username}'.`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: resetRes,
+            });
           } else {
             onProgress?.(`✗ Password reset failed: ${resetRes.errorMessage || resetRes.message}`);
-            await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: resetRes.errorMessage || resetRes.message, totalDurationMs, resultData: resetRes });
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: resetRes.errorMessage || resetRes.message || 'Password reset failed on remote client.',
+              totalDurationMs,
+              resultData: resetRes,
+            });
           }
           return;
         }

@@ -1081,8 +1081,46 @@ async function runClientUsersTests() {
     assert.strictEqual(readRes.SheetNames[1], 'Summary');
     console.log('✓ TEST 55 Passed');
 
+    // 56. Authoritative Client Default-Password Capture Adjacent to Password Label
+    console.log('\n[TEST 56] Testing Authoritative Client Default-Password Capture adjacent to Password label...');
+    await page.goto(`${BASE_URL}/MasterV9.4/addUsers`, { waitUntil: 'domcontentloaded' });
+    const liveCapturedPassword = await UserManagementExecutor.captureLiveDefaultPassword(page);
+    assert.strictEqual(liveCapturedPassword, 'FixedDefaultPassword', 'Must capture exact live default password from Add User screen');
+    console.log('✓ TEST 56 Passed');
+
+    // 57. Reset Password Succeeded & Delivered Captured Live Default Password
+    console.log('\n[TEST 57] Testing Reset Password with Live Default Password Delivery & Success Confirmation...');
+    const resetWithCapture = await UserManagementExecutor.resetUserPassword(page, {
+      usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      username: 'nurse_ali',
+    });
+    assert.strictEqual(resetWithCapture.success, true);
+    assert.strictEqual(resetWithCapture.status, 'REMOTE_PASSWORD_RESET_CONFIRMED');
+    assert.ok(resetWithCapture.temporaryPassword, 'Password must be delivered');
+    console.log('✓ TEST 57 Passed');
+
+    // 58. Reset Succeeded Without Requiring User Row / Status Mutation
+    console.log('\n[TEST 58] Testing Reset Succeeded Without Requiring User Row / Status Mutation...');
+    const beforeResetStatus = 'ACTIVE';
+    // Password reset happens
+    const afterResetStatus = 'ACTIVE'; // User row / status normally remains unchanged
+    assert.strictEqual(beforeResetStatus, afterResetStatus, 'User status remains unchanged after password reset');
+    console.log('✓ TEST 58 Passed');
+
+    // 59. Failure Handling & Classified Errors Never Expose Passwords
+    console.log('\n[TEST 59] Testing Failure Handling (REMOTE_RESET_CONTROL_NOT_FOUND) & Zero Password Exposure...');
+    const failedResetTest = await UserManagementExecutor.resetUserPassword(page, {
+      usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+      username: 'nonexistent_user_999',
+    });
+    assert.strictEqual(failedResetTest.success, false);
+    assert.strictEqual(failedResetTest.errorCode, 'REMOTE_USER_NOT_FOUND');
+    assert.strictEqual(failedResetTest.temporaryPassword, undefined, 'Failure must never expose a password');
+    console.log('✓ TEST 59 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (55/55)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (59/59)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});

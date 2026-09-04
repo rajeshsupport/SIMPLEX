@@ -852,19 +852,23 @@ export const UsersPage: React.FC = () => {
     if (!selectedUser || isMutatingReset) return;
     setIsMutatingReset(true);
     try {
-      const res = await ApiClient.request<{ temporaryPassword?: string; message: string }>(
-        `/client-users/${selectedUser.id}/reset-password`,
-        { method: 'POST' }
-      );
+      const res = await ApiClient.request<{
+        temporaryPassword?: string;
+        defaultPassword?: string;
+        message: string;
+        username?: string;
+      }>(`/client-users/${selectedUser.id}/reset-password`, { method: 'POST' });
       setIsResetConfirmModalOpen(false);
+      const deliveredPassword = res.defaultPassword || res.temporaryPassword || null;
       openCredentialSuccessModal({
         type: 'RESET',
-        username: selectedUser.username,
+        username: res.username || selectedUser.username,
         clientCode: selectedClient?.clientCode,
         clientName: selectedClient?.clientName,
-        password: res.temporaryPassword || null,
+        password: deliveredPassword,
       });
     } catch (err: any) {
+      setIsResetConfirmModalOpen(false);
       const cleanError = (err.message || 'Password reset failed').replace(/^Sync failed:\s*/i, '');
       setActionMessage({ type: 'error', text: `Password reset failed: ${cleanError}` });
     } finally {

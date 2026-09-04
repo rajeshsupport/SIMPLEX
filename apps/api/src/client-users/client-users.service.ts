@@ -867,7 +867,7 @@ export class ClientUsersService implements OnModuleInit {
       }
 
       // 3. Dispatch Create Task via Desktop Agent or Headless Automation
-      const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE');
+      const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
       let credentials: { username: string; password: string } | undefined = undefined;
       const cred = await this.credRepo.findOne({ where: { clientId: sanitizedDto.clientId, isActive: true } });
       if (cred) {
@@ -1355,7 +1355,10 @@ export class ClientUsersService implements OnModuleInit {
   /**
    * Resets password on the remote client with verification and returns one-time temporary password.
    */
-  async resetUserPassword(id: string, user: JwtPayload): Promise<{ temporaryPassword?: string; message: string }> {
+  async resetUserPassword(
+    id: string,
+    user: JwtPayload
+  ): Promise<{ temporaryPassword?: string; defaultPassword?: string; username?: string; message: string }> {
     const snapshot = await this.snapshotRepo.findOne({ where: { id } });
     if (!snapshot) throw new NotFoundException(`User ${id} not found`);
 
@@ -1413,11 +1416,14 @@ export class ClientUsersService implements OnModuleInit {
           userId: user.sub,
           username: snapshot.username,
           clientBaseUrl: client.baseUrl,
+          clientAppPath: client.applicationPath,
           loginRoute: routes.resolvedLoginUrl,
           targetRoute: routes.resolvedUsersUrl,
+          addUsersRoute: routes.resolvedAddUsersUrl,
           credentials,
           payload: {
             username: snapshot.username,
+            addUsersRoute: routes.resolvedAddUsersUrl,
           },
           idempotencyKey: crypto.randomUUID(),
         }),
@@ -1425,11 +1431,11 @@ export class ClientUsersService implements OnModuleInit {
 
       const savedRun = await this.runRepo.save(run);
 
-      // Wait for agent completion and remote verification (up to 20s)
+      // Wait for agent completion and remote verification (up to 25s)
       const startTime = Date.now();
       let completedRun: AutomationRun | null = null;
-      while (Date.now() - startTime < 20000) {
-        await new Promise((r) => setTimeout(r, 300));
+      while (Date.now() - startTime < 25000) {
+        await new Promise((r) => setTimeout(r, 250));
         const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
         if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
           completedRun = r;
@@ -1439,22 +1445,25 @@ export class ClientUsersService implements OnModuleInit {
 
       if (!completedRun) {
         savedRun.status = 'TIMED_OUT';
-        savedRun.errorMessage = 'Password reset timed out: Automation agent did not respond within 20 seconds.';
+        savedRun.errorMessage = 'Password reset timed out: Automation agent did not respond within 25 seconds.';
         await this.runRepo.save(savedRun).catch(() => {});
         throw new BadRequestException({
-          code: 'OPERATION_TIMED_OUT',
-          message: 'Password reset timed out: Automation agent did not respond within 20 seconds.',
+          code: 'CLIENT_MUTATION_TIMEOUT',
+          message: 'Password reset timed out: Automation agent did not respond within 25 seconds.',
         });
       }
 
+      let parsedResult: any = {};
+      try {
+        parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+      } catch {}
+
       if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
-        let errorCode = 'RESET_PASSWORD_FAILED';
+        let errorCode = 'REMOTE_PASSWORD_RESET_UNVERIFIED';
         let errorMsg = completedRun?.errorMessage || 'Password reset failed on remote client portal.';
-        try {
-          const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
-          if (parsed.errorCode) errorCode = parsed.errorCode;
-          if (parsed.errorMessage) errorMsg = parsed.errorMessage;
-        } catch {}
+        if (parsedResult.errorCode) errorCode = parsedResult.errorCode;
+        if (parsedResult.errorMessage) errorMsg = parsedResult.errorMessage;
+        if (completedRun.status === 'TIMED_OUT') errorCode = 'CLIENT_MUTATION_TIMEOUT';
         throw new BadRequestException({
           code: errorCode,
           message: errorMsg,
@@ -1462,17 +1471,15 @@ export class ClientUsersService implements OnModuleInit {
       }
 
       let tempPassword: string | undefined = undefined;
-      let message = 'Password reset completed in the selected Simplex client.';
-      try {
-        const parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
-        if (parsed.temporaryPassword) {
-          tempPassword = parsed.temporaryPassword;
-          message = `Password for ${snapshot.username} reset successfully. Temporary password generated.`;
-        } else if (parsed.message) {
-          message = parsed.message;
-        }
-      } catch {}
+      let message = `Password for '${snapshot.username}' reset successfully.`;
+      if (parsedResult.temporaryPassword || parsedResult.defaultPassword) {
+        tempPassword = parsedResult.temporaryPassword || parsedResult.defaultPassword;
+      }
+      if (parsedResult.message) {
+        message = parsedResult.message;
+      }
 
+      // Record Audit (Zero plaintext password in audit log)
       await this.auditRepo.save(
         this.auditRepo.create({
           action: 'CLIENT_USER_PASSWORD_RESET',
@@ -1490,8 +1497,15 @@ export class ClientUsersService implements OnModuleInit {
         })
       );
 
+      // Trigger same-client read-only sync in background without delaying success popup
+      this.syncClientUsers(client.id, user).catch((syncErr) => {
+        this.logger.warn(`Post-reset background sync failed: ${syncErr.message}`);
+      });
+
       return {
         temporaryPassword: tempPassword,
+        defaultPassword: tempPassword,
+        username: snapshot.username,
         message,
       };
     } finally {

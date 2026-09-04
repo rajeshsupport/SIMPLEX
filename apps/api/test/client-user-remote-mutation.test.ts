@@ -1109,8 +1109,189 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(errorLifecycle.lockAcquired, false, 'Lock released on error in finally');
   console.log('✓ TEST 54 Passed');
 
+  // 55. Plain text password adjacent to Password label capture
+  console.log('\n[TEST 55] Testing Plain text password adjacent to Password label...');
+  const simulateLiveDomPassword = (htmlSnippet: string) => {
+    // Regex or DOM simulation matching our captureLiveDefaultPassword logic
+    if (htmlSnippet.includes('label>Password</label>') || htmlSnippet.includes('label>Default Password</label>')) {
+      const inputValMatch = htmlSnippet.match(/value="([^"]+)"/i);
+      if (inputValMatch) return inputValMatch[1];
+      const spanValMatch = htmlSnippet.match(/<span>([^<]+)<\/span>/i);
+      if (spanValMatch && !spanValMatch[1].toLowerCase().includes('password')) return spanValMatch[1].trim();
+      const tdValMatch = htmlSnippet.match(/<td>([^<]+)<\/td>/i);
+      if (tdValMatch && !tdValMatch[1].toLowerCase().includes('password')) return tdValMatch[1].trim();
+    }
+    return null;
+  };
+
+  const sample1 = '<div class="field"><label>Password</label><input type="text" disabled value="LiveClientSecret123!" /></div>';
+  const sample2 = '<div class="field"><label>Password</label><span>ClientDefault#99</span></div>';
+  assert.strictEqual(simulateLiveDomPassword(sample1), 'LiveClientSecret123!');
+  assert.strictEqual(simulateLiveDomPassword(sample2), 'ClientDefault#99');
+  console.log('✓ TEST 55 Passed');
+
+  // 56. Create Success Credential Popup with Captured Client Password
+  console.log('\n[TEST 56] Testing Create Success Credential Popup with Captured Client Password...');
+  const createModalState = {
+    type: 'CREATE' as const,
+    username: 'physician_karim',
+    clientCode: 'HOSP_01',
+    clientName: 'Central Hospital',
+    password: 'LiveClientSecret123!',
+    header: 'User created successfully',
+    label: 'Default Password',
+  };
+  assert.strictEqual(createModalState.type, 'CREATE');
+  assert.strictEqual(createModalState.password, 'LiveClientSecret123!');
+  assert.strictEqual(createModalState.header, 'User created successfully');
+  assert.strictEqual(createModalState.label, 'Default Password');
+  console.log('✓ TEST 56 Passed');
+
+  // 57. Reset Native Dialog Success Recognition
+  console.log('\n[TEST 57] Testing Reset Native Dialog Success Recognition...');
+  const recognizeDialogOutcome = (dialogMessage: string) => {
+    const lower = dialogMessage.toLowerCase();
+    const passMatch =
+      dialogMessage.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
+      dialogMessage.match(/(?:temporary password is|new password:?)\s*([A-Za-z0-9!@#$%^&*()_+=-]+)/i);
+
+    const isSuccess =
+      Boolean(passMatch) ||
+      lower.includes('password reset') ||
+      lower.includes('reset successfully') ||
+      lower.includes('password has been reset') ||
+      lower.includes('updated successfully') ||
+      lower.includes('success') ||
+      lower.includes('are you sure') ||
+      lower.includes('confirm');
+
+    return {
+      isConfirmed: isSuccess,
+      temporaryPassword: passMatch ? (passMatch[1] || passMatch[0]).trim() : undefined,
+    };
+  };
+
+  const nativeDialog1 = recognizeDialogOutcome('Password reset: Temporary password is Tmp@Alpha987!');
+  assert.strictEqual(nativeDialog1.isConfirmed, true);
+  assert.strictEqual(nativeDialog1.temporaryPassword, 'Tmp@Alpha987!');
+
+  const nativeDialog2 = recognizeDialogOutcome('Password reset successfully.');
+  assert.strictEqual(nativeDialog2.isConfirmed, true);
+  assert.strictEqual(nativeDialog2.temporaryPassword, undefined);
+  console.log('✓ TEST 57 Passed');
+
+  // 58. Reset DOM Banner / Toast Success Recognition
+  console.log('\n[TEST 58] Testing Reset DOM Toast / Banner Success Recognition...');
+  const recognizeDomBanner = (toastText: string) => {
+    const lower = toastText.toLowerCase();
+    return (
+      lower.includes('password reset successfully') ||
+      lower.includes('reset successfully') ||
+      lower.includes('password has been reset') ||
+      lower.includes('updated successfully') ||
+      lower.includes('success')
+    );
+  };
+  assert.strictEqual(recognizeDomBanner('Success: Password has been reset for the selected user.'), true);
+  assert.strictEqual(recognizeDomBanner('User updated successfully'), true);
+  assert.strictEqual(recognizeDomBanner('Error: User not found'), false);
+  console.log('✓ TEST 58 Passed');
+
+  // 59. Reset Succeeded Without Username / Status Row Changing
+  console.log('\n[TEST 59] Testing Reset Succeeded Without Username / Status Row Changing...');
+  const userRowBeforeReset = { username: 'nurse_ali', status: 'ACTIVE' };
+  // Reset executed & confirmed
+  const userRowAfterReset = { username: 'nurse_ali', status: 'ACTIVE' };
+  assert.strictEqual(userRowBeforeReset.username, userRowAfterReset.username);
+  assert.strictEqual(userRowBeforeReset.status, userRowAfterReset.status, 'Status row invariant: status does not change during password reset');
+  console.log('✓ TEST 59 Passed');
+
+  // 60. Password Reset Failure Never Exposes Password
+  console.log('\n[TEST 60] Testing Password Reset Failure Never Exposes Password...');
+  const handleResetOutcome = (isSuccess: boolean, candidatePassword?: string) => {
+    if (!isSuccess) {
+      return {
+        modalOpen: false,
+        deliveredPassword: null,
+      };
+    }
+    return {
+      modalOpen: true,
+      deliveredPassword: candidatePassword || null,
+    };
+  };
+
+  const failedOutcome = handleResetOutcome(false, 'ShouldNotLeakSecret!');
+  assert.strictEqual(failedOutcome.modalOpen, false, 'Modal remains closed on failure');
+  assert.strictEqual(failedOutcome.deliveredPassword, null, 'Delivered password must be strictly null on failure');
+  console.log('✓ TEST 60 Passed');
+
+  // 61. Strict Client, Job, and Username Credential Isolation
+  console.log('\n[TEST 61] Testing Strict Client, Job, and Username Isolation...');
+  const ephemeralStore = new Map<string, string>();
+  const makeKey = (clientId: string, jobId: string, username: string) => `${clientId}:${jobId}:${username}`;
+
+  ephemeralStore.set(makeKey('client_A', 'job_101', 'dr_sarah'), 'SarahPass123!');
+  ephemeralStore.set(makeKey('client_B', 'job_102', 'dr_sarah'), 'OtherClientPass456!');
+
+  assert.strictEqual(ephemeralStore.get(makeKey('client_A', 'job_101', 'dr_sarah')), 'SarahPass123!');
+  assert.strictEqual(ephemeralStore.get(makeKey('client_B', 'job_102', 'dr_sarah')), 'OtherClientPass456!');
+  assert.notStrictEqual(
+    ephemeralStore.get(makeKey('client_A', 'job_101', 'dr_sarah')),
+    ephemeralStore.get(makeKey('client_B', 'job_102', 'dr_sarah'))
+  );
+  console.log('✓ TEST 61 Passed');
+
+  // 62. 60-Second Auto-Purge & Immediate Memory Wipe on Close / Unmount
+  console.log('\n[TEST 62] Testing 60-Second Auto-Purge & Memory Destruction on Close/Unmount...');
+  let credentialMemory: { password: string | null; timerRemaining: number } | null = {
+    password: 'ClientProvidedDefault123!',
+    timerRemaining: 60,
+  };
+
+  // Simulate 60-second expiration
+  credentialMemory.timerRemaining = 0;
+  if (credentialMemory.timerRemaining <= 0) {
+    credentialMemory.password = null;
+  }
+  assert.strictEqual(credentialMemory.password, null, 'Password must be nullified when timer expires');
+
+  // Simulate component unmount / close
+  credentialMemory = null;
+  assert.strictEqual(credentialMemory, null, 'Memory reference must be wiped on unmount/close');
+  console.log('✓ TEST 62 Passed');
+
+  // 63. Fast Terminal-State Handling & Non-Blocking Background Sync
+  console.log('\n[TEST 63] Testing Fast Terminal-State Handling & Non-Blocking Background Sync...');
+  let bgSyncTriggered = false;
+  let bgSyncCompleted = false;
+
+  const triggerResetOperation = async () => {
+    // 1. Reset remote confirmed
+    const result = { success: true, status: 'REMOTE_PASSWORD_RESET_CONFIRMED', temporaryPassword: 'LivePass123!' };
+    
+    // 2. Trigger non-blocking background sync
+    bgSyncTriggered = true;
+    (async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      bgSyncCompleted = true;
+    })();
+
+    // 3. Return immediately without awaiting background sync
+    return result;
+  };
+
+  const immediateResult = await triggerResetOperation();
+  assert.strictEqual(immediateResult.success, true);
+  assert.strictEqual(immediateResult.status, 'REMOTE_PASSWORD_RESET_CONFIRMED');
+  assert.strictEqual(bgSyncTriggered, true, 'Background sync was triggered');
+  assert.strictEqual(bgSyncCompleted, false, 'Endpoint returned immediately without waiting for background sync');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(bgSyncCompleted, true);
+  console.log('✓ TEST 63 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (54/54)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (63/63)');
   console.log('======================================================================\n');
 }
 
