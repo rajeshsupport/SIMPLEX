@@ -179,7 +179,6 @@ export const ClientsPage: React.FC = () => {
     setLaunchingClientIds((prev) => ({ ...prev, [client.id]: true }));
 
     if (toastDismissTimerRef.current) clearTimeout(toastDismissTimerRef.current);
-    if (pollingRef.current) clearInterval(pollingRef.current);
 
     // Immediate non-blocking toast (<30ms)
     setToast({
@@ -192,36 +191,56 @@ export const ClientsPage: React.FC = () => {
       client,
     });
 
+    const pollStartTime = Date.now();
+    let pollTimer: NodeJS.Timeout | null = null;
+
+    const clearLaunchState = () => {
+      if (pollTimer) clearInterval(pollTimer);
+      setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+    };
+
     try {
       const res = await ApiClient.request<{ id: string; status: string }>('/agents/dispatch-open-and-login', {
         method: 'POST',
         body: JSON.stringify({ clientId: client.id }),
       });
 
-      // Poll run status non-blockingly (250ms intervals)
-      pollingRef.current = setInterval(async () => {
+      // Poll run status non-blockingly (250ms intervals) with 30s bounded timeout
+      pollTimer = setInterval(async () => {
         try {
+          if (Date.now() - pollStartTime > 30000) {
+            clearLaunchState();
+            setToast({
+              id: client.id,
+              clientId: client.id,
+              clientCode: client.clientCode,
+              clientName: client.clientName,
+              status: 'ERROR',
+              message: `CLIENT_PORTAL_TIMEOUT: Timed out waiting for ${displayName} portal to open and verify.`,
+              client,
+            });
+            return;
+          }
+
           const run = await ApiClient.request<any>(`/agents/runs/${res.id}`);
           if (!run) return;
 
-          if (run.status === 'COMPLETED') {
-            if (pollingRef.current) clearInterval(pollingRef.current);
-            setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+          if (run.status === 'COMPLETED' || run.status === 'SUCCEEDED') {
+            clearLaunchState();
             setToast({
               id: client.id,
               clientId: client.id,
               clientCode: client.clientCode,
               clientName: client.clientName,
               status: 'SUCCESS',
-              message: `${displayName} opened successfully.`,
+              message: `${displayName} opened and ready.`,
               client,
             });
             toastDismissTimerRef.current = setTimeout(() => {
               setToast((curr) => (curr?.id === client.id && curr?.status === 'SUCCESS' ? null : curr));
-            }, 2000);
+            }, 3000);
           } else if (run.status === 'REQUIRES_MANUAL_INTERVENTION') {
-            if (pollingRef.current) clearInterval(pollingRef.current);
-            setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+            clearLaunchState();
             setToast({
               id: client.id,
               clientId: client.id,
@@ -232,15 +251,14 @@ export const ClientsPage: React.FC = () => {
               client,
             });
           } else if (run.status === 'FAILED') {
-            if (pollingRef.current) clearInterval(pollingRef.current);
-            setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
+            clearLaunchState();
             setToast({
               id: client.id,
               clientId: client.id,
               clientCode: client.clientCode,
               clientName: client.clientName,
               status: 'ERROR',
-              message: run.errorMessage || `Failed to open ${displayName}.`,
+              message: run.errorMessage || `CLIENT_AUTO_LOGIN_FAILED: Failed to open ${displayName}.`,
               client,
             });
           }
@@ -249,11 +267,16 @@ export const ClientsPage: React.FC = () => {
         }
       }, 250);
     } catch (err: any) {
-      setLaunchingClientIds((prev) => ({ ...prev, [client.id]: false }));
-      const msg =
-        err.message && err.message.includes('Desktop browser agent is not running')
-          ? 'Desktop browser agent is not running.'
-          : err.message || `Failed to open ${displayName}.`;
+      clearLaunchState();
+      let msg = err.message || `CLIENT_AUTO_LOGIN_FAILED: Failed to open ${displayName}.`;
+      if (msg.includes('DESKTOP_AGENT_OFFLINE') || msg.includes('Desktop browser agent is not running')) {
+        msg = 'DESKTOP_AGENT_OFFLINE: Desktop browser agent is offline. Start the agent.';
+      } else if (msg.includes('CLIENT_URL_INVALID')) {
+        msg = 'CLIENT_URL_INVALID: Client base URL is not configured or invalid.';
+      } else if (msg.includes('CLIENT_AUTO_LOGIN_FAILED') || msg.includes('Saved login credentials are unavailable')) {
+        msg = 'CLIENT_AUTO_LOGIN_FAILED: Saved login credentials are unavailable for this client. Configure credentials in vault.';
+      }
+
       setToast({
         id: client.id,
         clientId: client.id,
@@ -470,8 +493,8 @@ export const ClientsPage: React.FC = () => {
                         {hasPermission(PERMISSIONS.CLIENT_OPEN) && (
                           <button
                             onClick={() => handleOpenAndLogin(client)}
-                            disabled={isLaunchingThisClient || !client.hasCredentials}
-                            title={!client.hasCredentials ? 'Configure credentials first' : 'Launch auto-login browser session'}
+                            disabled={isLaunchingThisClient}
+                            title="Launch auto-login browser session"
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold shadow transition-all disabled:opacity-50 ${
                               isProd
                                 ? 'bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 shadow-red-950/50'

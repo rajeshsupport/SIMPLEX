@@ -187,14 +187,18 @@ export class AgentsService {
     });
     if (!client) throw new NotFoundException('Client not found');
 
+    if (!client.baseUrl || !client.baseUrl.startsWith('http')) {
+      throw new BadRequestException('CLIENT_URL_INVALID: Client base URL is not configured or invalid.');
+    }
+
     if (!client.credential || !client.credential.isActive) {
-      throw new BadRequestException('Saved login credentials are unavailable for this client. Edit the client and save valid credentials.');
+      throw new BadRequestException('CLIENT_AUTO_LOGIN_FAILED: Saved login credentials are unavailable for this client. Edit the client and save valid credentials.');
     }
 
     try {
       await this.clientsService.getDecryptedCredentials(client.id);
     } catch (err: any) {
-      throw new BadRequestException('Saved credentials could not be decrypted. Re-save the client credentials.');
+      throw new BadRequestException('CLIENT_AUTO_LOGIN_FAILED: Saved credentials could not be decrypted. Re-save the client credentials.');
     }
 
     // Check available online desktop agents
@@ -458,7 +462,15 @@ export class AgentsService {
       'RESET_CLIENT_USER_PASSWORD',
     ].includes(run.runType);
 
-    const executionMode = isMutation ? ('HEADED_MUTATION' as const) : ('HEADLESS_SYNC' as const);
+    const isInteractive = [
+      'OPEN_INTERACTIVE_CLIENT_SESSION',
+      'INTERACTIVE_LOGIN',
+      'TEST_LOGIN',
+    ].includes(run.runType);
+
+    const isHeaded = isMutation || isInteractive || params.isHeaded === true;
+    const leaveBrowserOpen = isInteractive || params.leaveBrowserOpen === true;
+    const executionMode = (isMutation || isInteractive) ? ('HEADED_MUTATION' as const) : ('HEADLESS_SYNC' as const);
 
     return {
       runId: run.id,
@@ -476,8 +488,8 @@ export class AgentsService {
         password: creds?.password,
       },
       options: {
-        isHeaded: isMutation,
-        leaveBrowserOpen: isMutation,
+        isHeaded,
+        leaveBrowserOpen,
       },
     };
   }
