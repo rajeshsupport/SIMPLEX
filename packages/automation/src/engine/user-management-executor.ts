@@ -8,6 +8,9 @@ import * as os from 'os';
 export interface ScrapedClientUser {
   remoteUserId?: string;
   username: string;
+  normalizedUsername?: string;
+  editRouteIdentifier?: string;
+  sourcePage?: number;
   firstName: string;
   middleName?: string;
   lastName: string;
@@ -422,6 +425,10 @@ export class UserManagementExecutor {
           const hasStmp = r.querySelectorAll('img[src*="stamp" i], a[href*="stamp" i], .has-stamp').length > 0;
           const hasProf = r.querySelectorAll('img[src*="profile" i], img[src*="user" i], .user-avatar').length > 0;
 
+          const dataId = r.getAttribute('data-id') || r.getAttribute('data-user-id') || r.getAttribute('id') || '';
+          const editHref = r.querySelector('a[href*="edit" i], a[href*="addUsers" i], a[href*="user" i]')?.getAttribute('href') || '';
+          const actionHrefs = Array.from(r.querySelectorAll('a[href]')).map((a) => a.getAttribute('href') || '');
+
           // Status detection: icon, class, label, tooltip, or accessibility text
           const statusCell = colStatus >= 0 && colStatus < cells.length ? r.querySelectorAll('td, [role="gridcell"], .cell')[colStatus] : r;
           const statusText = statusCell ? (statusCell.textContent || '').toUpperCase() : '';
@@ -443,6 +450,9 @@ export class UserManagementExecutor {
             hasSig,
             hasStmp,
             hasProf,
+            dataId,
+            editHref,
+            actionHrefs,
             colSNo,
             colFullName,
             colUsername,
@@ -507,9 +517,21 @@ export class UserManagementExecutor {
         const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
         const middleName = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : undefined;
 
+        let remoteUserId = row.dataId || '';
+        if (!remoteUserId && row.editHref) {
+          const match = row.editHref.match(/(?:userId|id|user)=([^&'"]+)/i);
+          if (match) remoteUserId = match[1];
+        }
+        if (!remoteUserId) {
+          remoteUserId = `remote_${username.toLowerCase()}`;
+        }
+
         const scrapedUser: ScrapedClientUser = {
-          remoteUserId: `remote_${username.toLowerCase()}`,
+          remoteUserId,
           username: username.trim(),
+          normalizedUsername: username.trim().toLowerCase(),
+          editRouteIdentifier: row.editHref || undefined,
+          sourcePage: currentPage,
           firstName,
           middleName,
           lastName: lastName || firstName,
@@ -2252,11 +2274,16 @@ export class UserManagementExecutor {
    * - "User Name" column -> Person's Full Name (e.g. "Abdul Qadeer Pathan")
    * - "Name" column -> Login Username (e.g. "abdul.p")
    * Performs Angular search triggering and falls back to full pagination traversal.
+   * Priority:
+   * 1. Remote user ID / edit-route identifier
+   * 2. Exact case-insensitive normalized username in the "Name" column
+   * 3. Exact username extracted from the row's Edit/View href
    */
   public static async findExactUserRow(
     page: Page,
     targetUsername: string,
-    usersListUrl: string
+    usersListUrl: string,
+    options?: { remoteUserId?: string }
   ): Promise<{
     success: boolean;
     rowHandle?: any;
@@ -2268,8 +2295,16 @@ export class UserManagementExecutor {
     currentRemoteStatus?: ClientUserStatus;
     errorCode?: string;
     errorMessage?: string;
+    diagnostics?: {
+      requestedNormalizedUsername: string;
+      remoteRowsInspected: number;
+      pagesVisited: number;
+      usernameColIdx: number;
+      matchCount: number;
+    };
   }> {
     const normTarget = targetUsername.trim().toLowerCase();
+    const targetRemoteUserId = options?.remoteUserId?.trim();
 
     // 1. Wait for loading spinners/overlays to disappear if present
     try {
@@ -2281,7 +2316,7 @@ export class UserManagementExecutor {
 
     // 2. Wait up to 30s for users table or grid structure to render
     const tableVisible = await page
-      .waitForSelector('table, [data-testid="users-table"], .grid-container, [data-testid="hmc-users-screen"], #usersTable, .table-responsive, table tbody tr', {
+      .waitForSelector('table, [data-testid="users-table"], .grid-container, [data-testid="hmc-users-screen"], #usersTable, .table-responsive, table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]', {
         timeout: 30000,
       })
       .catch(() => null);
@@ -2301,7 +2336,7 @@ export class UserManagementExecutor {
       };
     }
 
-    // 2. Detect column headers
+    // 3. Detect column headers
     const headerTexts: string[] = await page.$$eval(
       'table thead tr th, table tr:first-child th, table tr:first-child td, [role="columnheader"], .header-cell, th',
       (ths) => ths.map((th) => (th.textContent || '').trim().toUpperCase())
@@ -2314,34 +2349,49 @@ export class UserManagementExecutor {
     let actionColIdx = -1;
 
     headerTexts.forEach((h, idx) => {
-      if (h === 'USER NAME' || h.includes('FULL NAME') || h.includes('FULLNAME')) {
+      const norm = h.trim().toUpperCase();
+      if (norm === 'USER NAME' || norm.includes('FULL NAME') || norm.includes('FULLNAME')) {
         fullNameColIdx = idx;
-      } else if (h === 'NAME' || h === 'USERNAME' || h.includes('LOGIN') || h.includes('USER ID') || h === 'USER') {
+      } else if (norm === 'NAME' || norm === 'USERNAME' || norm === 'LOGIN' || norm.includes('USER ID') || norm === 'USER') {
         usernameColIdx = idx;
-      } else if (h.includes('MOBILE') || h.includes('PHONE') || h.includes('CONTACT')) {
+      } else if (norm.includes('MOBILE') || norm.includes('PHONE') || norm.includes('CONTACT')) {
         mobileColIdx = idx;
-      } else if (h.includes('STATUS') || h.includes('STATE')) {
+      } else if (norm.includes('STATUS') || norm.includes('STATE')) {
         statusColIdx = idx;
-      } else if (h.includes('ACTION') || h.includes('OPERATION')) {
+      } else if (norm.includes('ACTION') || norm.includes('OPERATION')) {
         actionColIdx = idx;
       }
     });
 
-    if (usernameColIdx === -1 && fullNameColIdx !== -1) usernameColIdx = fullNameColIdx;
-    if (usernameColIdx === -1) usernameColIdx = 2; // Default fallback to index 2 (S.NO(0), User Name(1), Name(2))
+    if (usernameColIdx === -1) {
+      // Default to index 2 (S.NO(0), User Name / Full Name(1), Name / Login(2))
+      if (headerTexts.length >= 6 || fullNameColIdx === 1) {
+        usernameColIdx = 2;
+      } else if (fullNameColIdx !== -1) {
+        usernameColIdx = fullNameColIdx;
+      } else {
+        usernameColIdx = 2;
+      }
+    }
     if (statusColIdx === -1) statusColIdx = headerTexts.length > 2 ? headerTexts.length - 2 : 4;
     if (actionColIdx === -1) actionColIdx = headerTexts.length > 1 ? headerTexts.length - 1 : 5;
+
+    let totalRowsInspected = 0;
+    let pagesVisitedCount = 0;
 
     // Helper to inspect rows on current page
     const inspectCurrentPageRows = async (): Promise<{
       matches: { row: any; index: number; status: ClientUserStatus }[];
+      rowCount: number;
     }> => {
-      const rows = await page.$$('table tbody tr');
+      const rows = await page.$$(
+        'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row'
+      );
       const matches: { row: any; index: number; status: ClientUserStatus }[] = [];
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
-        const cells = await row.$$('td');
+        const cells = await row.$$('td, [role="gridcell"], [role="cell"], .cell, .grid-cell');
         if (cells.length === 0) continue;
 
         // Skip rows that are hidden (e.g. filtered by client-side search)
@@ -2354,8 +2404,39 @@ export class UserManagementExecutor {
         const cellTexts = await Promise.all(cells.map((c) => c.textContent()));
         const cellUsername = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
 
-        // Exact trimmed equality check on the Name (username) column
-        if (cellUsername === normTarget) {
+        // Extract action link attributes & row IDs
+        const rowData = await row.evaluate((el) => {
+          const dataId = el.getAttribute('data-id') || el.getAttribute('data-user-id') || el.getAttribute('id') || '';
+          const links = Array.from(el.querySelectorAll('a[href], button[onclick], [ng-click]')).map((a) => {
+            return (a.getAttribute('href') || '') + ' ' + (a.getAttribute('onclick') || '') + ' ' + (a.getAttribute('ng-click') || '');
+          });
+          return { dataId, links };
+        });
+
+        // 1. Priority 1: Match by remoteUserId / edit-route identifier if available
+        let isMatch = false;
+        if (targetRemoteUserId && rowData.dataId && rowData.dataId.toLowerCase() === targetRemoteUserId.toLowerCase()) {
+          isMatch = true;
+        }
+
+        // 2. Priority 2: Exact case-insensitive normalized username in the "Name" column
+        if (!isMatch && cellUsername === normTarget) {
+          isMatch = true;
+        }
+
+        // 3. Priority 3: Exact username extracted from the row's Edit/View/Toggle href
+        if (!isMatch) {
+          for (const linkText of rowData.links) {
+            const userParamMatch = linkText.match(/(?:userId|username|toggleStatus|resetPassword|editUser)[=\/('"]+([^&'" )]+)/i);
+            if (userParamMatch && userParamMatch[1].trim().toLowerCase() === normTarget) {
+              isMatch = true;
+              break;
+            }
+          }
+        }
+
+        // If matched, extract current remote status
+        if (isMatch) {
           let rowStatus: ClientUserStatus = 'ACTIVE';
           if (statusColIdx >= 0 && statusColIdx < cells.length) {
             rowStatus = await UserManagementExecutor.evaluateCellStatus(cells[statusColIdx]);
@@ -2363,20 +2444,31 @@ export class UserManagementExecutor {
           matches.push({ row, index: i, status: rowStatus });
         }
       }
-      return { matches };
+      return { matches, rowCount: rows.length };
     };
 
     // Bounded retry attempts (up to 3 attempts with 800ms delay) to allow asynchronous rendering settling
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      // 3. Attempt Angular search input filtering
+      // 4. Attempt Angular search input filtering
       const searchInput = page
-        .locator('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[id*="search" i], #userSearch')
+        .locator('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[id*="search" i], #userSearch, [data-testid="input-user-search"]')
         .first();
 
       let searchExecuted = false;
       if (await searchInput.isVisible().catch(() => false)) {
         try {
+          // Clear before typing
+          await searchInput.evaluate((el: HTMLInputElement) => {
+            el.value = '';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Backspace' }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          });
+          await page.waitForTimeout(200);
+
+          // Enter exact target username
           await searchInput.fill(targetUsername.trim());
           await searchInput.evaluate((el: HTMLInputElement, val: string) => {
             el.value = val;
@@ -2387,7 +2479,7 @@ export class UserManagementExecutor {
           }, targetUsername.trim());
           await searchInput.press('Enter').catch(() => {});
           await searchInput.press('Tab').catch(() => {});
-          await page.waitForTimeout(400);
+          await page.waitForTimeout(500);
           searchExecuted = true;
         } catch {
           searchExecuted = false;
@@ -2395,7 +2487,10 @@ export class UserManagementExecutor {
       }
 
       if (searchExecuted) {
-        const { matches } = await inspectCurrentPageRows();
+        const { matches, rowCount } = await inspectCurrentPageRows();
+        totalRowsInspected += rowCount;
+        pagesVisitedCount = 1;
+
         if (matches.length === 1) {
           return {
             success: true,
@@ -2406,6 +2501,13 @@ export class UserManagementExecutor {
             usernameColIdx,
             fullNameColIdx,
             currentRemoteStatus: matches[0].status,
+            diagnostics: {
+              requestedNormalizedUsername: normTarget,
+              remoteRowsInspected: totalRowsInspected,
+              pagesVisited: pagesVisitedCount,
+              usernameColIdx,
+              matchCount: 1,
+            },
           };
         }
         if (matches.length > 1) {
@@ -2413,11 +2515,18 @@ export class UserManagementExecutor {
             success: false,
             errorCode: 'AMBIGUOUS_REMOTE_USER',
             errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
+            diagnostics: {
+              requestedNormalizedUsername: normTarget,
+              remoteRowsInspected: totalRowsInspected,
+              pagesVisited: pagesVisitedCount,
+              usernameColIdx,
+              matchCount: matches.length,
+            },
           };
         }
       }
 
-      // 4. If search didn't filter or match, clear search input and traverse pagination
+      // 5. If search didn't filter or match, clear search input and traverse pagination
       if (searchExecuted && (await searchInput.isVisible().catch(() => false))) {
         await searchInput.evaluate((el: HTMLInputElement) => {
           el.value = '';
@@ -2434,16 +2543,10 @@ export class UserManagementExecutor {
       const maxPages = 50;
 
       while (pageNum <= maxPages) {
-        const rows = await page.$$('table tbody tr');
-        if (rows.length === 0) break;
+        pagesVisitedCount = pageNum;
+        const { matches, rowCount } = await inspectCurrentPageRows();
+        totalRowsInspected += rowCount;
 
-        const firstRowCells = await rows[0].$$('td');
-        const firstRowTexts = await Promise.all(firstRowCells.map((c) => c.textContent()));
-        const sig = `${pageNum}:${firstRowTexts.slice(0, 3).join('|')}`;
-        if (seenPageSignatures.has(sig)) break;
-        seenPageSignatures.add(sig);
-
-        const { matches } = await inspectCurrentPageRows();
         if (matches.length === 1) {
           return {
             success: true,
@@ -2454,6 +2557,13 @@ export class UserManagementExecutor {
             usernameColIdx,
             fullNameColIdx,
             currentRemoteStatus: matches[0].status,
+            diagnostics: {
+              requestedNormalizedUsername: normTarget,
+              remoteRowsInspected: totalRowsInspected,
+              pagesVisited: pagesVisitedCount,
+              usernameColIdx,
+              matchCount: 1,
+            },
           };
         }
         if (matches.length > 1) {
@@ -2461,8 +2571,25 @@ export class UserManagementExecutor {
             success: false,
             errorCode: 'AMBIGUOUS_REMOTE_USER',
             errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
+            diagnostics: {
+              requestedNormalizedUsername: normTarget,
+              remoteRowsInspected: totalRowsInspected,
+              pagesVisited: pagesVisitedCount,
+              usernameColIdx,
+              matchCount: matches.length,
+            },
           };
         }
+
+        // Check page signature to prevent cycles
+        const rows = await page.$$('table tbody tr, [ng-repeat], [data-ng-repeat], [role="row"]:not(:first-child), .user-row');
+        if (rows.length === 0) break;
+
+        const firstRowCells = await rows[0].$$('td, [role="gridcell"], .cell');
+        const firstRowTexts = await Promise.all(firstRowCells.map((c) => c.textContent()));
+        const sig = `${pageNum}:${firstRowTexts.slice(0, 3).join('|')}`;
+        if (seenPageSignatures.has(sig)) break;
+        seenPageSignatures.add(sig);
 
         // Check next page control
         const nextButton = page
@@ -2493,6 +2620,13 @@ export class UserManagementExecutor {
       success: false,
       errorCode: 'REMOTE_USER_NOT_FOUND',
       errorMessage: `Target user '${targetUsername}' not found on client users list after searching all pages.`,
+      diagnostics: {
+        requestedNormalizedUsername: normTarget,
+        remoteRowsInspected: totalRowsInspected,
+        pagesVisited: pagesVisitedCount,
+        usernameColIdx,
+        matchCount: 0,
+      },
     };
   }
 
@@ -2624,6 +2758,7 @@ export class UserManagementExecutor {
           usersListUrl: string;
           username: string;
           targetStatus: ClientUserStatus;
+          remoteUserId?: string;
           loginUrl?: string;
           credentials?: { username: string; password?: string };
           onProgress?: (msg: string) => void;
@@ -2635,6 +2770,7 @@ export class UserManagementExecutor {
     const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
     const username = (isObj ? arg1.username : (arg2 as string)).trim();
     const targetStatus = isObj ? arg1.targetStatus : ((arg3 || arg2) as ClientUserStatus);
+    const remoteUserId = isObj ? arg1.remoteUserId : undefined;
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
     const onProgress = isObj ? arg1.onProgress : undefined;
@@ -2664,20 +2800,30 @@ export class UserManagementExecutor {
       };
     }
 
-    // 3. Locate exact user row
+    // 3. Locate exact user row with eventual consistency retry
     onProgress?.(`Locating user '${username}'…`);
-    const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
+    let lookupRes = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId });
+    if (!lookupRes.success || !lookupRes.rowHandle) {
+      // Eventual consistency recovery: wait 1s, reload directory route, and retry findExactUserRow once
+      await page.waitForTimeout(1000);
+      try {
+        await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.waitForSelector('table tbody tr, [role="row"], .user-row, div[ng-repeat*="user" i]', { timeout: 5000 }).catch(() => {});
+      } catch {}
+      lookupRes = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId });
+    }
+
     if (!lookupRes.success || !lookupRes.rowHandle) {
       return {
         success: false,
         username,
         errorCode: lookupRes.errorCode || 'REMOTE_USER_NOT_FOUND',
-        errorMessage: lookupRes.errorMessage || `Target user '${username}' not found on client users list.`,
+        errorMessage: lookupRes.errorMessage || `Target user '${username}' not found on client users list after searching all pages.`,
       };
     }
 
     const { rowHandle, statusColIdx, currentRemoteStatus } = lookupRes;
-    const targetCells = await rowHandle.$$('td');
+    const targetCells = await rowHandle.$$('td, [role="gridcell"], .cell');
     const statusCell = targetCells[statusColIdx!];
 
     if (!statusCell) {
@@ -2723,7 +2869,7 @@ export class UserManagementExecutor {
       };
     }
 
-    // Find clickable status icon or toggle control
+    // Find clickable status icon or toggle control within the status cell ONLY
     const clickTarget = await statusCell.$(
       'a, button, [role="button"], [ng-click], [onclick], .status-control, .status-icon, .status-toggle, i, span.badge-active, span.badge-inactive, span, svg'
     );
@@ -2753,11 +2899,11 @@ export class UserManagementExecutor {
 
     // 4. Re-read and verify that the icon changed
     onProgress?.(`Verifying remote status change…`);
-    const verifyLookup = await this.findExactUserRow(page, username, usersListUrl);
+    const verifyLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId });
     if (!verifyLookup.success || !verifyLookup.rowHandle) {
       // Reload and retry verification
       await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-      const retryLookup = await this.findExactUserRow(page, username, usersListUrl);
+      const retryLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId });
       if (!retryLookup.success || !retryLookup.rowHandle) {
         return {
           success: false,

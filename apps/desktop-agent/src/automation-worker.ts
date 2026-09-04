@@ -365,6 +365,7 @@ export class AutomationWorker {
             usersListUrl,
             username: task.payload.username,
             targetStatus,
+            remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
             loginUrl,
             credentials: task.credentials,
             onProgress: reportProgress,

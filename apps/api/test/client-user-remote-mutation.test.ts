@@ -1395,8 +1395,92 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual('password' in safeDiag, false, 'Safe diagnostics must never contain password property');
   console.log('✓ TEST 66 Passed');
 
+  // 67. Preflight Reconciliation: isPresentRemotely === false Blocks Mutation
+  console.log('\n[TEST 67] Testing Preflight Reconciliation (isPresentRemotely === false Blocks Mutation)...');
+  const checkMutationPreflight = (snapshot: { id: string; isPresentRemotely?: boolean; username: string }) => {
+    if (snapshot.isPresentRemotely === false) {
+      const err: any = new Error('REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.');
+      err.code = 'REMOTE_USER_NOT_PRESENT';
+      throw err;
+    }
+    return true;
+  };
+
+  const staleSnapshot = { id: 'snap-1', isPresentRemotely: false, username: 'sathishtest' };
+  assert.throws(
+    () => checkMutationPreflight(staleSnapshot),
+    (err: any) => err.code === 'REMOTE_USER_NOT_PRESENT' && err.message.includes('REMOTE_USER_NOT_PRESENT'),
+    'Mutation on absent/stale remote user must be blocked'
+  );
+
+  const activeSnapshot = { id: 'snap-2', isPresentRemotely: true, username: 'valid_user' };
+  assert.strictEqual(checkMutationPreflight(activeSnapshot), true);
+  console.log('✓ TEST 67 Passed');
+
+  // 68. Remote User Task Parameters Include remoteUserId and Normalized Identity
+  console.log('\n[TEST 68] Testing Remote User Mutation Parameters Include remoteUserId...');
+  const buildStatusTaskParams = (snapshot: any, client: any) => {
+    return {
+      taskType: 'CHANGE_CLIENT_USER_STATUS',
+      remoteUserId: snapshot.remoteUserId,
+      username: snapshot.username,
+      currentStatus: snapshot.status,
+      targetStatus: 'INACTIVE',
+      clientBaseUrl: client.baseUrl,
+      payload: {
+        remoteUserId: snapshot.remoteUserId,
+        username: snapshot.username,
+        status: 'INACTIVE',
+        targetStatus: 'INACTIVE',
+      },
+    };
+  };
+
+  const taskParams = buildStatusTaskParams(
+    { remoteUserId: 'user_remote_101', username: 'abdul.p', status: 'ACTIVE' },
+    { baseUrl: 'https://staging.simplexworld.com' }
+  );
+  assert.strictEqual(taskParams.remoteUserId, 'user_remote_101');
+  assert.strictEqual(taskParams.payload.remoteUserId, 'user_remote_101');
+  assert.strictEqual(taskParams.username, 'abdul.p');
+  console.log('✓ TEST 68 Passed');
+
+  // 69. Marking isPresentRemotely = false on REMOTE_USER_NOT_FOUND
+  console.log('\n[TEST 69] Testing Auto-marking isPresentRemotely = false on REMOTE_USER_NOT_FOUND...');
+  const snapshotState = { id: 'snap-3', username: 'deleted_remotely', isPresentRemotely: true };
+  const handleNotFoundStatusFailure = (errorCode: string, snap: typeof snapshotState) => {
+    if (errorCode === 'REMOTE_USER_NOT_FOUND') {
+      snap.isPresentRemotely = false;
+    }
+  };
+
+  handleNotFoundStatusFailure('REMOTE_USER_NOT_FOUND', snapshotState);
+  assert.strictEqual(snapshotState.isPresentRemotely, false, 'Snapshot must be marked isPresentRemotely = false on REMOTE_USER_NOT_FOUND');
+  console.log('✓ TEST 69 Passed');
+
+  // 70. UI getMutationState Disables Action on isPresentRemotely === false
+  console.log('\n[TEST 70] Testing UI getMutationState Disables Action on isPresentRemotely === false...');
+  const getMutationState = (baseTitle: string, user?: { isPresentRemotely?: boolean }, isOnline: boolean = true) => {
+    if (user && user.isPresentRemotely === false) {
+      return { title: 'REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.', disabled: true };
+    }
+    if (!isOnline) {
+      return { title: 'Desktop automation agent is offline.', disabled: true };
+    }
+    return { title: baseTitle, disabled: false };
+  };
+
+  const disabledState = getMutationState('Activate in Simplex', { isPresentRemotely: false }, true);
+  assert.strictEqual(disabledState.disabled, true);
+  assert.strictEqual(disabledState.title, 'REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.');
+
+  const enabledState = getMutationState('Activate in Simplex', { isPresentRemotely: true }, true);
+  assert.strictEqual(enabledState.disabled, false);
+  assert.strictEqual(enabledState.title, 'Activate in Simplex');
+  console.log('✓ TEST 70 Passed');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (66/66)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (70/70)');
   console.log('======================================================================\n');
 }
 

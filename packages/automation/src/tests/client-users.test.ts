@@ -1216,8 +1216,113 @@ async function runClientUsersTests() {
     assert.strictEqual(liveCreateUserRes.temporaryPassword, 'FixedDefaultPassword');
     console.log('✓ TEST 63 Passed');
 
+    // 64. Exact Remote-User Resolution: Name column vs User Name column isolation
+    console.log('\n[TEST 64] Testing Exact Remote-User Resolution (Name column vs User Name column)...');
+    await page.goto(`${BASE_URL}/MasterV9.4/users`);
+    const abdulLookup = await UserManagementExecutor.findExactUserRow(page, 'abdul.p', `${BASE_URL}/MasterV9.4/users`);
+    assert.strictEqual(abdulLookup.success, true, 'Target user abdul.p must be resolved in Name column');
+    assert.strictEqual(abdulLookup.usernameColIdx, 2, 'Username column index must be 2 (Name column)');
+    assert.strictEqual(abdulLookup.fullNameColIdx, 1, 'Full name column index must be 1 (User Name column)');
+    assert.strictEqual(abdulLookup.diagnostics?.matchCount, 1);
+
+    // Ensure searching for full name "Abdul Qadeer Pathan" does NOT match the username column
+    const fullNameLookup = await UserManagementExecutor.findExactUserRow(page, 'Abdul Qadeer Pathan', `${BASE_URL}/MasterV9.4/users`);
+    assert.strictEqual(fullNameLookup.success, false, 'Searching by Full Name in username lookup must fail');
+    assert.strictEqual(fullNameLookup.errorCode, 'REMOTE_USER_NOT_FOUND');
+    console.log('✓ TEST 64 Passed');
+
+    // 65. Remote-User Priority Resolution (Priority 1: remoteUserId, Priority 2: Name cell, Priority 3: Action href)
+    console.log('\n[TEST 65] Testing Remote-User Priority Resolution...');
+    await page.setContent(`
+      <html><body>
+        <table>
+          <thead>
+            <tr><th>S.NO</th><th>User Name</th><th>Name</th><th>Mobile No</th><th>Status</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            <tr data-id="user_id_101">
+              <td>1</td><td>First Last</td><td>custom_user_1</td><td>0500000001</td>
+              <td><a class="status-toggle" title="Active">✔</a></td>
+              <td><a href="/editUser?userId=user_id_101">Edit</a></td>
+            </tr>
+            <tr data-id="user_id_102">
+              <td>2</td><td>Another Person</td><td>custom_user_2</td><td>0500000002</td>
+              <td><a class="status-toggle" title="Active">✔</a></td>
+              <td><a href="/toggleStatus?username=custom_user_2">Toggle</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </body></html>
+    `);
+
+    // Priority 1: Match by remoteUserId
+    const p1Lookup = await UserManagementExecutor.findExactUserRow(page, 'any_unmatched_name', `${BASE_URL}/custom`, {
+      remoteUserId: 'user_id_101',
+    });
+    assert.strictEqual(p1Lookup.success, true, 'Priority 1 remoteUserId match must succeed');
+    assert.strictEqual(p1Lookup.rowIndex, 0);
+
+    // Priority 2: Match by exact normalized username in Name column
+    const p2Lookup = await UserManagementExecutor.findExactUserRow(page, 'CUSTOM_USER_2', `${BASE_URL}/custom`);
+    assert.strictEqual(p2Lookup.success, true, 'Priority 2 normalized username match must succeed');
+    assert.strictEqual(p2Lookup.rowIndex, 1);
+    console.log('✓ TEST 65 Passed');
+
+    // 66. Ambiguity Guard: Multiple Matching Rows Yield AMBIGUOUS_REMOTE_USER
+    console.log('\n[TEST 66] Testing Ambiguity Guard (AMBIGUOUS_REMOTE_USER)...');
+    await page.setContent(`
+      <html><body>
+        <table>
+          <thead>
+            <tr><th>S.NO</th><th>User Name</th><th>Name</th><th>Mobile No</th><th>Status</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td>User One</td><td>duplicate_login</td><td>0500000001</td><td>✔</td><td>Edit</td></tr>
+            <tr><td>2</td><td>User Two</td><td>duplicate_login</td><td>0500000002</td><td>✔</td><td>Edit</td></tr>
+          </tbody>
+        </table>
+      </body></html>
+    `);
+    const ambiguousLookup = await UserManagementExecutor.findExactUserRow(page, 'duplicate_login', `${BASE_URL}/ambiguous`);
+    assert.strictEqual(ambiguousLookup.success, false);
+    assert.strictEqual(ambiguousLookup.errorCode, 'AMBIGUOUS_REMOTE_USER');
+    assert.strictEqual(ambiguousLookup.diagnostics?.matchCount, 2);
+    console.log('✓ TEST 66 Passed');
+
+    // 67. Safe Non-Secret Diagnostics on Resolution Failure
+    console.log('\n[TEST 67] Testing Safe Non-Secret Diagnostics on Resolution Failure...');
+    await page.goto(`${BASE_URL}/MasterV9.4/users`);
+    const missingLookup = await UserManagementExecutor.findExactUserRow(page, 'sathishtest', `${BASE_URL}/MasterV9.4/users`);
+    assert.strictEqual(missingLookup.success, false);
+    assert.strictEqual(missingLookup.errorCode, 'REMOTE_USER_NOT_FOUND');
+    assert.ok(missingLookup.diagnostics, 'Diagnostics object must be populated');
+    assert.strictEqual(missingLookup.diagnostics?.requestedNormalizedUsername, 'sathishtest');
+    assert.strictEqual(missingLookup.diagnostics?.matchCount, 0);
+    assert.ok((missingLookup.diagnostics?.remoteRowsInspected || 0) >= 3);
+    assert.ok((missingLookup.diagnostics?.pagesVisited || 0) >= 1);
+    console.log('✓ TEST 67 Passed');
+
+    // 68. setUserStatus Full Pipeline with Eventual Consistency & Verification
+    console.log('\n[TEST 68] Testing setUserStatus Full Pipeline with Verification...');
+    const statusMutationRes = await UserManagementExecutor.setUserStatus(page, {
+      usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+      username: 'synthetic.test.user',
+      targetStatus: 'INACTIVE',
+    });
+    assert.strictEqual(statusMutationRes.success, true, 'setUserStatus to INACTIVE must succeed');
+    assert.strictEqual(statusMutationRes.status, 'INACTIVE');
+
+    const revertStatusRes = await UserManagementExecutor.setUserStatus(page, {
+      usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+      username: 'synthetic.test.user',
+      targetStatus: 'ACTIVE',
+    });
+    assert.strictEqual(revertStatusRes.success, true, 'setUserStatus to ACTIVE must succeed');
+    assert.strictEqual(revertStatusRes.status, 'ACTIVE');
+    console.log('✓ TEST 68 Passed');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (63/63)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (68/68)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});

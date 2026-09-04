@@ -271,7 +271,10 @@ export const UsersPage: React.FC = () => {
   const canImport = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_IMPORT);
   const canExport = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_EXPORT);
 
-  const getMutationState = (baseTitle: string): { title: string; disabled: boolean } => {
+  const getMutationState = (baseTitle: string, user?: ClientUser): { title: string; disabled: boolean } => {
+    if (user && user.isPresentRemotely === false) {
+      return { title: 'REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.', disabled: true };
+    }
     if (isProduction) {
       return { title: 'Production mutation requires separate authorization.', disabled: true };
     }
@@ -769,6 +772,12 @@ export const UsersPage: React.FC = () => {
       return;
     }
 
+    // Preflight Check: User must be present remotely
+    if (selectedUser.isPresentRemotely === false) {
+      setStatusMutationError('REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.');
+      return;
+    }
+
     const nextStatus = selectedUser.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     setIsMutatingStatus(true);
     setStatusMutationError(null);
@@ -817,6 +826,8 @@ export const UsersPage: React.FC = () => {
       const rawMsg = err.message || '';
       if (rawCode === 'DESKTOP_AGENT_OFFLINE' || rawMsg.toLowerCase().includes('offline')) {
         setStatusMutationError('Automation Agent is offline. Start/reconnect the agent and retry.');
+      } else if (rawCode === 'REMOTE_USER_NOT_PRESENT' || rawMsg.includes('REMOTE_USER_NOT_PRESENT')) {
+        setStatusMutationError('REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.');
       } else {
         const cleanError = rawMsg.replace(/^Status update failed:\s*/i, '').replace(/^Sync failed:\s*/i, '') || 'Status update failed';
         setStatusMutationError(`Status update failed: ${cleanError}`);
@@ -1584,7 +1595,7 @@ export const UsersPage: React.FC = () => {
 
                           {/* Edit & Update Client */}
                           {canEdit && (() => {
-                            const mutation = getMutationState('Edit & Update Client');
+                            const mutation = getMutationState('Edit & Update Client', u);
                             return (
                               <button
                                 disabled={mutation.disabled}
@@ -1618,7 +1629,7 @@ export const UsersPage: React.FC = () => {
                           {/* Activate / Deactivate in Simplex */}
                           {canChangeStatus && (() => {
                             const actionLabel = isActive ? 'Deactivate in Simplex' : 'Activate in Simplex';
-                            const mutation = getMutationState(actionLabel);
+                            const mutation = getMutationState(actionLabel, u);
                             const isThisUserMutating = isMutatingStatus && selectedUser?.id === u.id;
                             return (
                               <button
@@ -1651,7 +1662,7 @@ export const UsersPage: React.FC = () => {
 
                           {/* Reset Password in Simplex */}
                           {canResetPassword && (() => {
-                            const mutation = getMutationState('Reset Password in Simplex');
+                            const mutation = getMutationState('Reset Password in Simplex', u);
                             return (
                               <button
                                 disabled={mutation.disabled}

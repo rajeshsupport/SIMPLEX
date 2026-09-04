@@ -63,6 +63,7 @@ export interface AgentTaskAssignment {
   loginRoute: string;
   targetRoute?: string;
   addUsersRoute?: string;
+  remoteUserId?: string;
   workflowVersion: any;
   payload: Record<string, any>;
   executionMode?: ExecutionMode;

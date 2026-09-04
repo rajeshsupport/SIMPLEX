@@ -1219,6 +1219,13 @@ export class ClientUsersService implements OnModuleInit {
     const snapshot = await this.snapshotRepo.findOne({ where: { id } });
     if (!snapshot) throw new NotFoundException(`User ${id} not found`);
 
+    if (snapshot.isPresentRemotely === false) {
+      throw new BadRequestException({
+        code: 'REMOTE_USER_NOT_PRESENT',
+        message: 'REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.',
+      });
+    }
+
     const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
     if (!client) throw new NotFoundException('Client not found');
 
@@ -1281,6 +1288,7 @@ export class ClientUsersService implements OnModuleInit {
           credentials,
           idempotencyKey: crypto.randomUUID(),
           payload: {
+            remoteUserId: snapshot.remoteUserId,
             username: snapshot.username,
             status: targetStatus,
             targetStatus,
@@ -1320,6 +1328,10 @@ export class ClientUsersService implements OnModuleInit {
           if (parsed.errorCode) errorCode = parsed.errorCode;
           if (parsed.errorMessage) errorMsg = parsed.errorMessage;
         } catch {}
+        if (errorCode === 'REMOTE_USER_NOT_FOUND') {
+          snapshot.isPresentRemotely = false;
+          await this.snapshotRepo.save(snapshot).catch(() => {});
+        }
         throw new BadRequestException({
           code: errorCode,
           message: errorMsg,
