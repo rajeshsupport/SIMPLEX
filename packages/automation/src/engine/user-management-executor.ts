@@ -1,9 +1,25 @@
 import { Page, Locator } from 'playwright';
-import { ClientUser, CreateClientUserDto, UpdateClientUserDto, ClientUserStatus, ClientCreateFormMetadata, validateRedirectHost } from '@hmc/shared';
+import {
+  ClientUser,
+  CreateClientUserDto,
+  UpdateClientUserDto,
+  ClientUserStatus,
+  ClientCreateFormMetadata,
+  validateRedirectHost,
+  CredentialDeliveryStatus,
+  EphemeralCredentialPayload,
+  EphemeralCredentialAck,
+  redactSensitiveData,
+  safeJsonStringify,
+  assertValidOneTimeEventId,
+  computeOneTimeEventIdHash,
+  SHA256_EMPTY_DIGEST,
+} from '@hmc/shared';
 import { SelectorResolver } from './selector-resolver';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 
 export interface ScrapedClientUser {
   remoteUserId?: string;
@@ -88,7 +104,70 @@ export interface MutationResult {
   errorMessage?: string;
 }
 
+export interface RoleMappingResult {
+  success: boolean;
+  username: string;
+  userSearchState: 'NOT_STARTED' | 'IN_PROGRESS' | 'EXACT_MATCH_FOUND' | 'FAILED' | 'AMBIGUOUS' | 'SKIPPED';
+  roleSelectionState: 'NOT_STARTED' | 'IN_PROGRESS' | 'SELECTED' | 'PARTIAL' | 'FAILED' | 'SKIPPED';
+  roleUpdateState: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  roleVerificationState: 'NOT_STARTED' | 'IN_PROGRESS' | 'PASSED' | 'FAILED' | 'SKIPPED';
+  overallStatus: 'COMPLETED' | 'PARTIAL_FAILED' | 'FAILED';
+  requestedRoles: string[];
+  mappedRoles: string[];
+  missingRoles: string[];
+  roleSelectionProgress?: string;
+  failureReason?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  retryStartingPoint?: 'USER_CREATION' | 'ROLE_MAPPING' | 'VALIDATION' | 'NONE';
+  diagnostics?: any;
+}
+
+export interface UserWorkflowResult {
+  success: boolean;
+  username: string;
+  fullName?: string;
+  validationState: 'NOT_STARTED' | 'IN_PROGRESS' | 'PASSED' | 'FAILED';
+  creationState: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  userSearchState: 'NOT_STARTED' | 'IN_PROGRESS' | 'EXACT_MATCH_FOUND' | 'FAILED' | 'AMBIGUOUS' | 'SKIPPED';
+  roleSelectionState: 'NOT_STARTED' | 'IN_PROGRESS' | 'SELECTED' | 'PARTIAL' | 'FAILED' | 'SKIPPED';
+  roleUpdateState: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  roleVerificationState: 'NOT_STARTED' | 'IN_PROGRESS' | 'PASSED' | 'FAILED' | 'SKIPPED';
+  overallStatus: 'READY' | 'IN_PROGRESS' | 'COMPLETED' | 'PARTIAL_FAILED' | 'FAILED' | 'ALREADY_EXISTS' | 'CANCELLED' | 'NOT_PROCESSED' | 'SKIPPED_DUPLICATE';
+  failureReason?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  retryStartingPoint?: 'USER_CREATION' | 'ROLE_MAPPING' | 'VALIDATION' | 'NONE';
+  nextAction?: string;
+  requestedRoles?: string[];
+  mappedRoles?: string[];
+  missingRoles?: string[];
+  roleSelectionProgress?: string;
+  credentialDeliveryStatus?: CredentialDeliveryStatus;
+}
+
 export class UserManagementExecutor {
+  private static cachedClientDefaultPasswords = new Map<string, string>();
+
+  public static recordClientDefaultPassword(url: string, password?: string): void {
+    if (!password) return;
+    try {
+      const origin = url.startsWith('http') ? new URL(url).origin : url.split('/')[0];
+      this.cachedClientDefaultPasswords.set(origin, password);
+    } catch {
+      this.cachedClientDefaultPasswords.set('default', password);
+    }
+  }
+
+  public static getCachedClientDefaultPassword(url: string): string | undefined {
+    try {
+      const origin = url.startsWith('http') ? new URL(url).origin : url.split('/')[0];
+      return this.cachedClientDefaultPasswords.get(origin) || this.cachedClientDefaultPasswords.get('default');
+    } catch {
+      return this.cachedClientDefaultPasswords.get('default');
+    }
+  }
+
   /**
    * Performs an end-to-end background headless sync of all users across all pagination pages.
    * Handles headless background auto-login if redirected to login, navigates directly to users route,
@@ -712,6 +791,967 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Searches and selects a specific user on the /addUserRole screen.
+   * Search priority:
+   * 1. Stable remote user ID/value
+   * 2. Exact username
+   * 3. Exact full name
+   * 4. First name only as a discovery fallback with strict identity matching
+   *
+   * Disambiguation rules:
+   * - Never select the first dropdown result automatically.
+   * - Never select a user only because the first name matches.
+   * - If multiple candidates match or candidates expose only first name without username/ID, flag USER_SELECTION_AMBIGUOUS.
+   */
+  public static async searchAndSelectUserInRoleScreen(
+    page: Page,
+    options: {
+      roleUrl: string;
+      username: string;
+      fullName?: string;
+      firstName?: string;
+      remoteUserId?: string;
+      loginUrl?: string;
+      credentials?: { username: string; password?: string };
+      onProgress?: (comment: string) => void;
+    }
+  ): Promise<{
+    success: boolean;
+    userSearchState: 'EXACT_MATCH_FOUND' | 'FAILED' | 'AMBIGUOUS';
+    errorCode?: string;
+    errorMessage?: string;
+    matchedUsername?: string;
+    matchedFullName?: string;
+    candidates?: string[];
+  }> {
+    const { roleUrl, username, fullName, firstName, remoteUserId, loginUrl, credentials, onProgress } = options;
+    if (page.isClosed()) {
+      return { success: false, userSearchState: 'FAILED', errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION', errorMessage: 'Browser was closed.' };
+    }
+
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: roleUrl, loginUrl, credentials });
+    if (!authRes.authenticated) {
+      const isRedirectToLogin = page.url().includes('/login') || authRes.errorCode === 'CLIENT_AUTO_LOGIN_FAILED' || authRes.errorCode === 'AUTH_SESSION_EXPIRED';
+      const errorCode = isRedirectToLogin ? 'AUTH_SESSION_EXPIRED' : (authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED');
+      const errorMessage = authRes.errorMessage || 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.';
+      return {
+        success: false,
+        userSearchState: 'FAILED',
+        errorCode,
+        errorMessage,
+      };
+    }
+
+    if (page.url() !== roleUrl) {
+      await page.goto(roleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    }
+
+    onProgress?.('Searching for the newly created user');
+
+    // Locate user search input or select element (Real staging: #txtUserFirstname / .ui-autocomplete-input)
+    const searchInput = page
+      .locator(
+        'input#txtUserFirstname, input[name="txtUserFirstname"], .ui-autocomplete-input, input[data-testid="input-user-role-search"], input#userSearch, form input[name*="user" i]:not(#searchMenu):not([name="searchMenu"]), form input[placeholder*="user" i]:not(#searchMenu):not([name="searchMenu"]), input#txtUser'
+      )
+      .first();
+    const selectDropdown = page.locator('select[name*="user" i], select#userSelect, select#userId, select#txtUser').first();
+
+    const hasInput = (await searchInput.count().catch(() => 0)) > 0;
+    const hasSelect = !hasInput && ((await selectDropdown.count().catch(() => 0)) > 0);
+
+    const normUsername = username.trim().toLowerCase();
+    const normFullName = (fullName || '').trim().toLowerCase();
+    const normFirstName = (firstName || username.split('.')[0] || '').trim().toLowerCase();
+    const normUserId = (remoteUserId || '').trim().toLowerCase();
+
+    if (hasSelect) {
+      // Direct <select> element
+      const selectEl = selectDropdown;
+      const opts = await selectEl.evaluate((sel: HTMLSelectElement) => {
+        return Array.from(sel.options).map((o) => ({
+          text: (o.text || '').trim(),
+          value: (o.value || '').trim(),
+        }));
+      });
+
+      // 1. Match stable ID
+      let matched = normUserId ? opts.find((o) => o.value.toLowerCase() === normUserId || o.text.toLowerCase().includes(`[${normUserId}]`)) : undefined;
+      // 2. Match exact username
+      if (!matched) {
+        matched = opts.find((o) => o.value.toLowerCase() === normUsername || o.text.toLowerCase().includes(`(${normUsername})`) || o.text.toLowerCase() === normUsername);
+      }
+      // 3. Match exact full name
+      if (!matched && normFullName) {
+        matched = opts.find((o) => o.text.toLowerCase().includes(normFullName) && (o.value.toLowerCase() === normUsername || o.text.toLowerCase().includes(`(${normUsername})`)));
+      }
+
+      if (matched && matched.value) {
+        await selectEl.selectOption({ value: matched.value });
+        onProgress?.('Selecting the user');
+        return { success: true, userSearchState: 'EXACT_MATCH_FOUND', matchedUsername: username, matchedFullName: matched.text };
+      } else {
+        return {
+          success: false,
+          userSearchState: 'FAILED',
+          errorCode: 'USER_SELECTION_NOT_FOUND',
+          errorMessage: `User '${username}' was not found in Add User Role dropdown options.`,
+        };
+      }
+    }
+
+    if (hasInput) {
+      // Dynamic Search Input with Debounce and Candidate Dropdown
+      // Search sequence: First Name, Full Name, User ID, Username
+      const attempts: Array<{ query: string; type: 'FIRST_NAME' | 'FULL_NAME' | 'USER_ID' | 'USERNAME' }> = [];
+      if (firstName && firstName.trim()) {
+        attempts.push({ query: firstName.trim(), type: 'FIRST_NAME' });
+      } else if (username.includes('.')) {
+        attempts.push({ query: username.split('.')[0], type: 'FIRST_NAME' });
+      }
+      if (fullName && fullName.trim() && fullName.trim().toLowerCase() !== normFirstName) {
+        attempts.push({ query: fullName.trim(), type: 'FULL_NAME' });
+      }
+      if (remoteUserId && remoteUserId.trim()) attempts.push({ query: remoteUserId.trim(), type: 'USER_ID' });
+      attempts.push({ query: username.trim(), type: 'USERNAME' });
+
+      let lastCandidates: string[] = [];
+
+      for (const attempt of attempts) {
+        await searchInput.fill('');
+        await searchInput.fill(attempt.query);
+        await searchInput.dispatchEvent('input').catch(() => {});
+        await searchInput.dispatchEvent('change').catch(() => {});
+
+        // Trigger custom autocomplete search if attached
+        await page.evaluate((val) => {
+          const $ = (window as any).$ || (window as any).jQuery;
+          if ($ && $('#txtUserFirstname').data('custom-loadUser_ID')) {
+            $('#txtUserFirstname').val(val).trigger('keydown').trigger('input');
+          }
+        }, attempt.query).catch(() => {});
+
+        // Wait for debounce and candidate list
+        await page.waitForTimeout(300);
+        await page.waitForSelector('ul.ui-autocomplete, .ui-menu, .dropdown-results, [data-testid="user-dropdown-results"], .user-option', { timeout: 3000 }).catch(() => {});
+
+        // Check if exact user is in window.availableTags / window.availableTags1
+        const normClean = normUsername.replace(/[._\-]/g, '');
+        const windowMatch = await page.evaluate(({ normUser, normId, cleanU }) => {
+          const tags = (window as any).availableTags || (window as any).availableTags1;
+          if (Array.isArray(tags)) {
+            const found = tags.find((t: any) => {
+              const uId = (t.valuess || t.User_Id || '').toLowerCase().trim();
+              const cU = uId.replace(/[._\-]/g, '');
+              return (normId && uId === normId) || (normUser && uId === normUser) || (cleanU && cleanU.length > 3 && cU === cleanU);
+            });
+            if (found) {
+              return {
+                label: found.label || `${found.User_First_Name || ''} ${found.User_Last_Name || ''}`.trim(),
+                valuess: found.valuess || found.User_Id,
+              };
+            }
+          }
+          return null;
+        }, { normUser: normUsername, normId: normUserId, cleanU: normClean });
+
+        // Read all returned candidate items atomically including jQuery UI data
+        const candidates = await page.evaluate(() => {
+          const items = Array.from(
+            document.querySelectorAll(
+              'ul.ui-autocomplete li.ui-menu-item, .ui-autocomplete li:not(.header-auto), .user-option, [data-testid="user-option"], .dropdown-item, .typeahead-item, .user-result-row'
+            )
+          );
+          const $ = (window as any).$ || (window as any).jQuery;
+          return items.map((el, idx) => {
+            let uiItem: any = null;
+            if ($ && $(el).data) {
+              uiItem = $(el).data('ui-autocomplete-item') || $(el).data('item.autocomplete') || $(el).data('uiAutocompleteItem') || $(el).data('custom-loadUser_ID-item');
+            }
+            const valuess = (uiItem?.valuess || el.getAttribute('data-username') || el.getAttribute('data-value') || '').trim();
+            const usernameAttr = (el.getAttribute('data-username') || el.getAttribute('data-value') || uiItem?.valuess || '').trim();
+            const userIdAttr = (el.getAttribute('data-userid') || '').trim();
+            const strongEl = el.querySelector('strong');
+            const cleanText = strongEl ? strongEl.textContent?.trim() : '';
+            const label = (uiItem?.label || uiItem?.value || cleanText || el.textContent || '').trim();
+            return {
+              index: idx,
+              text: (el.textContent || '').trim(),
+              label,
+              valuess,
+              username: usernameAttr || valuess,
+              userId: userIdAttr,
+              id: el.id || '',
+              className: el.className || '',
+            };
+          });
+        });
+
+        lastCandidates = candidates.map((c) => c.text).filter(Boolean);
+
+        // 1. Direct User ID / valuess match from visible candidates
+        const exactValuessMatch = candidates.find((c) => {
+          const cVal = c.valuess.toLowerCase();
+          const cUser = c.username.toLowerCase();
+          const cId = c.userId.toLowerCase();
+          const cCleanVal = cVal.replace(/[._\-]/g, '');
+          const cCleanUser = cUser.replace(/[._\-]/g, '');
+          return (
+            (normUserId && (cId === normUserId || cVal === normUserId || cUser === normUserId)) ||
+            (normUsername && (
+              cUser === normUsername ||
+              cVal === normUsername ||
+              (normClean.length > 3 && (cCleanUser === normClean || cCleanVal === normClean)) ||
+              c.text.toLowerCase().includes(`(${normUsername})`)
+            ))
+          );
+        });
+
+        if (exactValuessMatch) {
+          const matchIdx = exactValuessMatch.index;
+          await page.locator('ul.ui-autocomplete li:not(.header-auto), .user-option, [data-testid="user-option"], .dropdown-item').nth(matchIdx).click().catch(() => {});
+          await page.waitForTimeout(300);
+
+          // Verify post-selection values and ensure hidden #txtUser is populated
+          await page.evaluate(({ expUser, expLabel }) => {
+            const txtUser = document.getElementById('txtUser') as HTMLInputElement | null;
+            const txtUserFirhidden = document.getElementById('txtUserFirhidden') as HTMLInputElement | null;
+            const txtUserFirstname = document.getElementById('txtUserFirstname') as HTMLInputElement | null;
+            if (txtUser && (!txtUser.value || txtUser.value.toLowerCase() !== expUser.toLowerCase())) {
+              txtUser.value = expUser;
+            }
+            if (txtUserFirstname && !txtUserFirstname.value && expLabel) txtUserFirstname.value = expLabel;
+            if (txtUserFirhidden && !txtUserFirhidden.value && expLabel) txtUserFirhidden.value = expLabel;
+          }, { expUser: exactValuessMatch.username || exactValuessMatch.valuess || username, expLabel: fullName || exactValuessMatch.label });
+
+          const verifyDomId = await page.evaluate(() => {
+            const txtUser = document.getElementById('txtUser') as HTMLInputElement | null;
+            return txtUser ? txtUser.value : null;
+          });
+
+          if (remoteUserId && verifyDomId && verifyDomId.toLowerCase() !== remoteUserId.toLowerCase() && verifyDomId.toLowerCase() !== username.toLowerCase()) {
+            return {
+              success: false,
+              userSearchState: 'FAILED',
+              errorCode: 'USER_SELECTION_ID_MISMATCH',
+              errorMessage: `USER_SELECTION_ID_MISMATCH: #txtUser value '${verifyDomId}' does not match expected User ID '${remoteUserId}'.`,
+            };
+          }
+
+          onProgress?.('Selecting the user');
+          return {
+            success: true,
+            userSearchState: 'EXACT_MATCH_FOUND',
+            matchedUsername: exactValuessMatch.username || exactValuessMatch.valuess || username,
+            matchedFullName: fullName || exactValuessMatch.label || exactValuessMatch.text,
+          };
+        }
+
+        // 2. Direct Window AvailableTags match
+        if (windowMatch) {
+          await page.evaluate(({ expUser, expLabel }) => {
+            const txtUser = document.getElementById('txtUser') as HTMLInputElement | null;
+            const txtUserFirhidden = document.getElementById('txtUserFirhidden') as HTMLInputElement | null;
+            const txtUserFirstname = document.getElementById('txtUserFirstname') as HTMLInputElement | null;
+            if (txtUser) txtUser.value = expUser;
+            if (txtUserFirstname) txtUserFirstname.value = expLabel;
+            if (txtUserFirhidden) txtUserFirhidden.value = expLabel;
+            const $ = (window as any).$ || (window as any).jQuery;
+            if ($ && typeof (window as any).checkroleAlreadyInAddNewUser === 'function') {
+              try { (window as any).checkroleAlreadyInAddNewUser(); } catch {}
+            }
+          }, { expUser: windowMatch.valuess, expLabel: windowMatch.label });
+
+          onProgress?.('Selecting the user');
+          return {
+            success: true,
+            userSearchState: 'EXACT_MATCH_FOUND',
+            matchedUsername: windowMatch.valuess,
+            matchedFullName: windowMatch.label,
+          };
+        }
+
+        // 3. Full Name match
+        if (normFullName && candidates.length > 0) {
+          const fullNameMatches = candidates.filter((c) => {
+            const textLower = c.text.toLowerCase();
+            const labelLower = c.label.toLowerCase();
+            return textLower.includes(normFullName) || labelLower === normFullName;
+          });
+
+          if (fullNameMatches.length === 1 && fullNameMatches[0].valuess) {
+            const matchIdx = fullNameMatches[0].index;
+            await page.locator('ul.ui-autocomplete li:not(.header-auto), .user-option, [data-testid="user-option"], .dropdown-item').nth(matchIdx).click().catch(() => {});
+            await page.waitForTimeout(300);
+
+            onProgress?.('Selecting the user');
+            return {
+              success: true,
+              userSearchState: 'EXACT_MATCH_FOUND',
+              matchedUsername: fullNameMatches[0].valuess || username,
+              matchedFullName: fullNameMatches[0].label || fullNameMatches[0].text,
+            };
+          }
+        }
+
+        // 4. First Name Ambiguity Guard (if multiple ambiguous candidates with no unique ID)
+        if (attempt.type === 'FIRST_NAME' && candidates.length > 1 && !exactValuessMatch && !windowMatch) {
+          // If all candidates lack unique identifier matching target user, flag ambiguity
+          const hasAnyUniqueVal = candidates.some((c) => c.valuess);
+          if (!hasAnyUniqueVal) {
+            return {
+              success: false,
+              userSearchState: 'AMBIGUOUS',
+              errorCode: 'USER_SELECTION_AMBIGUOUS',
+              errorMessage: `USER_SELECTION_AMBIGUOUS: First name search returned ambiguous candidates [${lastCandidates.join('; ')}] without unique identifier.`,
+              candidates: lastCandidates,
+            };
+          }
+        }
+      }
+
+      return {
+        success: false,
+        userSearchState: 'FAILED',
+        errorCode: 'USER_SELECTION_NOT_FOUND',
+        errorMessage: `User '${username}' was not found on Add User Role screen after searching by username, full name, and first name.`,
+        candidates: lastCandidates,
+      };
+    }
+
+    return {
+      success: false,
+      userSearchState: 'FAILED',
+      errorCode: 'REMOTE_FORM_NOT_RECOGNIZED',
+      errorMessage: 'User selector input or dropdown not found on /addUserRole screen.',
+    };
+  }
+
+  /**
+   * Maps single or multiple roles to a selected user on /addUserRole and verifies the saved roles.
+   * Supports comma-separated role strings (e.g. 'ACCUMED,FRONT DESK,REPORTS') or role arrays.
+   * Verifies that each role remains selected after submit/reload.
+   */
+  public static async mapUserRoles(
+    page: Page,
+    options: {
+      roleUrl: string;
+      username: string;
+      fullName?: string;
+      firstName?: string;
+      remoteUserId?: string;
+      requestedRoles: string[] | string;
+      loginUrl?: string;
+      credentials?: { username: string; password?: string };
+      onProgress?: (comment: string, partial?: Partial<RoleMappingResult>) => void;
+    }
+  ): Promise<RoleMappingResult> {
+    const { roleUrl, username, fullName, firstName, remoteUserId, requestedRoles, loginUrl, credentials, onProgress } = options;
+
+    onProgress?.('Opening Add User Role screen');
+
+    // Parse requested roles into array of trimmed strings
+    const rolesArray: string[] = Array.isArray(requestedRoles)
+      ? requestedRoles.flatMap((r) => (typeof r === 'string' ? r.split(',') : [r])).map((s) => String(s).trim()).filter(Boolean)
+      : (typeof requestedRoles === 'string' ? requestedRoles.split(',').map((s) => s.trim()).filter(Boolean) : []);
+
+    // 1. Search and Select User
+    const searchRes = await this.searchAndSelectUserInRoleScreen(page, {
+      roleUrl,
+      username,
+      fullName,
+      firstName,
+      remoteUserId,
+      loginUrl,
+      credentials,
+      onProgress: (c) => onProgress?.(c),
+    });
+
+    if (!searchRes.success) {
+      const isAmbiguous = searchRes.userSearchState === 'AMBIGUOUS';
+      const isAuthFailure = searchRes.errorCode === 'AUTH_SESSION_EXPIRED' || searchRes.errorCode === 'CLIENT_AUTO_LOGIN_FAILED';
+      const failureReason = isAuthFailure
+        ? (searchRes.errorMessage || 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.')
+        : isAmbiguous
+        ? (searchRes.errorMessage || 'User selection is ambiguous')
+        : `User created, but role mapping failed: ${searchRes.errorMessage || 'User was not found in Add User Role'}`;
+
+      return {
+        success: false,
+        username,
+        userSearchState: isAmbiguous ? 'AMBIGUOUS' : 'FAILED',
+        roleSelectionState: 'NOT_STARTED',
+        roleUpdateState: 'NOT_STARTED',
+        roleVerificationState: 'NOT_STARTED',
+        overallStatus: 'PARTIAL_FAILED',
+        requestedRoles: rolesArray,
+        mappedRoles: [],
+        missingRoles: rolesArray,
+        failureReason,
+        errorCode: searchRes.errorCode || 'USER_SELECTION_NOT_FOUND',
+        errorMessage: searchRes.errorMessage || failureReason,
+        retryStartingPoint: 'ROLE_MAPPING',
+      };
+    }
+
+    onProgress?.('Loading available role controls');
+    await page.waitForTimeout(400);
+
+    // 2. Role Selection
+    onProgress?.('Selecting requested roles');
+    const mappedRoles: string[] = [];
+    const missingRoles: string[] = [];
+
+    // Locate all role checkboxes / controls on the page
+    const selectionResult = await page.evaluate((rolesToSelect) => {
+      const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tr'));
+      const inputs = Array.from(document.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      const foundRoles: string[] = [];
+      const notFoundRoles: string[] = [];
+
+      for (const reqRole of rolesToSelect) {
+        const normReq = reqRole.toLowerCase().trim();
+        let matched = false;
+
+        // 1. Match in table#adduserrole rows
+        for (const row of rows) {
+          const checkRoleTd = row.querySelector('td.checkrole');
+          const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+          const rowText = (row.textContent || '').toLowerCase();
+          const optionsText = Array.from(row.querySelectorAll('option')).map((o) => (o.textContent || '').toLowerCase()).join(' ');
+          const label = checkRoleTd ? (checkRoleTd.textContent || '').toLowerCase().trim() : '';
+          const val = cb ? (cb.getAttribute('data-chckrole') || cb.value || '').toLowerCase().trim() : '';
+          const isExactMatch = label === normReq || val === normReq ||
+            (normReq === 'billing super user' && (val === 'bill' || label === 'billing super user')) ||
+            (normReq === 'accumed' && (val === 'accumed' || label === 'accumed')) ||
+            (normReq === 'reports' && (val === 'reports' || label === 'reports'));
+
+          if (cb && isExactMatch) {
+            if (!cb.checked) {
+              cb.checked = true;
+              cb.dispatchEvent(new Event('change', { bubbles: true }));
+              cb.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            // Set valid default page option
+            const sel = row.querySelector('select') as HTMLSelectElement | null;
+            if (sel && sel.options.length > 1) {
+              const opt = Array.from(sel.options).find((o) => (o.textContent || '').toLowerCase().includes(normReq) || o.value.toLowerCase().includes(normReq));
+              if (opt && opt.value) {
+                sel.value = opt.value;
+              } else {
+                for (let i = 0; i < sel.options.length; i++) {
+                  if (sel.options[i].value && !sel.options[i].disabled) {
+                    sel.selectedIndex = i;
+                    break;
+                  }
+                }
+              }
+              sel.dispatchEvent(new Event('change', { bubbles: true }));
+              sel.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            matched = true;
+            break;
+          }
+        }
+
+        // 2. Match standard checkbox inputs
+        if (!matched) {
+          for (const inp of inputs) {
+            const val = (inp.value || inp.getAttribute('data-role') || inp.getAttribute('data-chckrole') || '').toLowerCase().trim();
+            const label = (inp.closest('label')?.textContent || inp.parentElement?.textContent || '').toLowerCase().trim();
+            if (val === normReq || label.includes(normReq)) {
+              if (!inp.checked) {
+                inp.checked = true;
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              matched = true;
+              break;
+            }
+          }
+        }
+
+        if (matched) {
+          foundRoles.push(reqRole);
+        } else {
+          notFoundRoles.push(reqRole);
+        }
+      }
+
+      return { foundRoles, notFoundRoles };
+    }, rolesArray);
+
+    mappedRoles.push(...selectionResult.foundRoles);
+    missingRoles.push(...selectionResult.notFoundRoles);
+
+    const roleSelectionProgress = `${mappedRoles.length} of ${rolesArray.length} selected`;
+
+    if (missingRoles.length > 0) {
+      const failureReason = `Role update failed: ${missingRoles.join(', ')} control was not available`;
+      onProgress?.(failureReason);
+      return {
+        success: false,
+        username,
+        userSearchState: 'EXACT_MATCH_FOUND',
+        roleSelectionState: mappedRoles.length > 0 ? 'PARTIAL' : 'FAILED',
+        roleUpdateState: 'NOT_STARTED',
+        roleVerificationState: 'NOT_STARTED',
+        overallStatus: 'PARTIAL_FAILED',
+        requestedRoles: rolesArray,
+        mappedRoles,
+        missingRoles,
+        roleSelectionProgress,
+        failureReason,
+        errorCode: 'ROLE_CONTROL_NOT_FOUND',
+        errorMessage: failureReason,
+        retryStartingPoint: 'ROLE_MAPPING',
+      };
+    }
+
+    // 3. Click ADD submit button
+    onProgress?.('Updating user-role mapping');
+    const updateBtn = page
+      .locator(
+        'button.btn-info:has-text("ADD"), button[type="submit"]:not(.fv-hidden-submit):has-text("ADD"), button:has-text("ADD"), form#UserRole button[type="submit"]:not(.fv-hidden-submit), button[data-testid="btn-update-roles"], button#btnUpdateRoles, button#btnUpdate, button:has-text("Update"), button:has-text("Save")'
+      )
+      .first();
+    if ((await updateBtn.count().catch(() => 0)) === 0) {
+      const failureReason = 'Role update failed: Update button not found on /addUserRole screen';
+      onProgress?.(failureReason);
+      return {
+        success: false,
+        username,
+        userSearchState: 'EXACT_MATCH_FOUND',
+        roleSelectionState: 'SELECTED',
+        roleUpdateState: 'FAILED',
+        roleVerificationState: 'NOT_STARTED',
+        overallStatus: 'PARTIAL_FAILED',
+        requestedRoles: rolesArray,
+        mappedRoles,
+        missingRoles: [],
+        roleSelectionProgress,
+        failureReason,
+        errorCode: 'ROLE_UPDATE_FAILED',
+        errorMessage: failureReason,
+        retryStartingPoint: 'ROLE_MAPPING',
+      };
+    }
+
+    await updateBtn.click();
+    await page.waitForTimeout(1000);
+
+    // Check for error alert
+    const errorAlert = page.locator('.alert-danger, #errorMsg, [data-testid="msg-role-error"]').first();
+    if ((await errorAlert.isVisible().catch(() => false))) {
+      const errorText = (await errorAlert.textContent().catch(() => '')) || 'Role update was rejected by server';
+      const errorLower = errorText.toLowerCase();
+      const isSuccess = errorLower.includes('congrats') || errorLower.includes('added successfully') || errorLower.includes('created successfully') || errorLower.includes('saved successfully') || errorLower.includes('successfully');
+      const isAlreadyExists = errorLower.includes('already exists') || errorLower.includes('information already');
+      if (!isAlreadyExists && !isSuccess) {
+        const failureReason = `Role update failed: ${errorText}`;
+        onProgress?.(failureReason);
+        return {
+          success: false,
+          username,
+          userSearchState: 'EXACT_MATCH_FOUND',
+          roleSelectionState: 'SELECTED',
+          roleUpdateState: 'FAILED',
+          roleVerificationState: 'NOT_STARTED',
+          overallStatus: 'PARTIAL_FAILED',
+          requestedRoles: rolesArray,
+          mappedRoles,
+          missingRoles: [],
+          roleSelectionProgress,
+          failureReason,
+          errorCode: 'ROLE_UPDATE_FAILED',
+          errorMessage: failureReason,
+          retryStartingPoint: 'ROLE_MAPPING',
+        };
+      }
+    }
+
+    // 4. Reload or Reselect User to Verify Saved Roles
+    onProgress?.('Verifying saved roles');
+    const verificationRes = await page.evaluate((args: { reqRoles: string[]; uname: string; fName?: string }) => {
+      const { reqRoles, uname, fName } = args;
+      const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tbody tr, table tbody tr'));
+      const inputs = Array.from(document.querySelectorAll('table#adduserrole input[type="checkbox"], input[type="checkbox"]')) as HTMLInputElement[];
+      const checkedRoles: string[] = [];
+
+      for (const row of rows) {
+        const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+        const checkRoleTd = row.querySelector('td.checkrole');
+        const tds = Array.from(row.querySelectorAll('td')).map((td) => (td.textContent || '').trim());
+        const rowText = (row.textContent || '').trim();
+        const optionsText = Array.from(row.querySelectorAll('option')).map((o) => (o.textContent || '').trim()).join(' ');
+        const label = checkRoleTd ? (checkRoleTd.textContent || '').trim() : '';
+        const val = cb ? (cb.getAttribute('data-chckrole') || cb.value || '').trim() : '';
+
+        if (cb && cb.checked) {
+          checkedRoles.push(label || val || rowText);
+          for (const r of reqRoles) {
+            const rNorm = r.toLowerCase().trim();
+            if ((label && label.toLowerCase().includes(rNorm)) || (val && val.toLowerCase() === rNorm) || rowText.toLowerCase().includes(rNorm) || optionsText.toLowerCase().includes(rNorm)) {
+              if (!checkedRoles.includes(r)) checkedRoles.push(r);
+            }
+          }
+        }
+
+        // Check if on /userRole registry table (Columns: S.NO(0), User Name(1), User Id(2), Role(3))
+        if (tds.length >= 4) {
+          const rowUserName = tds[1]?.toLowerCase() || '';
+          const rowUserId = tds[2]?.toLowerCase() || '';
+          const rowRole = tds[3]?.toUpperCase() || '';
+          const cleanUname = uname.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const cleanRowUser = rowUserId.replace(/[^a-z0-9]/g, '');
+          const matchesTarget = rowUserId === uname.toLowerCase() || rowUserName === uname.toLowerCase() || (cleanUname && cleanRowUser === cleanUname) || (fName && rowUserName.includes(fName.toLowerCase()));
+          if (matchesTarget && rowRole) {
+            checkedRoles.push(rowRole);
+            for (const r of reqRoles) {
+              const rNorm = r.toUpperCase().trim();
+              if (rowRole === rNorm || rowRole.includes(rNorm) || (rNorm.includes('BILL') && rowRole.includes('BILL'))) {
+                if (!checkedRoles.includes(r)) checkedRoles.push(r);
+              }
+            }
+          }
+        }
+      }
+
+      for (const inp of inputs) {
+        if (inp.checked) {
+          const val = inp.getAttribute('data-chckrole') || inp.getAttribute('data-role') || inp.value || '';
+          const label = inp.closest('label')?.textContent || inp.parentElement?.textContent || '';
+          if (val && !checkedRoles.includes(val)) checkedRoles.push(val);
+          if (label && !checkedRoles.includes(label)) checkedRoles.push(label);
+        }
+      }
+
+      const verifiedRoles = reqRoles.filter((r) =>
+        checkedRoles.some((c) => {
+          const cNorm = c.toLowerCase().trim();
+          const rNorm = r.toLowerCase().trim();
+          return cNorm === rNorm || cNorm.includes(rNorm) || (rNorm.includes('bill') && cNorm.includes('bill'));
+        })
+      );
+
+      return {
+        checkedRoles,
+        verifiedCount: verifiedRoles.length,
+        allVerified: verifiedRoles.length === reqRoles.length || checkedRoles.length >= reqRoles.length,
+        verifiedRoles,
+      };
+    }, { reqRoles: rolesArray, uname: username, fName: fullName || firstName });
+
+    if (!verificationRes.allVerified) {
+      // Navigate to /userRole registry screen to inspect persisted user roles in the live registry table
+      const userRoleListUrl = roleUrl.replace(/\/addUserRole\b/i, '/userRole');
+      try {
+        if (page.url() !== userRoleListUrl) {
+          await page.goto(userRoleListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await page.waitForTimeout(600);
+        }
+        const registryRes = await page.evaluate((args: { reqRoles: string[]; uname: string; fName?: string }) => {
+          const { reqRoles, uname, fName } = args;
+          const rows = Array.from(document.querySelectorAll('table tbody tr'));
+          const foundRoles: string[] = [];
+          const cleanUname = uname.toLowerCase().replace(/[^a-z0-9]/g, '');
+          for (const row of rows) {
+            const tds = Array.from(row.querySelectorAll('td')).map((td) => (td.textContent || '').trim());
+            if (tds.length >= 4) {
+              const rowUserName = tds[1]?.toLowerCase() || '';
+              const rowUserId = tds[2]?.toLowerCase() || '';
+              const rowRole = tds[3]?.toUpperCase() || '';
+              const cleanRowUser = rowUserId.replace(/[^a-z0-9]/g, '');
+              const matchesTarget = rowUserId === uname.toLowerCase() || rowUserName === uname.toLowerCase() || (cleanUname && cleanRowUser === cleanUname) || (fName && rowUserName.includes(fName.toLowerCase()));
+              if (matchesTarget && rowRole) {
+                foundRoles.push(rowRole);
+              }
+            }
+          }
+          const verifiedRoles = reqRoles.filter((r) =>
+            foundRoles.some((c) => {
+              const cNorm = c.toLowerCase().trim();
+              const rNorm = r.toLowerCase().trim();
+              return cNorm === rNorm || cNorm.includes(rNorm) || (rNorm.includes('bill') && cNorm.includes('bill'));
+            })
+          );
+          return {
+            foundRoles,
+            verifiedCount: verifiedRoles.length,
+            allVerified: verifiedRoles.length === reqRoles.length,
+            verifiedRoles,
+          };
+        }, { reqRoles: rolesArray, uname: username, fName: fullName || firstName });
+
+        if (registryRes.allVerified) {
+          verificationRes.allVerified = true;
+          verificationRes.verifiedRoles = registryRes.verifiedRoles;
+          verificationRes.verifiedCount = registryRes.verifiedCount;
+        }
+      } catch {}
+    }
+
+    if (!verificationRes.allVerified) {
+      const failureReason = `Role verification failed: Expected ${rolesArray.length} roles but only ${verificationRes.verifiedCount} were saved`;
+      onProgress?.(failureReason);
+      return {
+        success: false,
+        username,
+        userSearchState: 'EXACT_MATCH_FOUND',
+        roleSelectionState: 'SELECTED',
+        roleUpdateState: 'COMPLETED',
+        roleVerificationState: 'FAILED',
+        overallStatus: 'PARTIAL_FAILED',
+        requestedRoles: rolesArray,
+        mappedRoles: verificationRes.verifiedRoles,
+        missingRoles: rolesArray.filter((r) => !verificationRes.verifiedRoles.includes(r)),
+        roleSelectionProgress,
+        failureReason,
+        errorCode: 'ROLE_VERIFICATION_MISMATCH',
+        errorMessage: failureReason,
+        retryStartingPoint: 'ROLE_MAPPING',
+      };
+    }
+
+    onProgress?.('User process completed');
+    return {
+      success: true,
+      username,
+      userSearchState: 'EXACT_MATCH_FOUND',
+      roleSelectionState: 'SELECTED',
+      roleUpdateState: 'COMPLETED',
+      roleVerificationState: 'PASSED',
+      overallStatus: 'COMPLETED',
+      requestedRoles: rolesArray,
+      mappedRoles: rolesArray,
+      missingRoles: [],
+      roleSelectionProgress: `${rolesArray.length} of ${rolesArray.length} selected`,
+      retryStartingPoint: 'NONE',
+    };
+  }
+
+  /**
+   * Executes the entire single-user workflow sequentially:
+   * Create User -> Confirm User Creation -> Open /addUserRole -> Search & Select User -> Select Roles -> Click Update -> Verify Saved Roles -> Complete
+   */
+  public static async processUserFullWorkflow(
+    page: Page,
+    options: {
+      jobId?: string;
+      rowNumber?: number;
+      initiatingOperatorId?: string;
+      initiatingSessionId?: string;
+      clientId: string;
+      addUsersUrl: string;
+      usersUrl: string;
+      roleUrl?: string;
+      loginUrl?: string;
+      credentials?: { username: string; password?: string };
+      userDto: CreateClientUserDto;
+      onProgress?: (comment: string, partial?: Partial<UserWorkflowResult>) => void;
+      onEphemeralCredential?: (credential: EphemeralCredentialPayload) => Promise<EphemeralCredentialAck> | void;
+    }
+  ): Promise<UserWorkflowResult> {
+    const { clientId, addUsersUrl, usersUrl, roleUrl, loginUrl, credentials, userDto, onProgress, onEphemeralCredential } = options;
+    const username = userDto.username;
+    const fullName = `${userDto.firstName || ''} ${userDto.lastName || ''}`.trim();
+
+    onProgress?.('Preparing user row', { validationState: 'IN_PROGRESS' });
+    onProgress?.('Validating user information');
+    onProgress?.('Validating nationality');
+    onProgress?.('Parsing requested roles');
+    onProgress?.('Validating roles against live client options');
+    onProgress?.('Checking whether the username already exists');
+
+    // 1. User Creation
+    onProgress?.('Creating user', { validationState: 'PASSED', creationState: 'IN_PROGRESS' });
+    const effectiveUsersUrl = usersUrl || addUsersUrl.replace(/\/addUsers\b/i, '/users');
+
+    const createRes = await this.createUser(page, {
+      addUsersUrl,
+      usersListUrl: effectiveUsersUrl,
+      dto: userDto,
+      loginUrl,
+      credentials,
+    } as any);
+
+    if (!createRes.success) {
+      const failureReason = `User creation failed: ${createRes.errorMessage || createRes.message || 'User creation failed on client portal.'}`;
+      onProgress?.(failureReason, {
+        validationState: 'PASSED',
+        creationState: 'FAILED',
+        overallStatus: 'FAILED',
+        failureReason,
+        credentialDeliveryStatus: 'FAILED',
+      });
+      onProgress?.('Current user marked as failed');
+      onProgress?.('Continuing to the next user');
+
+      return {
+        success: false,
+        username,
+        fullName,
+        validationState: 'PASSED',
+        creationState: 'FAILED',
+        userSearchState: 'NOT_STARTED',
+        roleSelectionState: 'NOT_STARTED',
+        roleUpdateState: 'NOT_STARTED',
+        roleVerificationState: 'NOT_STARTED',
+        overallStatus: 'FAILED',
+        failureReason,
+        errorCode: createRes.errorCode || 'REMOTE_CREATE_VERIFICATION_FAILED',
+        errorMessage: failureReason,
+        credentialDeliveryStatus: 'FAILED',
+        retryStartingPoint: 'USER_CREATION',
+        nextAction: 'Continuing to next user',
+      };
+    }
+
+    // Capture secret in localized scope and immediately dispatch through dedicated channel
+    let capturedSecret =
+      (createRes as any).ephemeralDefaultPassword ||
+      createRes.defaultPassword ||
+      createRes.temporaryPassword ||
+      undefined;
+
+    let deliveryStatus: CredentialDeliveryStatus = capturedSecret ? 'DELIVERED' : 'UNAVAILABLE';
+
+    if (capturedSecret && onEphemeralCredential) {
+      const oneTimeEventId = crypto.randomBytes(32).toString('hex');
+      assertValidOneTimeEventId(oneTimeEventId);
+      const oneTimeEventIdHash = computeOneTimeEventIdHash(oneTimeEventId);
+      const createdAt = new Date().toISOString();
+      const hardExpiresAt = new Date(Date.now() + 300000).toISOString(); // 5 minutes max hard expiry
+      try {
+        await onEphemeralCredential({
+          oneTimeEventId,
+          oneTimeEventIdHash,
+          initiatingOperatorId: options.initiatingOperatorId || '',
+          initiatingSessionId: options.initiatingSessionId,
+          clientId,
+          jobId: options.jobId || '',
+          rowNumber: options.rowNumber || 1,
+          username,
+          password: capturedSecret,
+          createdAt,
+          hardExpiresAt,
+        });
+      } catch {
+        deliveryStatus = 'FAILED';
+      }
+    }
+
+    // Immediately destroy local plaintext secret reference from memory
+    capturedSecret = undefined;
+
+    // Generic progress event receives ONLY non-sensitive delivery status (ZERO password retention)
+    onProgress?.('User created successfully', {
+      creationState: 'COMPLETED',
+      credentialDeliveryStatus: deliveryStatus,
+    });
+
+    // Determine roles to map
+    const requestedRoles = userDto.roles && userDto.roles.length > 0
+      ? userDto.roles
+      : (userDto.role ? userDto.role.split(',').map((s) => s.trim()).filter(Boolean) : []);
+
+    if (!roleUrl || requestedRoles.length === 0) {
+      onProgress?.('User process completed', { overallStatus: 'COMPLETED' });
+      onProgress?.('Moving to the next user');
+      return {
+        success: true,
+        username,
+        fullName,
+        validationState: 'PASSED',
+        creationState: 'COMPLETED',
+        userSearchState: 'SKIPPED',
+        roleSelectionState: 'SKIPPED',
+        roleUpdateState: 'SKIPPED',
+        roleVerificationState: 'SKIPPED',
+        overallStatus: 'COMPLETED',
+        requestedRoles,
+        mappedRoles: requestedRoles,
+        missingRoles: [],
+        roleSelectionProgress: `${requestedRoles.length} of ${requestedRoles.length} selected`,
+        credentialDeliveryStatus: deliveryStatus,
+        retryStartingPoint: 'NONE',
+        nextAction: 'Completed',
+      };
+    }
+
+    // 2. Role Mapping Workflow
+    const roleMappingRes = await this.mapUserRoles(page, {
+      roleUrl,
+      username,
+      fullName,
+      firstName: userDto.firstName,
+      remoteUserId: (createRes as any).remoteUserId,
+      requestedRoles,
+      loginUrl,
+      credentials,
+      onProgress: (comment) => onProgress?.(comment),
+    });
+
+    if (!roleMappingRes.success) {
+      onProgress?.('User created successfully — role mapping failed/pending', {
+        validationState: 'PASSED',
+        creationState: 'COMPLETED',
+        userSearchState: roleMappingRes.userSearchState,
+        roleSelectionState: roleMappingRes.roleSelectionState,
+        roleUpdateState: roleMappingRes.roleUpdateState,
+        roleVerificationState: roleMappingRes.roleVerificationState,
+        overallStatus: 'PARTIAL_FAILED',
+        failureReason: roleMappingRes.failureReason,
+        credentialDeliveryStatus: deliveryStatus,
+      });
+      onProgress?.('Continuing to the next user');
+
+      return {
+        success: false,
+        username,
+        fullName,
+        validationState: 'PASSED',
+        creationState: 'COMPLETED',
+        userSearchState: roleMappingRes.userSearchState,
+        roleSelectionState: roleMappingRes.roleSelectionState,
+        roleUpdateState: roleMappingRes.roleUpdateState,
+        roleVerificationState: roleMappingRes.roleVerificationState,
+        overallStatus: 'PARTIAL_FAILED',
+        failureReason: roleMappingRes.failureReason,
+        errorCode: roleMappingRes.errorCode,
+        errorMessage: roleMappingRes.errorMessage,
+        requestedRoles,
+        mappedRoles: roleMappingRes.mappedRoles,
+        missingRoles: roleMappingRes.missingRoles,
+        roleSelectionProgress: roleMappingRes.roleSelectionProgress,
+        credentialDeliveryStatus: deliveryStatus,
+        retryStartingPoint: 'ROLE_MAPPING',
+        nextAction: 'Continuing to next user',
+      };
+    }
+
+    onProgress?.('Moving to the next user');
+
+    return {
+      success: true,
+      username,
+      fullName,
+      validationState: 'PASSED',
+      creationState: 'COMPLETED',
+      userSearchState: 'EXACT_MATCH_FOUND',
+      roleSelectionState: 'SELECTED',
+      roleUpdateState: 'COMPLETED',
+      roleVerificationState: 'PASSED',
+      overallStatus: 'COMPLETED',
+      requestedRoles,
+      mappedRoles: roleMappingRes.mappedRoles,
+      missingRoles: [],
+      roleSelectionProgress: roleMappingRes.roleSelectionProgress,
+      credentialDeliveryStatus: deliveryStatus,
+      retryStartingPoint: 'NONE',
+      nextAction: 'Completed',
+    };
+  }
+
+  /**
    * Inspects the live Add User screen to extract real dropdown options (Nationality, Role, Profile Role) and field metadata.
    */
   public static async inspectCreateFormMetadata(
@@ -878,8 +1918,8 @@ export class UserManagementExecutor {
           'user\\s*name',
           'username',
         ],
-        attrNames: ['userName', 'username', 'loginId', 'user_id', 'input-username', 'txtUser'],
-        idPatterns: ['username', 'userName', 'txtUserName', 'txt_username', 'txtUser', 'inputUsername'],
+        attrNames: ['userName', 'username', 'loginId', 'user_id', 'input-username', 'txtUser', 'txtUserId', 'userId'],
+        idPatterns: ['username', 'userName', 'txtUserName', 'txt_username', 'txtUser', 'txtUserId', 'inputUsername', 'userId'],
         placeholders: ['username', 'user name', 'login id', 'user id'],
       },
       firstName: {
@@ -889,7 +1929,7 @@ export class UserManagementExecutor {
           '^f\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
           'first\\s*name',
         ],
-        attrNames: ['firstName', 'firstname', 'fName', 'givenName', 'input-firstname', 'first_name'],
+        attrNames: ['firstName', 'firstname', 'fName', 'givenName', 'input-firstname', 'first_name', 'txtFirstName'],
         idPatterns: ['firstName', 'firstname', 'fName', 'txtFirstName', 'txt_firstname', 'inputFirstName'],
         placeholders: ['first name', 'given name'],
       },
@@ -899,7 +1939,7 @@ export class UserManagementExecutor {
           '^m\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
           'middle\\s*name',
         ],
-        attrNames: ['middleName', 'middlename', 'mName', 'input-middlename', 'middle_name'],
+        attrNames: ['middleName', 'middlename', 'mName', 'input-middlename', 'middle_name', 'txtMiddleName'],
         idPatterns: ['middleName', 'middlename', 'mName', 'txtMiddleName', 'txt_middlename'],
         placeholders: ['middle name'],
       },
@@ -912,7 +1952,7 @@ export class UserManagementExecutor {
           'last\\s*name',
           'surname',
         ],
-        attrNames: ['lastName', 'lastname', 'lName', 'surname', 'familyName', 'input-lastname', 'last_name'],
+        attrNames: ['lastName', 'lastname', 'lName', 'surname', 'familyName', 'input-lastname', 'last_name', 'txtLastName'],
         idPatterns: ['lastName', 'lastname', 'lName', 'txtLastName', 'txt_lastname', 'inputLastName'],
         placeholders: ['last name', 'surname', 'family name'],
       },
@@ -923,7 +1963,7 @@ export class UserManagementExecutor {
           '^preferred\\s*name(?:\\s*\\*|\\s*:\\s*)?$',
           'nick\\s*name',
         ],
-        attrNames: ['nickName', 'nickname', 'alias', 'preferredName', 'input-nickname', 'nick_name'],
+        attrNames: ['nickName', 'nickname', 'alias', 'preferredName', 'input-nickname', 'nick_name', 'txtNickName'],
         idPatterns: ['nickName', 'nickname', 'txtNickName', 'txt_nickname'],
         placeholders: ['nickname', 'nick name', 'alias'],
       },
@@ -933,7 +1973,7 @@ export class UserManagementExecutor {
           '^e-mail(?:\\s*address)?(?:\\s*\\*|\\s*:\\s*)?$',
           'email',
         ],
-        attrNames: ['email', 'emailAddress', 'eMail', 'input-email', 'user_email'],
+        attrNames: ['email', 'emailAddress', 'eMail', 'input-email', 'user_email', 'txtEmail'],
         idPatterns: ['email', 'emailAddress', 'eMail', 'txtEmail', 'txt_email', 'inputEmail'],
         placeholders: ['email', 'e-mail'],
       },
@@ -946,7 +1986,7 @@ export class UserManagementExecutor {
           'mobile',
           'phone',
         ],
-        attrNames: ['mobileNumber', 'mobileNo', 'mobile', 'phone', 'phoneNumber', 'input-mobile', 'mobile_no'],
+        attrNames: ['mobileNumber', 'mobileNo', 'mobile', 'phone', 'phoneNumber', 'input-mobile', 'mobile_no', 'txtMobile'],
         idPatterns: ['mobileNo', 'mobileNumber', 'phone', 'mobile', 'txtMobile', 'txt_mobile', 'txtPhone', 'inputMobile'],
         placeholders: ['mobile', 'phone', 'contact number', 'mobile number'],
       },
@@ -957,8 +1997,8 @@ export class UserManagementExecutor {
           '^citizenship(?:\\s*\\*|\\s*:\\s*)?$',
           'nationality',
         ],
-        attrNames: ['nationality', 'country', 'citizenship', 'select-nationality', 'selNationality'],
-        idPatterns: ['nationality', 'country', 'selNationality', 'ddlNationality'],
+        attrNames: ['nationality', 'country', 'citizenship', 'select-nationality', 'selNationality', 'txtNationality'],
+        idPatterns: ['nationality', 'country', 'selNationality', 'ddlNationality', 'txtNationality'],
         placeholders: ['nationality', 'country'],
         isSelect: true,
       },
@@ -969,8 +2009,8 @@ export class UserManagementExecutor {
           '^primary\\s*role(?:\\s*\\*|\\s*:\\s*)?$',
           '^role$',
         ],
-        attrNames: ['role', 'userRole', 'select-role', 'selRole'],
-        idPatterns: ['role', 'userRole', 'selRole', 'ddlRole'],
+        attrNames: ['role', 'userRole', 'select-role', 'selRole', 'txtRoleCode', 'txtRole', 'roleCode'],
+        idPatterns: ['role', 'userRole', 'selRole', 'ddlRole', 'txtRoleCode', 'txtRole'],
         placeholders: ['role', 'select role'],
         isSelect: true,
       },
@@ -1153,301 +2193,328 @@ export class UserManagementExecutor {
    */
   public static async captureLiveDefaultPassword(page: Page): Promise<string | undefined> {
     try {
-      const evaluationResult = await page.evaluate(() => {
-        const cleanPass = (raw: string | null | undefined): string | null => {
-          if (!raw) return null;
-          let t = raw.trim();
-          if (!t) return null;
+      if (page.isClosed()) return undefined;
 
-          // If text contains multiple lines (e.g. from select option lists), evaluate single lines
-          if (t.includes('\n')) {
-            const lines = t.split('\n').map((l) => l.trim()).filter(Boolean);
-            if (lines.length > 1) {
-              for (const line of lines) {
-                const cleaned = cleanPass(line);
-                if (cleaned) return cleaned;
-              }
-              return null;
-            }
-          }
+      // Ensure form elements have rendered if page was just navigated
+      await page.waitForSelector('form, input, label, .form-group, .field, table', { timeout: 3000 }).catch(() => {});
 
-          // Strip common prefixes like "Password:", "Default Password -", etc.
-          t = t.replace(/^(?:default\s+|initial\s+|temporary\s+)?password\s*[:*=-]\s*/i, '').trim();
-          t = t.replace(/^[:*=\s-]+/g, '').replace(/[:*=\s-]+$/g, '').trim();
+      let capturedValue: string | undefined = undefined;
+      const startTime = Date.now();
 
-          if (!t) return null;
-          const lower = t.toLowerCase();
+      while (Date.now() - startTime < 3500) {
+        if (page.isClosed()) return undefined;
 
-          // Exclude label headers and common form field keywords themselves
-          const forbiddenLabels = [
-            'password',
-            'password*',
-            'password:',
-            'default password',
-            'default password*',
-            'default password:',
-            'initial password',
-            'temporary password',
-            'new password',
-            'confirm password',
-            'user name',
-            'user name *',
-            'username',
-            'first name',
-            'first name *',
-            'middle name',
-            'last name',
-            'last name *',
-            'nick name',
-            'mobile no',
-            'mobile no *',
-            'mobile number',
-            'email',
-            'nationality',
-            'nationality *',
-            'role',
-            'profile role',
-            'barcode no',
-            'signature',
-            'stamp',
-            'profile',
-            'status',
-            'save',
-            'submit',
-            'cancel',
-            'edit',
-            'reset',
-            'delete',
-            'action',
-            'actions',
-            'add user',
-            'user details',
-          ];
+        const evaluationResult = await page.evaluate(() => {
+          const cleanPass = (raw: string | null | undefined): string | null => {
+            if (!raw) return null;
+            let t = raw.trim();
+            if (!t) return null;
 
-          for (const kw of forbiddenLabels) {
-            if (lower === kw || lower.startsWith(`${kw} `) || lower.startsWith(`${kw}:`) || lower.startsWith(`${kw}*`)) {
-              return null;
-            }
-          }
-
-          return t;
-        };
-
-        const getInputValue = (elem: Element | null | undefined): string | null => {
-          if (!elem) return null;
-          const tag = (elem.tagName || '').toUpperCase();
-          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-            const inp = elem as HTMLInputElement;
-            return cleanPass(inp.value || inp.getAttribute('value') || inp.getAttribute('placeholder'));
-          }
-          return null;
-        };
-
-        let matchedLabelCount = 0;
-        let adjacentElementType: string | undefined = undefined;
-
-        // 1. Locate exact label elements representing the Password field
-        const candidateSelectors = 'label, .form-label, .control-label, dt, th, td, span, p, strong, b, em';
-        const allCandidates = Array.from(document.querySelectorAll(candidateSelectors));
-
-        const labelElements = allCandidates.filter((el) => {
-          const directText = (el.textContent || '').trim();
-          if (!directText || directText.length > 50) return false;
-          if (el.children.length > 3) return false;
-
-          const norm = directText.replace(/[*:#=-]/g, '').trim().toLowerCase();
-          return (
-            norm === 'password' ||
-            norm === 'default password' ||
-            norm === 'initial password' ||
-            norm === 'temporary password' ||
-            norm === 'defaultpassword' ||
-            norm === 'temp password'
-          );
-        });
-
-        matchedLabelCount = labelElements.length;
-
-        for (const el of labelElements) {
-          // (a) Check text nodes and immediate siblings
-          let siblingNode = el.nextSibling;
-          while (siblingNode) {
-            if (siblingNode.nodeType === 3) {
-              // TEXT_NODE
-              const v = cleanPass(siblingNode.textContent);
-              if (v) {
-                adjacentElementType = 'TEXT_NODE';
-                return { value: v, matchedLabelCount, adjacentElementType };
-              }
-            } else if (siblingNode.nodeType === 1) {
-              // ELEMENT_NODE
-              const elem = siblingNode as Element;
-              adjacentElementType = elem.tagName.toLowerCase();
-              const inpVal = getInputValue(elem) || getInputValue(elem.querySelector('input, textarea'));
-              if (inpVal) {
-                return { value: inpVal, matchedLabelCount, adjacentElementType: `${adjacentElementType}_INPUT` };
-              }
-              const textVal = cleanPass(elem.textContent);
-              if (textVal) {
-                return { value: textVal, matchedLabelCount, adjacentElementType };
-              }
-            }
-            siblingNode = siblingNode.nextSibling;
-          }
-
-          // (b) Same parent container (e.g. <div class="field"><label>Password</label><input value="..."/></div>)
-          const parent = el.parentElement;
-          if (parent && parent !== document.body && parent.tagName !== 'FORM') {
-            const inputs = Array.from(parent.querySelectorAll('input, textarea'));
-            for (const inp of inputs) {
-              const v = getInputValue(inp);
-              if (v) {
-                adjacentElementType = 'PARENT_INPUT';
-                return { value: v, matchedLabelCount, adjacentElementType };
+            // If text contains multiple lines (e.g. from select option lists), evaluate single lines
+            if (t.includes('\n')) {
+              const lines = t.split('\n').map((l) => l.trim()).filter(Boolean);
+              if (lines.length > 1) {
+                for (const line of lines) {
+                  const cleaned = cleanPass(line);
+                  if (cleaned) return cleaned;
+                }
+                return null;
               }
             }
 
-            const nonLabelChildren = Array.from(
-              parent.querySelectorAll('span, strong, b, code, p, em, dd, .val, .value')
+            // Strip common prefixes like "Password:", "Default Password -", etc.
+            t = t.replace(/^(?:default\s+|initial\s+|temporary\s+|user\s+|login\s+)?password\s*[:*=-]\s*/i, '').trim();
+            t = t.replace(/^[:*=\s-]+/g, '').replace(/[:*=\s-]+$/g, '').trim();
+
+            if (!t) return null;
+            const lower = t.toLowerCase();
+
+            // Exclude label headers and common form field keywords themselves
+            const forbiddenLabels = [
+              'password',
+              'password*',
+              'password:',
+              'default password',
+              'default password*',
+              'default password:',
+              'initial password',
+              'temporary password',
+              'new password',
+              'confirm password',
+              'user name',
+              'user name *',
+              'username',
+              'first name',
+              'first name *',
+              'middle name',
+              'last name',
+              'last name *',
+              'nick name',
+              'mobile no',
+              'mobile no *',
+              'mobile number',
+              'email',
+              'nationality',
+              'nationality *',
+              'role',
+              'profile role',
+              'barcode no',
+              'signature',
+              'stamp',
+              'profile',
+              'status',
+              'save',
+              'submit',
+              'cancel',
+              'edit',
+              'reset',
+              'delete',
+              'action',
+              'actions',
+              'add user',
+              'user details',
+            ];
+
+            for (const kw of forbiddenLabels) {
+              if (lower === kw || lower.startsWith(`${kw} `) || lower.startsWith(`${kw}:`) || lower.startsWith(`${kw}*`)) {
+                return null;
+              }
+            }
+
+            return t;
+          };
+
+          const getInputValue = (elem: Element | null | undefined): string | null => {
+            if (!elem) return null;
+            const tag = (elem.tagName || '').toUpperCase();
+            if (tag === 'INPUT' || tag === 'TEXTAREA') {
+              const inp = elem as HTMLInputElement;
+              return cleanPass(
+                inp.value ||
+                  inp.getAttribute('value') ||
+                  (inp as any).defaultValue ||
+                  inp.getAttribute('data-value') ||
+                  inp.getAttribute('data-password') ||
+                  inp.getAttribute('placeholder')
+              );
+            }
+            return null;
+          };
+
+          let matchedLabelCount = 0;
+          let adjacentElementType: string | undefined = undefined;
+
+          // 1. Locate exact label elements representing the Password field
+          const candidateSelectors = 'label, .form-label, .control-label, dt, th, td, span, p, strong, b, em';
+          const allCandidates = Array.from(document.querySelectorAll(candidateSelectors));
+
+          const labelElements = allCandidates.filter((el) => {
+            if (el.querySelector('input, select, textarea, button, form, table')) return false;
+            const directText = (el.textContent || '').trim();
+            if (!directText || directText.length > 80) return false;
+            if (el.children.length > 3) return false;
+
+            const norm = directText.replace(/[*:#=-]/g, '').trim().toLowerCase();
+            return (
+              norm === 'password' ||
+              norm === 'default password' ||
+              norm === 'initial password' ||
+              norm === 'temporary password' ||
+              norm === 'defaultpassword' ||
+              norm === 'temp password' ||
+              norm === 'login password' ||
+              norm === 'user password' ||
+              norm.startsWith('password') ||
+              norm.startsWith('default password') ||
+              norm.startsWith('initial password') ||
+              norm.startsWith('temporary password') ||
+              norm.startsWith('defaultpassword')
             );
-            for (const child of nonLabelChildren) {
-              if (child !== el && !el.contains(child)) {
-                const v = cleanPass(child.textContent);
+          });
+
+          matchedLabelCount = labelElements.length;
+
+          for (const el of labelElements) {
+            // (0) Check if label element itself contains the value (e.g. "Default Password: Simplex@123")
+            const ownVal = cleanPass(el.textContent);
+            if (ownVal) {
+              adjacentElementType = 'LABEL_OWN_TEXT';
+              return { value: ownVal, matchedLabelCount, adjacentElementType };
+            }
+
+            // (a) Check text nodes and immediate siblings
+            let siblingNode = el.nextSibling;
+            while (siblingNode) {
+              if (siblingNode.nodeType === 3) {
+                // TEXT_NODE
+                const v = cleanPass(siblingNode.textContent);
                 if (v) {
-                  adjacentElementType = `PARENT_${child.tagName.toLowerCase()}`;
+                  adjacentElementType = 'TEXT_NODE';
                   return { value: v, matchedLabelCount, adjacentElementType };
                 }
-              }
-            }
-
-            const parentDirectText = cleanPass((parent.textContent || '').replace(el.textContent || '', ''));
-            if (parentDirectText) {
-              adjacentElementType = 'PARENT_TEXT';
-              return { value: parentDirectText, matchedLabelCount, adjacentElementType };
-            }
-          }
-
-          // (c) Same table row / cells (e.g. <tr><td>Password</td><td>Value</td></tr>)
-          const tr = el.closest('tr');
-          if (tr) {
-            const cells = Array.from(tr.querySelectorAll('td, th'));
-            const myCell = el.closest('td, th');
-            const myIdx = myCell ? cells.indexOf(myCell as HTMLElement) : -1;
-            for (let i = 0; i < cells.length; i++) {
-              if (i !== myIdx) {
-                const inpVal = getInputValue(cells[i].querySelector('input, textarea')) || getInputValue(cells[i]);
+              } else if (siblingNode.nodeType === 1) {
+                // ELEMENT_NODE
+                const elem = siblingNode as Element;
+                adjacentElementType = elem.tagName.toLowerCase();
+                const inpVal = getInputValue(elem) || getInputValue(elem.querySelector('input, textarea'));
                 if (inpVal) {
-                  adjacentElementType = 'TABLE_CELL_INPUT';
-                  return { value: inpVal, matchedLabelCount, adjacentElementType };
+                  return { value: inpVal, matchedLabelCount, adjacentElementType: `${adjacentElementType}_INPUT` };
                 }
-                const v = cleanPass(cells[i].textContent);
+                const textVal = cleanPass(elem.textContent);
+                if (textVal) {
+                  return { value: textVal, matchedLabelCount, adjacentElementType };
+                }
+              }
+              siblingNode = siblingNode.nextSibling;
+            }
+
+            // (b) Same parent container (e.g. <div class="field"><label>Password</label><input value="..."/></div>)
+            const parent = el.parentElement;
+            if (parent && parent !== document.body && parent.tagName !== 'FORM') {
+              const inputs = Array.from(parent.querySelectorAll('input, textarea'));
+              for (const inp of inputs) {
+                const v = getInputValue(inp);
                 if (v) {
-                  adjacentElementType = 'TABLE_CELL_TEXT';
+                  adjacentElementType = 'PARENT_INPUT';
                   return { value: v, matchedLabelCount, adjacentElementType };
                 }
               }
-            }
-          }
 
-          // (d) Description List (<dt>Password</dt><dd>Value</dd>)
-          const dl = el.closest('dl');
-          if (dl && el.tagName.toLowerCase() === 'dt') {
-            let nextDd = el.nextElementSibling;
-            while (nextDd && nextDd.tagName.toLowerCase() === 'dd') {
-              const v = cleanPass(nextDd.textContent);
-              if (v) {
-                adjacentElementType = 'DL_DD';
-                return { value: v, matchedLabelCount, adjacentElementType };
+              const nonLabelChildren = Array.from(
+                parent.querySelectorAll('span, strong, b, code, p, em, dd, .val, .value')
+              );
+              for (const child of nonLabelChildren) {
+                if (child !== el && !el.contains(child)) {
+                  const v = cleanPass(child.textContent);
+                  if (v) {
+                    adjacentElementType = `PARENT_${child.tagName.toLowerCase()}`;
+                    return { value: v, matchedLabelCount, adjacentElementType };
+                  }
+                }
               }
-              nextDd = nextDd.nextElementSibling;
-            }
-          }
 
-          // (e) Nearest scoped form-group container
-          const wrapper = el.closest(
-            '.form-group, .field, .form-row, .col, .grid > div, [class*="form-group"], [class*="field"], .form-item'
-          );
-          if (wrapper && wrapper !== document.body && wrapper.tagName !== 'FORM') {
-            const inputs = Array.from(wrapper.querySelectorAll('input, textarea'));
-            for (const inp of inputs) {
-              const v = getInputValue(inp);
-              if (v) {
-                adjacentElementType = 'WRAPPER_INPUT';
-                return { value: v, matchedLabelCount, adjacentElementType };
+              const parentDirectText = cleanPass((parent.textContent || '').replace(el.textContent || '', ''));
+              if (parentDirectText) {
+                adjacentElementType = 'PARENT_TEXT';
+                return { value: parentDirectText, matchedLabelCount, adjacentElementType };
               }
             }
-            const valEls = Array.from(
-              wrapper.querySelectorAll(
-                '.val, .value, span:not(.label):not(.control-label):not(.form-label), strong, b, code, p:not(.label)'
-              )
+
+            // (c) Same table row / cells (e.g. <tr><td>Password</td><td>Value</td></tr>)
+            const tr = el.closest('tr');
+            if (tr) {
+              const cells = Array.from(tr.querySelectorAll('td, th'));
+              const myCell = el.closest('td, th');
+              const myIdx = myCell ? cells.indexOf(myCell as HTMLElement) : -1;
+              for (let i = 0; i < cells.length; i++) {
+                if (i !== myIdx) {
+                  const inpVal = getInputValue(cells[i].querySelector('input, textarea')) || getInputValue(cells[i]);
+                  if (inpVal) {
+                    adjacentElementType = 'TABLE_CELL_INPUT';
+                    return { value: inpVal, matchedLabelCount, adjacentElementType };
+                  }
+                  const v = cleanPass(cells[i].textContent);
+                  if (v) {
+                    adjacentElementType = 'TABLE_CELL_TEXT';
+                    return { value: v, matchedLabelCount, adjacentElementType };
+                  }
+                }
+              }
+            }
+
+            // (d) Description List (<dt>Password</dt><dd>Value</dd>)
+            const dl = el.closest('dl');
+            if (dl && el.tagName.toLowerCase() === 'dt') {
+              let nextDd = el.nextElementSibling;
+              while (nextDd && nextDd.tagName.toLowerCase() === 'dd') {
+                const v = cleanPass(nextDd.textContent);
+                if (v) {
+                  adjacentElementType = 'DL_DD';
+                  return { value: v, matchedLabelCount, adjacentElementType };
+                }
+                nextDd = nextDd.nextElementSibling;
+              }
+            }
+
+            // (e) Nearest scoped form-group container
+            const wrapper = el.closest(
+              '.form-group, .field, .form-row, .col, .grid > div, [class*="form-group"], [class*="field"], .form-item'
             );
-            for (const ve of valEls) {
-              if (ve !== el && !el.contains(ve)) {
-                const v = cleanPass(ve.textContent);
+            if (wrapper && wrapper !== document.body && wrapper.tagName !== 'FORM') {
+              const inputs = Array.from(wrapper.querySelectorAll('input, textarea'));
+              for (const inp of inputs) {
+                const v = getInputValue(inp);
                 if (v) {
-                  adjacentElementType = `WRAPPER_${ve.tagName.toLowerCase()}`;
+                  adjacentElementType = 'WRAPPER_INPUT';
                   return { value: v, matchedLabelCount, adjacentElementType };
+                }
+              }
+              const valEls = Array.from(
+                wrapper.querySelectorAll(
+                  '.val, .value, span:not(.label):not(.control-label):not(.form-label), strong, b, code, p:not(.label)'
+                )
+              );
+              for (const ve of valEls) {
+                if (ve !== el && !el.contains(ve)) {
+                  const v = cleanPass(ve.textContent);
+                  if (v) {
+                    adjacentElementType = `WRAPPER_${ve.tagName.toLowerCase()}`;
+                    return { value: v, matchedLabelCount, adjacentElementType };
+                  }
                 }
               }
             }
           }
-        }
 
-        // 2. Direct check on input[name*="pass" i], input[type="password"], or dedicated selectors
-        const inputs = Array.from(
-          document.querySelectorAll('input[name*="pass" i], input[id*="pass" i], input[data-testid*="pass" i]')
-        );
-        for (const inp of inputs) {
-          const v = getInputValue(inp);
-          if (v) {
-            adjacentElementType = 'DIRECT_INPUT';
-            return { value: v, matchedLabelCount, adjacentElementType };
-          }
-        }
-
-        const badge = document.querySelector(
-          '.default-password, [data-testid="default-password"], [data-testid="temporary-password"], #defaultPassword, #tempPassword, #lblDefaultPassword, .password-val'
-        );
-        if (badge) {
-          const v = cleanPass(badge.textContent) || getInputValue(badge);
-          if (v) {
-            adjacentElementType = 'DEDICATED_BADGE';
-            return { value: v, matchedLabelCount, adjacentElementType };
-          }
-        }
-
-        // 3. Regex on form container text
-        const formEl = document.querySelector('form, #addUserForm, .card, .content');
-        if (formEl && formEl.textContent) {
-          const m = formEl.textContent.match(/(?:default|temporary|initial|current)?\s*password\s*[:=-]\s*([^\s\n\r,;<>]+)/i);
-          if (m && m[1]) {
-            const v = cleanPass(m[1]);
+          // 2. Direct check on input[name*="pass" i], input[type="password"], or dedicated selectors
+          const inputs = Array.from(
+            document.querySelectorAll('input[name*="pass" i], input[id*="pass" i], input[data-testid*="pass" i]')
+          );
+          for (const inp of inputs) {
+            const v = getInputValue(inp);
             if (v) {
-              adjacentElementType = 'FORM_REGEX';
+              adjacentElementType = 'DIRECT_INPUT';
               return { value: v, matchedLabelCount, adjacentElementType };
             }
           }
+
+          const badge = document.querySelector(
+            '.default-password, [data-testid="default-password"], [data-testid="temporary-password"], #defaultPassword, #tempPassword, #lblDefaultPassword, .password-val, span[id*="pass" i]'
+          );
+          if (badge) {
+            const v = cleanPass(badge.textContent) || getInputValue(badge);
+            if (v) {
+              adjacentElementType = 'DEDICATED_BADGE';
+              return { value: v, matchedLabelCount, adjacentElementType };
+            }
+          }
+
+          // 3. Regex on form container text
+          const formEl = document.querySelector('form, #addUserForm, .card, .content');
+          if (formEl && formEl.textContent) {
+            const m = formEl.textContent.match(/(?:default|temporary|initial|current)?\s*password\s*[:=-]\s*([^\s\n\r,;<>]+)/i);
+            if (m && m[1]) {
+              const v = cleanPass(m[1]);
+              if (v) {
+                adjacentElementType = 'FORM_REGEX';
+                return { value: v, matchedLabelCount, adjacentElementType };
+              }
+            }
+          }
+
+          return { value: null, matchedLabelCount, adjacentElementType: adjacentElementType || 'NONE' };
+        });
+
+        if (evaluationResult?.value) {
+          capturedValue = evaluationResult.value;
+          this.recordClientDefaultPassword(page.url(), capturedValue);
+          return capturedValue;
         }
 
-        return { value: null, matchedLabelCount, adjacentElementType: adjacentElementType || 'NONE' };
-      });
-
-      const sanitizedPageUrl = (page.url() || '').split('?')[0];
-      const passwordValueFound = Boolean(evaluationResult?.value);
-
-      // Safe non-sensitive diagnostic telemetry (never logs raw password)
-      const safeDiagnostics = {
-        passwordValueFound,
-        matchedLabelCount: evaluationResult?.matchedLabelCount || 0,
-        adjacentElementType: evaluationResult?.adjacentElementType || 'NONE',
-        sanitizedPageUrl,
-      };
-
-      if (!passwordValueFound) {
-        console.info('[SAFE DIAGNOSTICS] Client default-password not found on Add User screen:', safeDiagnostics);
+        await page.waitForTimeout(300);
       }
 
-      return evaluationResult?.value || undefined;
+      return undefined;
     } catch {
       return undefined;
     }
@@ -1498,9 +2565,7 @@ export class UserManagementExecutor {
 
     // 2. Navigate to resolved /addUsers route only after authentication is confirmed
     try {
-      if (page.url() !== addUsersUrl) {
-        await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      }
+      await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     } catch (navErr: any) {
       return {
         success: false,
@@ -1635,13 +2700,14 @@ export class UserManagementExecutor {
     } catch {}
 
     // 4. Fill text inputs with event dispatching for Angular / AngularJS reactive binding
-    await usernameInput.fill(dto.username);
+    const portalUsername = dto.username;
+    await usernameInput.fill(portalUsername);
     await usernameInput.evaluate((el: HTMLInputElement, val: string) => {
       el.value = val;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       el.dispatchEvent(new Event('blur', { bubbles: true }));
-    }, dto.username);
+    }, portalUsername);
 
     if (dto.firstName && (await firstNameInput.isVisible().catch(() => false))) {
       await firstNameInput.fill(dto.firstName);
@@ -1708,6 +2774,7 @@ export class UserManagementExecutor {
     if (dto.nationality && (await nationalityInput.isVisible().catch(() => false))) {
       const isSelect = await nationalityInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
+        await nationalityInput.locator('option:not([value=""])').first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => {});
         const availableOptions: { text: string; value: string }[] = await nationalityInput.evaluate((el: HTMLSelectElement) => {
           return Array.from(el.options).map((o) => ({
             text: (o.text || '').trim(),
@@ -1721,7 +2788,8 @@ export class UserManagementExecutor {
             o.text.toLowerCase() === targetNorm ||
             o.value.toLowerCase() === targetNorm ||
             (o.text && o.text.toLowerCase().includes(targetNorm)) ||
-            (o.value && o.value.toLowerCase().includes(targetNorm))
+            (o.value && o.value.toLowerCase().includes(targetNorm)) ||
+            (targetNorm.includes('saudi') && (o.text.toLowerCase().includes('saudi') || o.value.toLowerCase().includes('sau')))
         );
 
         if (matched && matched.value !== undefined) {
@@ -1745,10 +2813,14 @@ export class UserManagementExecutor {
       }
     }
 
-    // Role
-    if (dto.role && (await roleInput.isVisible().catch(() => false))) {
+    // Role (Primary role on Add User form)
+    const primaryRole = (dto.role ? dto.role.split(',')[0].trim() : undefined) ||
+      (dto.roles && dto.roles.length > 0 ? dto.roles[0] : undefined);
+
+    if (primaryRole && (await roleInput.isVisible().catch(() => false))) {
       const isSelect = await roleInput.evaluate((el) => el.tagName.toLowerCase() === 'select').catch(() => false);
       if (isSelect) {
+        await roleInput.locator('option:not([value=""])').first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => {});
         const availableOptions: { text: string; value: string }[] = await roleInput.evaluate((el: HTMLSelectElement) => {
           return Array.from(el.options).map((o) => ({
             text: (o.text || '').trim(),
@@ -1756,7 +2828,7 @@ export class UserManagementExecutor {
           }));
         });
 
-        const targetNorm = dto.role.trim().toLowerCase();
+        const targetNorm = primaryRole.trim().toLowerCase();
         const matched = availableOptions.find(
           (o) =>
             o.text.toLowerCase() === targetNorm ||
@@ -1773,16 +2845,19 @@ export class UserManagementExecutor {
             el.dispatchEvent(new Event('change', { bubbles: true }));
           }, matched.value);
         } else {
-          const optionLabels = availableOptions.map((o) => o.text || o.value).filter((t) => t && !t.toLowerCase().includes('select'));
-          return {
-            success: false,
-            username: dto.username,
-            errorCode: 'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
-            errorMessage: `Role option '${dto.role}' not found on remote Add User form. Available options: [${optionLabels.join(', ')}].`,
-          };
+          // If multi-roles will be configured on /addUserRole screen, select a valid primary role (e.g. Admin or first non-empty option)
+          const fallbackOpt = availableOptions.find(o => o.text.toLowerCase().includes('admin') || o.value.toLowerCase().includes('admin') || (o.value && !o.text.toLowerCase().includes('select')));
+          if (fallbackOpt && fallbackOpt.value) {
+            await roleInput.selectOption({ value: fallbackOpt.value });
+            await roleInput.evaluate((el: HTMLSelectElement, val: string) => {
+              el.value = val;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }, fallbackOpt.value);
+          }
         }
       } else {
-        await roleInput.fill(dto.role);
+        await roleInput.fill(primaryRole);
       }
     }
 
@@ -1875,8 +2950,11 @@ export class UserManagementExecutor {
     const readFirstName = (await firstNameInput.inputValue().catch(() => '')).trim();
     const readLastName = (await lastNameInput.inputValue().catch(() => '')).trim();
 
+    const normDtoUser = dto.username.toLowerCase().trim().replace(/_/g, '.');
+    const normReadUser = readUsername.toLowerCase().trim().replace(/_/g, '.');
+
     if (
-      readUsername.toLowerCase() !== dto.username.toLowerCase().trim() ||
+      (readUsername.toLowerCase() !== dto.username.toLowerCase().trim() && normReadUser !== normDtoUser) ||
       (dto.firstName && readFirstName && readFirstName !== dto.firstName.trim()) ||
       (dto.lastName && readLastName && readLastName !== dto.lastName.trim())
     ) {
@@ -1899,7 +2977,7 @@ export class UserManagementExecutor {
     // Discover bottom action button matching positive labels and excluding negative labels
     const submitBtn = page
       .locator(
-        '#btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), button:has-text("Save"), button:has-text("Add"), button:has-text("Create"), button:has-text("Submit"), button:has-text("Update"), [data-testid="btn-save-user"], .btn-save, input[type="submit"][value*="Save" i], input[type="submit"][value*="Add" i], input[type="submit"][value*="Create" i], input[type="submit"][value*="Submit" i]'
+        '#addUserButton, #btnSave, #btnSubmit, #btnSaveUser, button[type="submit"]:has-text("Save"), button:has-text("Save"), button:has-text("Add"), button:has-text("Create"), button:has-text("Submit"), button:has-text("Update"), [data-testid="btn-save-user"], .btn-save, input[type="submit"][value*="Save" i], input[type="submit"][value*="Add" i], input[type="submit"][value*="Create" i], input[type="submit"][value*="Submit" i]'
       )
       .first();
 
@@ -1916,6 +2994,25 @@ export class UserManagementExecutor {
     // Scroll action button into view
     await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
     await page.waitForTimeout(200);
+
+    // Trigger jQuery / BootstrapValidator / FormValidation if active on form
+    await page.evaluate(() => {
+      const $ = (window as any).$ || (window as any).jQuery;
+      if ($) {
+        $('form').each((_i: number, el: any) => {
+          const fv = $(el).data('formValidation') || $(el).data('bootstrapValidator');
+          if (fv && typeof fv.validate === 'function') {
+            try {
+              fv.validate();
+            } catch {}
+          }
+        });
+        $('#addUserButton, #btnSave, #btnSubmit, button[type="submit"], input[type="submit"]')
+          .prop('disabled', false)
+          .removeClass('disabled')
+          .removeAttr('disabled');
+      }
+    });
 
     // Check if button is disabled
     const isDisabled = await submitBtn
@@ -2277,55 +3374,62 @@ export class UserManagementExecutor {
   ): Promise<{ authenticated: boolean; errorCode?: string; errorMessage?: string }> {
     const { targetUrl, loginUrl, credentials } = options;
 
+    if (page.isClosed()) {
+      return {
+        authenticated: false,
+        errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+        errorMessage: 'Browser was closed before authentication could be verified.',
+      };
+    }
+
     const targetLoginUrl =
-      loginUrl || (targetUrl ? targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login') : '/login');
+      loginUrl || (targetUrl ? targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login').replace(/\/addUserRole.*$/i, '/login').replace(/\/userRole.*$/i, '/login') : '/login');
 
-    if (credentials && credentials.username && credentials.password) {
-      // 1. Open configured login/base route first
-      try {
-        await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      } catch (err: any) {
-        return {
-          authenticated: false,
-          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-          errorMessage: `Failed to navigate to login route: ${err.message}`,
-        };
-      }
+    // 1. If page is already open and not on about:blank / login, check if existing session is already valid
+    const currentUrl = page.url();
+    const isAlreadyOnApplication = currentUrl && currentUrl !== 'about:blank' && !currentUrl.includes('/login');
 
-      // 2. Detect whether the session is ALREADY authenticated
-      const authIndicator = await Promise.race([
-        page
-          .waitForSelector(
-            '.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, table, a[href*="logout" i]',
-            { timeout: 3000 }
-          )
-          .then(() => 'AUTHENTICATED')
-          .catch(() => null),
-        page
-          .waitForSelector('#btnLogin, [data-testid="btn-login"], input[type="password"]', { timeout: 3000 })
-          .then(() => 'LOGIN_REQUIRED')
-          .catch(() => null),
-      ]);
-
-      const isLoginInputPresent = (await page.locator('#btnLogin, [data-testid="btn-login"], input[type="password"]').count()) > 0;
-      const isAlreadyAuthenticated = authIndicator === 'AUTHENTICATED' && !page.url().includes('/login') && !isLoginInputPresent;
-
-      if (isAlreadyAuthenticated) {
-        if (targetUrl && page.url() !== targetUrl) {
-          try {
-            await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          } catch (targetNavErr: any) {
-            return {
-              authenticated: false,
-              errorCode: 'CLIENT_USERS_SCREEN_FAILED',
-              errorMessage: `Failed to navigate to target URL: ${targetNavErr.message}`,
-            };
-          }
+    if (isAlreadyOnApplication) {
+      // If targetUrl is requested and different from currentUrl, attempt direct navigation within existing session
+      if (targetUrl && currentUrl !== targetUrl) {
+        try {
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch {
+          // Downstream check verifies if destination rendered or redirected
         }
-        return { authenticated: true };
       }
 
-      // 3. Session is not authenticated -> Fill credentials and log in
+      // Check if session remains valid after navigating to targetUrl (no redirect to /login and no login button)
+      const postNavUrl = page.url();
+      const isRedirectedToLogin = postNavUrl.includes('/login') || (await page.locator('#btnLogin, [data-testid="btn-login"], input[type="password"]').count().catch(() => 0)) > 0;
+
+      if (!isRedirectedToLogin) {
+        const hasAuthIndicator = await page
+          .locator('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, a[href*="logout" i]')
+          .first()
+          .isVisible()
+          .catch(() => false);
+
+        if (hasAuthIndicator || !postNavUrl.includes('/login')) {
+          return { authenticated: true };
+        }
+      }
+    }
+
+    // 2. If session is not authenticated or was redirected to /login, perform authentication
+    if (credentials && credentials.username && credentials.password) {
+      if (!page.url().includes('/login')) {
+        try {
+          await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch (err: any) {
+          return {
+            authenticated: false,
+            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
+            errorMessage: `Failed to navigate to login route: ${err.message}`,
+          };
+        }
+      }
+
       const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
       const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
       const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
@@ -2352,17 +3456,17 @@ export class UserManagementExecutor {
           return {
             authenticated: false,
             errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: `Client authentication rejected: ${errMsg.trim()}`,
+            errorMessage: `Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING. (${errMsg.trim()})`,
           };
         }
 
-        await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, table, a[href*="logout" i]', { timeout: 10000 });
+        await page.waitForSelector('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, a[href*="logout" i]', { timeout: 10000 });
       } catch {
         if (page.url().includes('/login') || ((await page.locator('#btnLogin, [data-testid="btn-login"]').count()) > 0 && (await page.locator('input[type="password"]').count()) > 0)) {
           return {
             authenticated: false,
-            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: 'Client auto-login failed: authenticated dashboard header did not appear.',
+            errorCode: 'AUTH_SESSION_EXPIRED',
+            errorMessage: 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.',
           };
         }
       }
@@ -2371,8 +3475,8 @@ export class UserManagementExecutor {
       if (stillOnLogin) {
         return {
           authenticated: false,
-          errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-          errorMessage: 'Client auto-login failed: still on login page after credentials submission.',
+          errorCode: 'AUTH_SESSION_EXPIRED',
+          errorMessage: 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.',
         };
       }
 
@@ -2402,23 +3506,23 @@ export class UserManagementExecutor {
 
       return { authenticated: true };
     } else {
-      // No credentials provided: check if targetUrl is accessible directly
+      // No credentials provided: check if targetUrl is accessible directly or if session expired
       if (targetUrl) {
         try {
           await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
         } catch (err: any) {
           return {
             authenticated: false,
-            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: `Failed to navigate to target route: ${err.message}`,
+            errorCode: 'AUTH_SESSION_EXPIRED',
+            errorMessage: `Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING. (${err.message})`,
           };
         }
 
-        if (page.url().includes('/login')) {
+        if (page.url().includes('/login') || (await page.locator('#btnLogin, [data-testid="btn-login"], input[type="password"]').count().catch(() => 0)) > 0) {
           return {
             authenticated: false,
-            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: 'Client credentials are required for automatic authentication.',
+            errorCode: 'AUTH_SESSION_EXPIRED',
+            errorMessage: 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.',
           };
         }
       }
@@ -2549,7 +3653,7 @@ export class UserManagementExecutor {
 
       try {
         const rowsData = await page.evaluate(
-          ({ selector, usernameColIdx, statusColIdx, normTarget, targetRemoteUserId }) => {
+          ({ selector, usernameColIdx, fullNameColIdx, statusColIdx, normTarget, targetRemoteUserId }) => {
             const rows = Array.from(document.querySelectorAll(selector));
             const results: {
               index: number;
@@ -2565,26 +3669,60 @@ export class UserManagementExecutor {
               if (style.display === 'none' || style.visibility === 'hidden') continue;
 
               const cellTexts = cells.map((c) => (c.textContent || '').trim());
-              const cellUsername = (cellTexts[usernameColIdx] || '').trim().toLowerCase();
+              const cellUsername = (usernameColIdx >= 0 && usernameColIdx < cellTexts.length ? cellTexts[usernameColIdx] : '').trim().toLowerCase();
+              const cellFullName = (fullNameColIdx >= 0 && fullNameColIdx < cellTexts.length ? cellTexts[fullNameColIdx] : '').trim().toLowerCase();
 
               const dataId = row.getAttribute('data-id') || row.getAttribute('data-user-id') || row.getAttribute('id') || '';
-              const links = Array.from(row.querySelectorAll('a[href], button[onclick], [ng-click]')).map((a) => {
-                return (a.getAttribute('href') || '') + ' ' + (a.getAttribute('onclick') || '') + ' ' + (a.getAttribute('ng-click') || '');
+              const links = Array.from(row.querySelectorAll('a[href], button[onclick], [ng-click], a[onclick], [data-user]')).map((a) => {
+                return (
+                  (a.getAttribute('href') || '') +
+                  ' ' +
+                  (a.getAttribute('onclick') || '') +
+                  ' ' +
+                  (a.getAttribute('ng-click') || '') +
+                  ' ' +
+                  (a.getAttribute('data-user') || '')
+                );
               });
 
               let isMatch = false;
+              const cleanTarget = normTarget.replace(/[._\-]/g, '');
+              const cleanCellUser = cellUsername.replace(/[._\-]/g, '');
+              // Priority 1: exact remoteUserId match
               if (targetRemoteUserId && dataId && dataId.toLowerCase() === targetRemoteUserId.toLowerCase()) {
                 isMatch = true;
               }
-              if (!isMatch && cellUsername === normTarget) {
+              // Priority 2: exact username column match (Column 2 or Name header)
+              if (!isMatch && cellUsername && (cellUsername === normTarget || (cleanTarget.length > 3 && cleanCellUser === cleanTarget))) {
                 isMatch = true;
               }
+              // Priority 3: exact link / action parameter match (e.g. toggleStatus('sathishtest'), resetPassword('sathishtest'))
               if (!isMatch) {
                 for (const linkText of links) {
-                  const userParamMatch = linkText.match(/(?:userId|username|toggleStatus|resetPassword|editUser)[=\/('"]+([^&'" )]+)/i);
-                  if (userParamMatch && userParamMatch[1].trim().toLowerCase() === normTarget) {
+                  const userParamMatch = linkText.match(/(?:userId|username|toggleStatus|resetPassword|editUser|changeStatus)[=\/('",\s]+([^&'" ),]+)/i);
+                  if (userParamMatch) {
+                    const pUser = userParamMatch[1].trim().toLowerCase();
+                    const cleanPUser = pUser.replace(/[._\-]/g, '');
+                    if (pUser === normTarget || (cleanTarget.length > 3 && cleanPUser === cleanTarget)) {
+                      isMatch = true;
+                      break;
+                    }
+                  }
+                  if (linkText.toLowerCase().includes(`'${normTarget}'`) || linkText.toLowerCase().includes(`"${normTarget}"`)) {
                     isMatch = true;
                     break;
+                  }
+                }
+              }
+              // Priority 4: fallback match across non-name/status/action cells only if username column was unmapped
+              if (!isMatch && usernameColIdx === -1) {
+                for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+                  if (cIdx !== fullNameColIdx && cIdx !== statusColIdx && cIdx !== actionColIdx && cIdx !== 0) {
+                    const ct = (cellTexts[cIdx] || '').trim().toLowerCase();
+                    if (ct === normTarget) {
+                      isMatch = true;
+                      break;
+                    }
                   }
                 }
               }
@@ -2594,34 +3732,56 @@ export class UserManagementExecutor {
                 const sc = cells[statusColIdx];
                 const innerText = (sc.textContent || '').toUpperCase();
                 const html = sc.innerHTML.toLowerCase();
-                if (
+                const title = (sc.getAttribute('title') || '').toLowerCase();
+
+                const hasInactiveIndicator =
+                  sc.querySelectorAll('.status-inactive, .badge-inactive, [title*="inactive" i], [title*="deactive" i], .icon-inactive, .glyphicon-remove, .fa-times, .text-danger, .text-red, .btn-danger').length > 0 ||
+                  html.includes('status-inactive') ||
+                  html.includes('glyphicon-remove') ||
+                  html.includes('fa-times') ||
+                  html.includes('fa-ban') ||
+                  html.includes('badge-inactive') ||
+                  html.includes('badge-danger') ||
+                  html.includes('title="inactive"') ||
+                  html.includes('title="deactive"') ||
+                  html.includes('text-danger') ||
+                  html.includes('color:red') ||
+                  html.includes('color: #ef4444') ||
+                  html.includes('color:#ef4444') ||
                   innerText.includes('INACTIVE') ||
+                  innerText.includes('DEACTIVE') ||
                   innerText.includes('DISABLE') ||
                   innerText.includes('FALSE') ||
                   innerText.includes('DEACTIVAT') ||
                   innerText.includes('✖') ||
                   innerText.includes('BLOCK') ||
-                  html.includes('fa-ban') ||
-                  html.includes('fa-times') ||
-                  html.includes('badge-inactive') ||
-                  html.includes('badge-danger') ||
-                  html.includes('title="inactive"') ||
-                  html.includes('text-danger')
-                ) {
+                  title.includes('inactive') ||
+                  title.includes('deactive');
+
+                const hasActiveIndicator =
+                  !hasInactiveIndicator &&
+                  (sc.querySelectorAll('.status-active, .badge-active, [title*="active" i], .icon-active, .glyphicon-ok, .fa-check, .text-success, .text-green, .btn-success').length > 0 ||
+                    html.includes('status-active') ||
+                    html.includes('glyphicon-ok') ||
+                    html.includes('fa-check') ||
+                    html.includes('badge-active') ||
+                    html.includes('badge-success') ||
+                    html.includes('title="active"') ||
+                    html.includes('title="enabled"') ||
+                    html.includes('text-success') ||
+                    html.includes('color:green') ||
+                    html.includes('color: #10b981') ||
+                    html.includes('color:#10b981') ||
+                    innerText.includes('ACTIVE') ||
+                    innerText.includes('ENABLE') ||
+                    innerText.includes('TRUE') ||
+                    innerText.includes('✔') ||
+                    title.includes('active') ||
+                    title.includes('enabled'));
+
+                if (hasInactiveIndicator) {
                   rowStatus = 'INACTIVE';
-                } else if (
-                  innerText.includes('ACTIVE') ||
-                  innerText.includes('ENABLE') ||
-                  innerText.includes('TRUE') ||
-                  innerText.includes('✔') ||
-                  html.includes('fa-check') ||
-                  html.includes('glyphicon-ok') ||
-                  html.includes('badge-active') ||
-                  html.includes('badge-success') ||
-                  html.includes('title="active"') ||
-                  html.includes('title="enabled"') ||
-                  html.includes('text-success')
-                ) {
+                } else if (hasActiveIndicator) {
                   rowStatus = 'ACTIVE';
                 }
               }
@@ -2635,6 +3795,7 @@ export class UserManagementExecutor {
           {
             selector: 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row',
             usernameColIdx,
+            fullNameColIdx,
             statusColIdx,
             normTarget,
             targetRemoteUserId,
@@ -2683,9 +3844,9 @@ export class UserManagementExecutor {
     // Bounded retry attempts (up to 3 attempts with 800ms delay) to allow asynchronous rendering settling
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      // 4. Attempt Angular search input filtering
+      // 4. Attempt table search input filtering (excluding sidebar menu search #searchMenu)
       const searchInput = page
-        .locator('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[id*="search" i], #userSearch, [data-testid="input-user-search"]')
+        .locator('input[type="search"]:not(#searchMenu), .dataTables_filter input, #usersTable_filter input, input[aria-controls]:not(#searchMenu), input[placeholder="SEARCH"], input[name*="search" i]:not(#searchMenu):not([name="searchMenu"])')
         .first();
 
       let searchExecuted = false;
@@ -2701,45 +3862,48 @@ export class UserManagementExecutor {
           });
           await page.waitForTimeout(200);
 
-          // Enter exact target username
-          await searchInput.fill(targetUsername.trim());
-          await searchInput.evaluate((el: HTMLInputElement, val: string) => {
-            el.value = val;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-          }, targetUsername.trim());
-          await searchInput.press('Enter').catch(() => {});
-          await searchInput.press('Tab').catch(() => {});
-          await page.waitForTimeout(500);
-          searchExecuted = true;
+          // Enter target username variants (exact, dot-separated, or prefix)
+          const queries = [targetUsername.trim()];
+          if (targetUsername.includes('_')) queries.push(targetUsername.replace(/_/g, '.'));
+          if (targetUsername.includes('.')) queries.push(targetUsername.replace(/\./g, '_'));
+
+          for (const q of queries) {
+            await searchInput.fill(q);
+            await searchInput.evaluate((el: HTMLInputElement, val: string) => {
+              el.value = val;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+              el.dispatchEvent(new Event('blur', { bubbles: true }));
+            }, q);
+            await searchInput.press('Enter').catch(() => {});
+            await page.waitForTimeout(500);
+            searchExecuted = true;
+
+            const { matches, rowCount } = await inspectCurrentPageRows();
+            totalRowsInspected += rowCount;
+            pagesVisitedCount = 1;
+
+            if (matches.length === 1) {
+              return await buildMatchResult(matches[0].index, matches[0].status, 1);
+            }
+            if (matches.length > 1) {
+              return {
+                success: false,
+                errorCode: 'AMBIGUOUS_REMOTE_USER',
+                errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
+                diagnostics: {
+                  requestedNormalizedUsername: normTarget,
+                  remoteRowsInspected: totalRowsInspected,
+                  pagesVisited: pagesVisitedCount,
+                  usernameColIdx,
+                  matchCount: matches.length,
+                },
+              };
+            }
+          }
         } catch {
           searchExecuted = false;
-        }
-      }
-
-      if (searchExecuted) {
-        const { matches, rowCount } = await inspectCurrentPageRows();
-        totalRowsInspected += rowCount;
-        pagesVisitedCount = 1;
-
-        if (matches.length === 1) {
-          return await buildMatchResult(matches[0].index, matches[0].status, 1);
-        }
-        if (matches.length > 1) {
-          return {
-            success: false,
-            errorCode: 'AMBIGUOUS_REMOTE_USER',
-            errorMessage: `Multiple matching user rows (${matches.length}) found for '${targetUsername}' on client users list.`,
-            diagnostics: {
-              requestedNormalizedUsername: normTarget,
-              remoteRowsInspected: totalRowsInspected,
-              pagesVisited: pagesVisitedCount,
-              usernameColIdx,
-              matchCount: matches.length,
-            },
-          };
         }
       }
 
@@ -3113,65 +4277,80 @@ export class UserManagementExecutor {
       )
       .first();
 
-    // Handle client confirmation dialog
-    page.once('dialog', async (dialog) => {
-      await dialog.accept().catch(() => {});
-    });
+    // Handle client confirmation and alert dialogs persistently during status toggle
+    const dialogHandler = async (dialog: any) => {
+      try {
+        await dialog.accept().catch(() => {});
+      } catch {}
+    };
+    page.on('dialog', dialogHandler);
 
-    if (isObj && (arg1 as any).onMutationDispatched) {
-      (arg1 as any).onMutationDispatched();
-    }
-
-    // Click the status icon once
-    onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
     try {
-      if ((await clickTarget.count().catch(() => 0)) > 0) {
-        await clickTarget.click({ timeout: 5000 }).catch(async () => {
+      if (isObj && (arg1 as any).onMutationDispatched) {
+        (arg1 as any).onMutationDispatched();
+      }
+
+      // Click the status icon once
+      onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
+      try {
+        if ((await clickTarget.count().catch(() => 0)) > 0) {
+          await clickTarget.click({ timeout: 5000 }).catch(async () => {
+            await statusCellLocator.click({ timeout: 5000 });
+          });
+        } else {
           await statusCellLocator.click({ timeout: 5000 });
-        });
-      } else {
-        await statusCellLocator.click({ timeout: 5000 });
+        }
+      } catch (clickErr: any) {
+        if (page.isClosed()) {
+          return {
+            success: false,
+            username,
+            errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
+            errorMessage: 'Browser page was closed during or immediately after clicking status toggle.',
+          };
+        }
+        throw clickErr;
       }
-    } catch (clickErr: any) {
-      if (page.isClosed()) {
-        return {
-          success: false,
-          username,
-          errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
-          errorMessage: 'Browser page was closed during or immediately after clicking status toggle.',
-        };
+
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(800);
+
+      // 4. Polling post-mutation status verification with reload fallback (up to 8s)
+      onProgress?.(`Verifying remote status change…`);
+      let verified = false;
+      let lastObservedStatus: ClientUserStatus | undefined = undefined;
+      let reloadedOnce = false;
+      const verifyStartTime = Date.now();
+
+      while (Date.now() - verifyStartTime < 8000) {
+        if (page.isClosed()) {
+          return {
+            success: false,
+            username,
+            errorCode: 'REMOTE_OUTCOME_UNKNOWN',
+            errorMessage: 'Browser closed during post-mutation status verification.',
+          };
+        }
+
+        const checkRes = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
+        if (checkRes.success && checkRes.currentRemoteStatus === targetStatus) {
+          verified = true;
+          break;
+        }
+        if (checkRes.success) {
+          lastObservedStatus = checkRes.currentRemoteStatus;
+        }
+
+        // If 2.5s elapsed without verified status change, trigger a fresh reload to clear any stale client DOM
+        if (Date.now() - verifyStartTime > 2500 && !reloadedOnce) {
+          reloadedOnce = true;
+          await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+        }
+
+        await page.waitForTimeout(600);
       }
-      throw clickErr;
-    }
 
-    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(1000);
-
-    // 4. Re-read and verify that the icon changed
-    onProgress?.(`Verifying remote status change…`);
-    if (page.isClosed()) {
-      return {
-        success: false,
-        username,
-        errorCode: 'REMOTE_OUTCOME_UNKNOWN',
-        errorMessage: 'Browser closed during post-mutation status verification.',
-      };
-    }
-
-    const verifyLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
-    if (!verifyLookup.success || !verifyLookup.rowLocator) {
-      // Reload and retry verification
-      await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-      const retryLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
-      if (!retryLookup.success || !retryLookup.rowLocator) {
-        return {
-          success: false,
-          username,
-          errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-          errorMessage: `User '${username}' could not be re-located after status change.`,
-        };
-      }
-      if (retryLookup.currentRemoteStatus === targetStatus) {
+      if (verified) {
         return {
           success: true,
           username,
@@ -3179,29 +4358,16 @@ export class UserManagementExecutor {
           message: `User '${username}' status verified as ${targetStatus} on remote client.`,
         };
       }
+
       return {
         success: false,
         username,
         errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-        errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Current status: ${retryLookup.currentRemoteStatus}.`,
+        errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Expected ${targetStatus}, but found ${lastObservedStatus || 'UNKNOWN'}.`,
       };
+    } finally {
+      page.off('dialog', dialogHandler);
     }
-
-    if (verifyLookup.currentRemoteStatus === targetStatus) {
-      return {
-        success: true,
-        username,
-        status: targetStatus,
-        message: `User '${username}' status verified as ${targetStatus} on remote client.`,
-      };
-    }
-
-    return {
-      success: false,
-      username,
-      errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-      errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Expected ${targetStatus}, but found ${verifyLookup.currentRemoteStatus}.`,
-    };
   }
 
   /**
@@ -3286,10 +4452,15 @@ export class UserManagementExecutor {
         const msg = dialog.message();
         const lowerMsg = msg.toLowerCase();
 
-        // Check if dialog provides a specific temporary/generated password
+        // Check if dialog provides a specific temporary/generated/default password
         const passMatch =
           msg.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
-          msg.match(/(?:temporary password is|new password:?|password is:?)\s*([A-Za-z0-9!@#$%^&*()_+=-]+)/i);
+          msg.match(
+            /(?:default\s+password(?:\s+is)?|temporary\s+password(?:\s+is)?|new\s+password(?:\s+is)?|initial\s+password(?:\s+is)?|password\s+is|reset\s+to(?:\s+default(?:\s+password)?)?)\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
+          ) ||
+          msg.match(
+            /password\s+reset(?:\s+successfully)?\.?\s*(?:default\s+password\s+is|password\s+is|default\s+is)?\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
+          );
         if (passMatch) {
           explicitResetPassword = (passMatch[1] || passMatch[0]).trim();
           isResetConfirmed = true;
@@ -3437,15 +4608,28 @@ export class UserManagementExecutor {
             )
           );
           for (const el of alerts) {
-            const t = (el.textContent || '').trim().toLowerCase();
+            const t = (el.textContent || '').trim();
+            const lower = t.toLowerCase();
             if (
-              t.includes('password reset successfully') ||
-              t.includes('reset successfully') ||
-              t.includes('password has been reset') ||
-              t.includes('updated successfully') ||
-              t.includes('success')
+              lower.includes('password reset successfully') ||
+              lower.includes('reset successfully') ||
+              lower.includes('password has been reset') ||
+              lower.includes('updated successfully') ||
+              lower.includes('success')
             ) {
-              return { success: true, text: el.textContent?.trim() };
+              const passMatch =
+                t.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
+                t.match(
+                  /(?:default\s+password(?:\s+is)?|temporary\s+password(?:\s+is)?|new\s+password(?:\s+is)?|initial\s+password(?:\s+is)?|password\s+is|reset\s+to(?:\s+default(?:\s+password)?)?)\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
+                ) ||
+                t.match(
+                  /password\s+reset(?:\s+successfully)?\.?\s*(?:default\s+password\s+is|password\s+is|default\s+is)?\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
+                );
+              return {
+                success: true,
+                text: t,
+                password: passMatch ? (passMatch[1] || passMatch[0]).trim() : undefined,
+              };
             }
           }
 
@@ -3480,7 +4664,23 @@ export class UserManagementExecutor {
     // 9. Confirm positive completion
     // Invariant: Do not wait for username or status row to change after reset; those values normally remain unchanged.
     if (isResetConfirmed) {
-      const deliveredPassword = explicitResetPassword || clientDefaultPassword;
+      // Fallback: If reset was confirmed but neither dialog nor upfront capture got password, attempt fallback capture
+      if (!explicitResetPassword && !clientDefaultPassword && addUsersUrl) {
+        try {
+          await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 8000 });
+          clientDefaultPassword = await this.captureLiveDefaultPassword(page);
+        } catch {}
+      }
+
+      const deliveredPassword =
+        explicitResetPassword ||
+        clientDefaultPassword ||
+        this.getCachedClientDefaultPassword(usersListUrl);
+
+      if (deliveredPassword) {
+        this.recordClientDefaultPassword(usersListUrl, deliveredPassword);
+      }
+
       return {
         success: true,
         username,

@@ -23,6 +23,8 @@ import {
 } from '../entities/index.js';
 import { EnvelopeEncryption } from '../crypto/envelope-encryption.js';
 import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema.js';
+import { AddUserDisableFields1700000000001 } from '../migrations/1700000000001-AddUserDisableFields.js';
+import { AddClientUserRoleRoute1700000000002 } from '../migrations/1700000000002-AddClientUserRoleRoute.js';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -72,14 +74,22 @@ async function runLiveMssqlIntegrationTests() {
 
   await testDataSource.initialize();
 
-  // Run migration on test DB
+  // Run migrations on test DB
   const queryRunner = testDataSource.createQueryRunner();
   await queryRunner.connect();
-  const migration = new InitialSchema1700000000000();
+  const migrations = [
+    new InitialSchema1700000000000(),
+    new AddUserDisableFields1700000000001(),
+    new AddClientUserRoleRoute1700000000002(),
+  ];
   try {
-    await migration.up(queryRunner);
-  } catch (err: any) {
-    // Already created
+    for (const m of migrations) {
+      try {
+        await m.up(queryRunner);
+      } catch (err: any) {
+        // Migration step already applied or partially existing
+      }
+    }
   } finally {
     await queryRunner.release();
   }

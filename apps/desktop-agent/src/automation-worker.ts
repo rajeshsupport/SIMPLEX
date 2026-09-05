@@ -53,6 +53,8 @@ export class AutomationWorker {
       'SET_CLIENT_USER_STATUS',
       'CHANGE_CLIENT_USER_STATUS',
       'RESET_CLIENT_USER_PASSWORD',
+      'MAP_USER_ROLES',
+      'PROCESS_USER_FULL_WORKFLOW',
     ].includes(task.taskType);
 
     const namespace: 'interactive' | 'sync' | 'mutation' = isHeadlessSync || isInspectTask
@@ -300,6 +302,8 @@ export class AutomationWorker {
       'SET_CLIENT_USER_STATUS',
       'CHANGE_CLIENT_USER_STATUS',
       'RESET_CLIENT_USER_PASSWORD',
+      'MAP_USER_ROLES',
+      'PROCESS_USER_FULL_WORKFLOW',
     ].includes(task.taskType);
 
     if (isMutationTask) {
@@ -557,6 +561,121 @@ export class AutomationWorker {
           } else {
             const safeError = sanitizeErrorMessage(resetRes.errorMessage || resetRes.message || 'Password reset failed on remote client.');
             onProgress?.(`✗ Password reset failed: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        // 5. Process Single User Full Workflow
+        if (task.taskType === 'PROCESS_USER_FULL_WORKFLOW') {
+          const payloadData = task.payload?.payload || task.payload;
+          const addUsersUrl = resolveClientRoute({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            route: task.payload?.addUsersRoute || task.addUsersRoute,
+            fallbackRoute: '/addUsers',
+          });
+          const roleUrl = resolveClientRoleUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            userRoleRoute: task.payload?.userRoleRoute,
+          });
+          const username = payloadData?.username || task.payload?.username || 'user';
+
+          onProgress?.(`Starting single-user full workflow for '${username}'…`);
+
+          const workflowRes = await UserManagementExecutor.processUserFullWorkflow(mutationPage, {
+            clientId: task.clientId,
+            addUsersUrl,
+            usersUrl: usersListUrl,
+            roleUrl,
+            loginUrl,
+            credentials: task.credentials,
+            userDto: payloadData as any,
+            onProgress: (comment: string, partial?: any) => {
+              onProgress?.(comment);
+              this.agentClient.sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: {
+                  message: comment,
+                  ...partial,
+                },
+              }).catch(() => {});
+            },
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(workflowRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (workflowRes.success) {
+            onProgress?.(`✓ Workflow completed for '${workflowRes.username}'`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(workflowRes.failureReason || workflowRes.errorMessage || 'Workflow failed');
+            onProgress?.(`✗ Workflow failed for '${workflowRes.username}': ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        // 6. Map User Roles Directly
+        if (task.taskType === 'MAP_USER_ROLES') {
+          const payloadData = task.payload?.payload || task.payload;
+          const roleUrl = resolveClientRoleUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            userRoleRoute: task.payload?.userRoleRoute,
+          });
+          const username = payloadData?.username || task.payload?.username;
+          const requestedRoles = payloadData?.roles || (payloadData?.role ? (Array.isArray(payloadData.role) ? payloadData.role : payloadData.role.split(',').map((s: string) => s.trim()).filter(Boolean)) : []);
+
+          onProgress?.(`Starting role mapping for '${username}'…`);
+
+          const mapRes = await UserManagementExecutor.mapUserRoles(mutationPage, {
+            roleUrl,
+            username,
+            fullName: payloadData?.fullName,
+            firstName: payloadData?.firstName,
+            remoteUserId: payloadData?.remoteUserId,
+            requestedRoles,
+            loginUrl,
+            credentials: task.credentials,
+            onProgress: (comment: string) => {
+              onProgress?.(comment);
+              this.agentClient.sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: comment },
+              }).catch(() => {});
+            },
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(mapRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (mapRes.success) {
+            onProgress?.(`✓ Role mapping verified for '${username}'`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(mapRes.failureReason || mapRes.errorMessage || 'Role mapping failed');
+            onProgress?.(`✗ Role mapping failed for '${username}': ${safeError}`);
             await this.agentClient.sendTelemetry(task.runId, {
               status: 'FAILED',
               errorMessage: safeError,

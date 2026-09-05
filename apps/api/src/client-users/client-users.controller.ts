@@ -31,6 +31,8 @@ import {
   ClientUserStatus,
   ExcelUserImportRow,
   ExcelUserImportExecutionSummary,
+  ClaimEphemeralCredentialDto,
+  AckEphemeralCredentialDto,
 } from '@hmc/shared';
 
 @SkipThrottle()
@@ -117,6 +119,25 @@ export class ClientUsersController {
     @CurrentUser() user: JwtPayload
   ) {
     return this.clientUsersService.reconcileCreatedUser(clientId, username, user);
+  }
+
+  @Post('claim-ephemeral-credential')
+  @RequirePermissions(PERMISSIONS.CLIENT_USER_CREDENTIAL_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async claimEphemeralCredential(
+    @Body() dto: ClaimEphemeralCredentialDto,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.claimEphemeralCredential(dto, user);
+  }
+
+  @Post('ack-ephemeral-credential')
+  @HttpCode(HttpStatus.OK)
+  async ackEphemeralCredential(
+    @Body() dto: AckEphemeralCredentialDto,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.ackEphemeralCredential(dto, dto.status, user);
   }
 
   @Post()

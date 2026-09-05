@@ -54,8 +54,7 @@ export interface ClientUser {
   lastSyncedAt: string;
   createdAt?: string;
   updatedAt?: string;
-  defaultPassword?: string;
-  temporaryPassword?: string;
+  credentialDeliveryStatus?: CredentialDeliveryStatus;
   message?: string;
 }
 
@@ -117,6 +116,7 @@ export interface CreateClientUserDto {
   mobileNumber: string;
   nationality: string;
   role?: string;
+  roles?: string[];
   profileRole?: string;
   barcodeNumber?: string;
   signatureBase64?: string;
@@ -138,6 +138,7 @@ export interface UpdateClientUserDto {
   mobileNumber?: string;
   nationality?: string;
   role?: string;
+  roles?: string[];
   profileRole?: string;
   barcodeNumber?: string;
   signatureBase64?: string;
@@ -182,6 +183,15 @@ export type UserImportClassification =
   | 'CONFLICT'
   | 'BLOCKED';
 
+export interface ParsedRoleValidationResult {
+  rawValue: string;
+  parsedRoles: string[];
+  validRoles: string[];
+  invalidRoles: string[];
+  isValid: boolean;
+  canonicalRoleString: string;
+}
+
 export interface ExcelUserImportRow {
   sNo?: number | string;
   rowNumber: number;
@@ -195,6 +205,10 @@ export interface ExcelUserImportRow {
   mobileNumber?: string;
   nationality?: string;
   role?: string;
+  roles?: string[];
+  parsedRoles?: string[];
+  validRoles?: string[];
+  invalidRoles?: string[];
   profileRole?: string;
   barcodeNumber?: string;
   requestedStatus?: ClientUserStatus;
@@ -204,6 +218,13 @@ export interface ExcelUserImportRow {
   errorCode?: string;
   message?: string;
   isApproved?: boolean;
+  retryStartingPoint?: UserWorkflowRetryStartingPoint;
+  validationState?: UserValidationStageState;
+  creationState?: UserCreationStageState;
+  userSearchState?: UserSearchStageState;
+  roleSelectionState?: RoleSelectionStageState;
+  roleUpdateState?: RoleUpdateStageState;
+  roleVerificationState?: RoleVerificationStageState;
   potentialDuplicateOf?: {
     username: string;
     fullName: string;
@@ -226,25 +247,130 @@ export interface ExcelUserImportPreviewResult {
   };
 }
 
+export type UserValidationStageState = 'NOT_STARTED' | 'IN_PROGRESS' | 'PASSED' | 'FAILED';
+export type UserCreationStageState = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+export type UserSearchStageState = 'NOT_STARTED' | 'IN_PROGRESS' | 'EXACT_MATCH_FOUND' | 'FAILED' | 'AMBIGUOUS' | 'SKIPPED';
+export type RoleSelectionStageState = 'NOT_STARTED' | 'IN_PROGRESS' | 'SELECTED' | 'PARTIAL' | 'FAILED' | 'SKIPPED';
+export type RoleUpdateStageState = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+export type RoleVerificationStageState = 'NOT_STARTED' | 'IN_PROGRESS' | 'PASSED' | 'FAILED' | 'SKIPPED';
+export type ImportProgressStage =
+  | 'VALIDATING'
+  | 'CREATING_USER'
+  | 'USER_CREATED'
+  | 'OPENING_ROLE_SCREEN'
+  | 'SEARCHING_USER'
+  | 'SELECTING_ROLES'
+  | 'SUBMITTING_ROLES'
+  | 'VERIFYING_ROLES'
+  | 'COMPLETED';
+export type UserWorkflowOverallStatus = 'READY' | 'IN_PROGRESS' | 'COMPLETED' | 'PARTIAL_FAILED' | 'FAILED' | 'ALREADY_EXISTS' | 'CANCELLED' | 'NOT_PROCESSED' | 'SKIPPED_DUPLICATE';
+export type UserWorkflowRetryStartingPoint = 'USER_CREATION' | 'ROLE_MAPPING' | 'VALIDATION' | 'NONE';
+export type BatchFinalStatus = 'COMPLETED' | 'COMPLETED_WITH_ROW_ERRORS' | 'PAUSED_SYSTEM_ERROR' | 'FAILED_NO_ROWS_PROCESSED';
+
 export interface ExcelUserImportExecutionRowResult {
   sNo?: number | string;
   rowNumber: number;
   action: UserImportAction;
   username: string;
   fullName: string;
-  result: 'SUCCESS' | 'CREATED' | 'ALREADY_EXISTS' | 'FAILED' | 'SKIPPED_DUPLICATE' | 'CANCELLED' | 'VALIDATION_FAILED' | 'INVALID' | 'NOT_PROCESSED' | 'REMOTE_ERROR' | 'UNKNOWN_RESULT_REQUIRES_REVIEW' | 'CREATED_WITH_INCORRECT_REMOTE_ERROR_MESSAGE' | 'REMOTE_CREATE_BLOCKED_UNKNOWN_ERROR';
+  result: 'SUCCESS' | 'CREATED' | 'COMPLETED' | 'PARTIAL_FAILED' | 'ALREADY_EXISTS' | 'FAILED' | 'SKIPPED_DUPLICATE' | 'CANCELLED' | 'VALIDATION_FAILED' | 'INVALID' | 'NOT_PROCESSED' | 'REMOTE_ERROR' | 'UNKNOWN_RESULT_REQUIRES_REVIEW' | 'CREATED_WITH_INCORRECT_REMOTE_ERROR_MESSAGE' | 'REMOTE_CREATE_BLOCKED_UNKNOWN_ERROR' | 'USER_SELECTION_AMBIGUOUS' | 'ROLE_MAPPING_FAILED';
   errorCode?: string;
   message: string;
   remoteStatus?: ClientUserStatus;
   existingStatus?: ClientUserStatus;
   executedAt: string;
   correlationId: string;
+
+  // Granular stage-by-stage status breakdown
+  validationState?: UserValidationStageState;
+  creationState?: UserCreationStageState;
+  userSearchState?: UserSearchStageState;
+  roleSelectionState?: RoleSelectionStageState;
+  roleUpdateState?: RoleUpdateStageState;
+  roleVerificationState?: RoleVerificationStageState;
+  overallStatus?: UserWorkflowOverallStatus;
+  failureReason?: string;
+  retryStartingPoint?: UserWorkflowRetryStartingPoint;
+  nextAction?: string;
+
+  // Role Mapping details
+  requestedRoles?: string[];
+  mappedRoles?: string[];
+  missingRoles?: string[];
+  roleSelectionProgress?: string;
+
+  // Non-sensitive credential delivery status (zero password or event-id retention in generic results)
+  credentialDeliveryStatus?: CredentialDeliveryStatus;
 }
+
+export type CredentialDeliveryStatus = 'DELIVERED' | 'RESTRICTED' | 'UNAVAILABLE' | 'EXPIRED' | 'FAILED';
+
+export interface EphemeralCredentialPayload {
+  oneTimeEventId: string;
+  oneTimeEventIdHash: string;
+  initiatingOperatorId: string;
+  initiatingSessionId?: string;
+  clientId: string;
+  jobId: string;
+  rowNumber?: number;
+  username: string;
+  fullName?: string;
+  password?: string | null;
+  createdAt: string;
+  hardExpiresAt: string;
+}
+
+export interface ClaimEphemeralCredentialDto {
+  oneTimeEventId: string;
+  clientId: string;
+  jobId: string;
+  sessionId?: string;
+}
+
+export interface AckEphemeralCredentialDto {
+  oneTimeEventId: string;
+  status?: 'DELIVERED' | 'VIEWED' | 'DISMISSED' | 'EXPIRED' | 'FAILED';
+}
+
+export interface EphemeralCredentialAck {
+  oneTimeEventIdHash: string;
+  acknowledged: boolean;
+  acknowledgedAt: string;
+  status?: string;
+}
+
+export interface EphemeralCredentialDeliveryMetadata {
+  oneTimeEventIdHash: string;
+  jobId: string;
+  deliveryStatus: CredentialDeliveryStatus;
+  deliveredAt: string | null;
+  expiredAt: string | null;
+}
+
+export interface UserEphemeralCredentialEvent {
+  eventType: 'USER_EPHEMERAL_CREDENTIAL_READY';
+  oneTimeEventId: string;
+  oneTimeEventIdHash: string;
+  jobId: string;
+  clientId: string;
+  rowNumber?: number;
+  username: string;
+  fullName?: string;
+  credentialDeliveryStatus: CredentialDeliveryStatus;
+  createdAt: string;
+  hardExpiresAt: string;
+  displayDurationSeconds: number;
+}
+
+export const CREDENTIAL_QUEUE_REQUIRES_OPERATOR_ATTENTION = 'CREDENTIAL_QUEUE_REQUIRES_OPERATOR_ATTENTION';
 
 export interface ExcelUserImportExecutionSummary {
   jobId: string;
   totalRows: number;
   createdRows: number;
+  completedRows?: number;
+  failedBeforeCreationRows?: number;
+  userCreatedRolePendingRows?: number;
   alreadyExistingRows: number;
   invalidRows: number;
   failedRows: number;
@@ -252,7 +378,14 @@ export interface ExcelUserImportExecutionSummary {
   notProcessedRows: number;
   succeededRows: number;
   skippedRows: number;
+  remainingUnprocessedRows?: number;
+  batchStatus?: BatchFinalStatus;
+  systemPaused?: boolean;
+  systemPauseReason?: string;
+  lastSuccessfulUser?: string;
+  currentFailedUser?: string;
   results: ExcelUserImportExecutionRowResult[];
+  ephemeralCredentials?: UserEphemeralCredentialEvent[];
 }
 
 export const CLIENT_USER_ERROR_CODES = {
@@ -295,6 +428,97 @@ export const CLIENT_USER_ERROR_CODES = {
   INVALID_CLIENT_URL: 'INVALID_CLIENT_URL',
   MISSING_CLIENT_URL: 'MISSING_CLIENT_URL',
   HOST_MISMATCH_AFTER_REDIRECT: 'HOST_MISMATCH_AFTER_REDIRECT',
+  USER_SELECTION_AMBIGUOUS: 'USER_SELECTION_AMBIGUOUS',
+  ROLE_CONTROL_NOT_FOUND: 'ROLE_CONTROL_NOT_FOUND',
+  ROLE_UPDATE_FAILED: 'ROLE_UPDATE_FAILED',
+  ROLE_VERIFICATION_MISMATCH: 'ROLE_VERIFICATION_MISMATCH',
+  BATCH_PAUSED_SYSTEM_ERROR: 'BATCH_PAUSED_SYSTEM_ERROR',
+  CLIENT_UNREACHABLE: 'CLIENT_UNREACHABLE',
+  ROUTE_ADD_USERS_UNAVAILABLE: 'ROUTE_ADD_USERS_UNAVAILABLE',
+  ROUTE_ADD_USER_ROLE_UNAVAILABLE: 'ROUTE_ADD_USER_ROLE_UNAVAILABLE',
+  SELECTOR_PROFILE_INCOMPATIBLE: 'SELECTOR_PROFILE_INCOMPATIBLE',
+  DATABASE_UNAVAILABLE: 'DATABASE_UNAVAILABLE',
+  MUTATION_WORKER_UNAVAILABLE: 'MUTATION_WORKER_UNAVAILABLE',
+  CONSECUTIVE_INFRASTRUCTURE_FAILURES: 'CONSECUTIVE_INFRASTRUCTURE_FAILURES',
+  AGENT_DISCONNECTED: 'AGENT_DISCONNECTED',
+  AUTH_SESSION_EXPIRED: 'AUTH_SESSION_EXPIRED',
+  BROWSER_PROCESS_CRASHED: 'BROWSER_PROCESS_CRASHED',
 } as const;
 
 export type ClientUserErrorCode = keyof typeof CLIENT_USER_ERROR_CODES;
+
+export const SYSTEM_CIRCUIT_BREAKER_CODES = new Set<string>([
+  'AGENT_DISCONNECTED',
+  'AGENT_OFFLINE',
+  'DESKTOP_AGENT_OFFLINE',
+  'AUTH_SESSION_EXPIRED',
+  'CLIENT_AUTO_LOGIN_FAILED',
+  'AUTHENTICATION_FAILED',
+  'BROWSER_PROCESS_CRASHED',
+  'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+  'BROWSER_DISCONNECTED',
+  'CLIENT_UNREACHABLE',
+  'DATABASE_UNAVAILABLE',
+  'MUTATION_WORKER_UNAVAILABLE',
+  'CONSECUTIVE_INFRASTRUCTURE_FAILURES',
+  'HOST_MISMATCH_AFTER_REDIRECT',
+]);
+
+export const ROW_LEVEL_ERROR_CODES = new Set<string>([
+  'ROLE_UPDATE_FAILED',
+  'ROLE_CONTROL_NOT_FOUND',
+  'REMOTE_USER_NOT_FOUND',
+  'USER_SELECTION_NOT_FOUND',
+  'USER_SELECTION_AMBIGUOUS',
+  'USER_SELECTION_ID_MISMATCH',
+  'ROLE_VERIFICATION_MISMATCH',
+  'SELECTOR_PROFILE_INCOMPATIBLE',
+  'ROUTE_ADD_USER_ROLE_UNAVAILABLE',
+  'REMOTE_REQUIRED_FIELD_NOT_FOUND',
+  'REMOTE_DROPDOWN_OPTION_NOT_FOUND',
+  'REMOTE_FORM_VALIDATION_FAILED',
+  'REMOTE_CREATE_VERIFICATION_FAILED',
+  'REMOTE_SUBMIT_BUTTON_DISABLED',
+  'REMOTE_FORM_NOT_RECOGNIZED',
+  'REMOTE_ERROR',
+  'OPERATION_TIMED_OUT',
+]);
+
+export function isSystemCircuitBreakerError(errorCode?: string, errorMessage?: string): boolean {
+  if (!errorCode) return false;
+  if (ROW_LEVEL_ERROR_CODES.has(errorCode)) return false;
+  if (SYSTEM_CIRCUIT_BREAKER_CODES.has(errorCode)) return true;
+
+  const msg = (errorMessage || '').toLowerCase();
+  if (
+    msg.includes('net::err_connection') ||
+    msg.includes('econnrefused') ||
+    msg.includes('client unreachable') ||
+    msg.includes('enotfound')
+  ) {
+    return true;
+  }
+  if (
+    msg.includes('agent offline') ||
+    msg.includes('agent disconnected') ||
+    msg.includes('worker unavailable') ||
+    msg.includes('mutation worker unavailable')
+  ) {
+    return true;
+  }
+  if (
+    msg.includes('browser crashed') ||
+    msg.includes('target closed') ||
+    msg.includes('browser process')
+  ) {
+    return true;
+  }
+  if (
+    msg.includes('database unavailable') ||
+    msg.includes('mssql unavailable') ||
+    msg.includes('connection to db failed')
+  ) {
+    return true;
+  }
+  return false;
+}

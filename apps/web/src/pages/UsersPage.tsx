@@ -139,34 +139,79 @@ export const UsersPage: React.FC = () => {
     status: string;
   } | null>(null);
 
-  // Shared Credential Success Modal State (Create User & Password Reset)
+  // Shared Ephemeral Credential Success Modal & FIFO Queue State (Create User, Password Reset & Batch Import)
   interface CredentialSuccessInfo {
     type: 'CREATE' | 'RESET';
     username: string;
+    fullName?: string;
     clientCode?: string;
     clientName?: string;
-    password: string | null;
+    clientId?: string;
+    jobId?: string;
+    oneTimeCredentialEventId?: string;
+    oneTimeEventIdHash?: string;
+    password?: string | null;
+    isRestricted?: boolean;
+    isUnavailable?: boolean;
+    isExpiredBeforeViewing?: boolean;
+    hardExpiresAt?: string;
+    createdAt?: string;
+    roleMappingStatus?: 'COMPLETED' | 'PARTIAL_FAILED' | 'SKIPPED' | 'IN_PROGRESS';
+    roleMappingMessage?: string;
   }
 
+  const MAX_CREDENTIAL_QUEUE_SIZE = 10;
+  const [credentialQueue, setCredentialQueue] = useState<CredentialSuccessInfo[]>([]);
+  const [activeCredential, setActiveCredential] = useState<CredentialSuccessInfo | null>(null);
+  const [credentialBatchIndex, setCredentialBatchIndex] = useState<number>(1);
+  const [credentialBatchTotal, setCredentialBatchTotal] = useState<number>(1);
   const [isCredentialSuccessModalOpen, setIsCredentialSuccessModalOpen] = useState(false);
-  const [credentialSuccessInfo, setCredentialSuccessInfo] = useState<CredentialSuccessInfo | null>(null);
   const [credentialPasswordCountdown, setCredentialPasswordCountdown] = useState<number>(60);
+  const [isCredentialExpired, setIsCredentialExpired] = useState(false);
   const [copiedCredentialUsername, setCopiedCredentialUsername] = useState(false);
   const [copiedCredentialPassword, setCopiedCredentialPassword] = useState(false);
   const credentialPasswordTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const openCredentialSuccessModal = (info: CredentialSuccessInfo) => {
+  const claimAndDisplayCredential = async (item: CredentialSuccessInfo) => {
     if (credentialPasswordTimerRef.current) {
       clearInterval(credentialPasswordTimerRef.current);
       credentialPasswordTimerRef.current = null;
     }
-    setCredentialSuccessInfo(info);
     setCopiedCredentialUsername(false);
     setCopiedCredentialPassword(false);
-    setCredentialPasswordCountdown(60);
-    setIsCredentialSuccessModalOpen(true);
+    setIsCredentialExpired(false);
 
-    if (info.password) {
+    if (item.isRestricted) {
+      setActiveCredential({ ...item, password: null });
+      return;
+    }
+
+    if (item.isUnavailable) {
+      setActiveCredential({ ...item, password: null });
+      return;
+    }
+
+    // Check if hard expiry has already passed
+    if (item.hardExpiresAt && Date.now() >= new Date(item.hardExpiresAt).getTime()) {
+      setActiveCredential({ ...item, password: null, isExpiredBeforeViewing: true });
+      setIsCredentialExpired(true);
+      return;
+    }
+
+    // If password is already present in state
+    if (item.password) {
+      setActiveCredential(item);
+      const remainingHard = item.hardExpiresAt
+        ? Math.max(0, Math.floor((new Date(item.hardExpiresAt).getTime() - Date.now()) / 1000))
+        : 60;
+      const initialCountdown = Math.min(60, remainingHard);
+      setCredentialPasswordCountdown(initialCountdown);
+
+      if (initialCountdown <= 0) {
+        setIsCredentialExpired(true);
+        return;
+      }
+
       credentialPasswordTimerRef.current = setInterval(() => {
         setCredentialPasswordCountdown((prev) => {
           if (prev <= 1) {
@@ -174,12 +219,126 @@ export const UsersPage: React.FC = () => {
               clearInterval(credentialPasswordTimerRef.current);
               credentialPasswordTimerRef.current = null;
             }
-            setCredentialSuccessInfo((curr) => (curr ? { ...curr, password: null } : null));
+            setIsCredentialExpired(true);
+            setActiveCredential((prevCred) => (prevCred ? { ...prevCred, password: null } : null));
             return 0;
           }
           return prev - 1;
         });
       }, 1000);
+      return;
+    }
+
+    // Otherwise, claim from API
+    if (item.oneTimeCredentialEventId) {
+      try {
+        const res = await ApiClient.request<{
+          password: string | null;
+          hardExpiresAt: string;
+          displayDurationSeconds: number;
+          credentialDeliveryStatus: string;
+        }>('/client-users/claim-ephemeral-credential', {
+          method: 'POST',
+          body: JSON.stringify({
+            oneTimeEventId: item.oneTimeCredentialEventId,
+            clientId: item.clientId || selectedClientId,
+            jobId: item.jobId,
+          }),
+        });
+
+        const activeWithSecret: CredentialSuccessInfo = {
+          ...item,
+          password: res.password,
+          hardExpiresAt: res.hardExpiresAt || item.hardExpiresAt,
+        };
+        setActiveCredential(activeWithSecret);
+
+        const remainingHard = activeWithSecret.hardExpiresAt
+          ? Math.max(0, Math.floor((new Date(activeWithSecret.hardExpiresAt).getTime() - Date.now()) / 1000))
+          : 60;
+        const initialCountdown = Math.min(60, remainingHard);
+        setCredentialPasswordCountdown(initialCountdown);
+
+        if (initialCountdown <= 0) {
+          setIsCredentialExpired(true);
+          return;
+        }
+
+        credentialPasswordTimerRef.current = setInterval(() => {
+          setCredentialPasswordCountdown((prev) => {
+            if (prev <= 1) {
+              if (credentialPasswordTimerRef.current) {
+                clearInterval(credentialPasswordTimerRef.current);
+                credentialPasswordTimerRef.current = null;
+              }
+              setIsCredentialExpired(true);
+              setActiveCredential((prevCred) => (prevCred ? { ...prevCred, password: null } : null));
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      } catch (claimErr: any) {
+        setActiveCredential({ ...item, password: null, isExpiredBeforeViewing: true });
+        setIsCredentialExpired(true);
+      }
+    } else {
+      setActiveCredential({ ...item, password: null, isUnavailable: true });
+    }
+  };
+
+  const openCredentialSuccessModal = (info: CredentialSuccessInfo | CredentialSuccessInfo[]) => {
+    const items = Array.isArray(info) ? info : [info];
+    if (items.length === 0) return;
+
+    if (!isCredentialSuccessModalOpen || !activeCredential) {
+      const [first, ...rest] = items;
+      const boundedRest = rest.slice(0, MAX_CREDENTIAL_QUEUE_SIZE - 1);
+      setCredentialQueue(boundedRest);
+      setCredentialBatchIndex(1);
+      setCredentialBatchTotal(1 + boundedRest.length);
+      setIsCredentialSuccessModalOpen(true);
+      claimAndDisplayCredential(first);
+    } else {
+      setCredentialQueue((prev) => {
+        const availableSlots = Math.max(0, MAX_CREDENTIAL_QUEUE_SIZE - prev.length);
+        const boundedNew = items.slice(0, availableSlots);
+        return [...prev, ...boundedNew];
+      });
+      setCredentialBatchTotal((prev) => prev + items.length);
+    }
+  };
+
+  const handleNextOrCloseCredentialModal = async () => {
+    if (credentialPasswordTimerRef.current) {
+      clearInterval(credentialPasswordTimerRef.current);
+      credentialPasswordTimerRef.current = null;
+    }
+
+    if (activeCredential?.oneTimeCredentialEventId || activeCredential?.oneTimeEventIdHash) {
+      ApiClient.request('/client-users/ack-ephemeral-credential', {
+        method: 'POST',
+        body: JSON.stringify({
+          oneTimeEventId: activeCredential.oneTimeCredentialEventId,
+          oneTimeEventIdHash: activeCredential.oneTimeEventIdHash,
+          status: 'DISMISSED',
+        }),
+      }).catch(() => {});
+    }
+
+    if (credentialQueue.length > 0) {
+      const [next, ...rest] = credentialQueue;
+      setCredentialQueue(rest);
+      setCredentialBatchIndex((prev) => prev + 1);
+      await claimAndDisplayCredential(next);
+    } else {
+      setActiveCredential(null);
+      setCredentialQueue([]);
+      setIsCredentialSuccessModalOpen(false);
+      setIsCredentialExpired(false);
+      setCopiedCredentialUsername(false);
+      setCopiedCredentialPassword(false);
+      await loadUsers();
     }
   };
 
@@ -188,8 +347,22 @@ export const UsersPage: React.FC = () => {
       clearInterval(credentialPasswordTimerRef.current);
       credentialPasswordTimerRef.current = null;
     }
-    setCredentialSuccessInfo(null);
+
+    if (activeCredential?.oneTimeCredentialEventId || activeCredential?.oneTimeEventIdHash) {
+      ApiClient.request('/client-users/ack-ephemeral-credential', {
+        method: 'POST',
+        body: JSON.stringify({
+          oneTimeEventId: activeCredential.oneTimeCredentialEventId,
+          oneTimeEventIdHash: activeCredential.oneTimeEventIdHash,
+          status: 'DISMISSED',
+        }),
+      }).catch(() => {});
+    }
+
+    setActiveCredential(null);
+    setCredentialQueue([]);
     setIsCredentialSuccessModalOpen(false);
+    setIsCredentialExpired(false);
     setCopiedCredentialUsername(false);
     setCopiedCredentialPassword(false);
     await loadUsers();
@@ -213,12 +386,35 @@ export const UsersPage: React.FC = () => {
   const [statusMutationSuccess, setStatusMutationSuccess] = useState<string | null>(null);
   const statusMutationTimerRef = useRef<any>(null);
 
-  // Clean up ephemeral credentials and intervals on unmount
+  // Clean up ephemeral credentials on client switch
   useEffect(() => {
+    if (credentialPasswordTimerRef.current) {
+      clearInterval(credentialPasswordTimerRef.current);
+      credentialPasswordTimerRef.current = null;
+    }
+    setActiveCredential(null);
+    setCredentialQueue([]);
+    setIsCredentialSuccessModalOpen(false);
+  }, [selectedClientId]);
+
+  // Clean up ephemeral credentials and intervals on unmount and beforeunload
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (activeCredential?.oneTimeCredentialEventId) {
+        navigator.sendBeacon?.(
+          '/api/client-users/ack-ephemeral-credential',
+          JSON.stringify({ oneTimeEventId: activeCredential.oneTimeCredentialEventId, status: 'DISMISSED' })
+        );
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
       if (credentialPasswordTimerRef.current) clearInterval(credentialPasswordTimerRef.current);
       if (statusMutationTimerRef.current) clearInterval(statusMutationTimerRef.current);
-      setCredentialSuccessInfo(null);
+      setActiveCredential(null);
+      setCredentialQueue([]);
     };
   }, []);
 
@@ -671,13 +867,19 @@ export const UsersPage: React.FC = () => {
       setPotentialDuplicate(null);
 
       // Setup Post-Create Shared Credential Success Modal
-      const pwd = res.defaultPassword || res.temporaryPassword || null;
+      const isRestricted = (res as any).credentialDeliveryStatus === 'RESTRICTED';
+      const isUnavailable = (res as any).credentialDeliveryStatus === 'UNAVAILABLE' || (res as any).credentialDeliveryStatus === 'FAILED';
+
       openCredentialSuccessModal({
         type: 'CREATE',
         username: res.username,
+        fullName: res.fullName,
         clientCode: selectedClient?.clientCode,
         clientName: selectedClient?.clientName,
-        password: pwd,
+        clientId: selectedClientId,
+        oneTimeCredentialEventId: (res as any).oneTimeCredentialEventId,
+        isRestricted,
+        isUnavailable,
       });
 
       // Reset form state for next creation
@@ -872,19 +1074,23 @@ export const UsersPage: React.FC = () => {
     setIsMutatingReset(true);
     try {
       const res = await ApiClient.request<{
-        temporaryPassword?: string;
-        defaultPassword?: string;
+        success: boolean;
+        credentialDeliveryStatus?: string;
+        oneTimeCredentialEventId?: string;
         message: string;
         username?: string;
       }>(`/client-users/${selectedUser.id}/reset-password`, { method: 'POST' });
       setIsResetConfirmModalOpen(false);
-      const deliveredPassword = res.defaultPassword || res.temporaryPassword || null;
+      const isRestricted = res.credentialDeliveryStatus === 'RESTRICTED';
+      const isUnavailable = res.credentialDeliveryStatus === 'UNAVAILABLE' || res.credentialDeliveryStatus === 'FAILED';
       openCredentialSuccessModal({
         type: 'RESET',
         username: res.username || selectedUser.username,
         clientCode: selectedClient?.clientCode,
         clientName: selectedClient?.clientName,
-        password: deliveredPassword,
+        oneTimeCredentialEventId: res.oneTimeCredentialEventId,
+        isRestricted,
+        isUnavailable,
       });
     } catch (err: any) {
       setIsResetConfirmModalOpen(false);
@@ -1167,6 +1373,27 @@ export const UsersPage: React.FC = () => {
         type: 'success',
         text: `✓ Import complete: ${res.createdRows ?? res.succeededRows} created, ${res.alreadyExistingRows ?? 0} already existing, ${res.invalidRows ?? 0} invalid, ${res.failedRows} failed, ${res.notProcessedRows ?? 0} not processed.`,
       });
+
+      // Enqueue ephemeral credentials from batch import into FIFO queue
+      if (res.ephemeralCredentials && res.ephemeralCredentials.length > 0) {
+        const credsToQueue: CredentialSuccessInfo[] = res.ephemeralCredentials.map((c) => ({
+          type: 'CREATE',
+          username: c.username,
+          fullName: c.fullName,
+          clientCode: selectedClient?.clientCode,
+          clientName: selectedClient?.clientName,
+          clientId: c.clientId || selectedClientId,
+          jobId: c.jobId,
+          oneTimeCredentialEventId: c.oneTimeEventId,
+          oneTimeEventIdHash: c.oneTimeEventIdHash,
+          isRestricted: c.credentialDeliveryStatus === 'RESTRICTED',
+          isUnavailable: c.credentialDeliveryStatus === 'UNAVAILABLE' || c.credentialDeliveryStatus === 'FAILED',
+          hardExpiresAt: c.hardExpiresAt,
+          createdAt: c.createdAt,
+        }));
+        openCredentialSuccessModal(credsToQueue);
+      }
+
       await loadUsers();
     } catch (err: any) {
       const msg = err.message || err.response?.message || 'Import execution failed';
@@ -1177,14 +1404,25 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  // Retry Failed Rows Only
+  // Retry Failed Rows Only (resumes from role mapping or user creation as appropriate)
   const handleRetryFailedRows = async () => {
     if (!importExecution || !selectedClientId || !importPreview) return;
-    const failedResults = importExecution.results.filter((r) => r.result === 'FAILED');
-    if (failedResults.length === 0) return;
+    const retryableResults = importExecution.results.filter(
+      (r) => r.result === 'FAILED' || r.result === 'PARTIAL_FAILED' || r.overallStatus === 'FAILED' || r.overallStatus === 'PARTIAL_FAILED'
+    );
+    if (retryableResults.length === 0) return;
 
-    const failedUsernames = new Set(failedResults.map((f) => f.username.toLowerCase()));
-    const failedRows = importPreview.rows.filter((r) => failedUsernames.has(r.username.toLowerCase()));
+    const retryMap = new Map(retryableResults.map((f) => [f.username.toLowerCase(), f]));
+    const retryRows = importPreview.rows
+      .filter((r) => retryMap.has(r.username.toLowerCase()))
+      .map((r) => {
+        const res = retryMap.get(r.username.toLowerCase());
+        const startingPoint = res?.retryStartingPoint || (res?.result === 'PARTIAL_FAILED' || res?.overallStatus === 'PARTIAL_FAILED' ? 'ROLE_MAPPING' : 'USER_CREATION');
+        return {
+          ...r,
+          retryStartingPoint: startingPoint,
+        };
+      });
 
     setImporting(true);
     try {
@@ -1192,33 +1430,57 @@ export const UsersPage: React.FC = () => {
         method: 'POST',
         body: JSON.stringify({
           clientId: selectedClientId,
-          rows: failedRows,
+          rows: retryRows,
         }),
       });
 
+      // Enqueue ephemeral credentials from retry import if newly created
+      if (res.ephemeralCredentials && res.ephemeralCredentials.length > 0) {
+        const credsToQueue: CredentialSuccessInfo[] = res.ephemeralCredentials.map((c) => ({
+          type: 'CREATE',
+          username: c.username,
+          fullName: c.fullName,
+          clientCode: selectedClient?.clientCode,
+          clientName: selectedClient?.clientName,
+          clientId: c.clientId || selectedClientId,
+          jobId: c.jobId,
+          oneTimeCredentialEventId: c.oneTimeEventId,
+          oneTimeEventIdHash: c.oneTimeEventIdHash,
+          isRestricted: c.credentialDeliveryStatus === 'RESTRICTED',
+          isUnavailable: c.credentialDeliveryStatus === 'UNAVAILABLE' || c.credentialDeliveryStatus === 'FAILED',
+          hardExpiresAt: c.hardExpiresAt,
+          createdAt: c.createdAt,
+        }));
+        openCredentialSuccessModal(credsToQueue);
+      }
+
       // Merge retry results with original execution summary
       const updatedResults = [
-        ...importExecution.results.filter((r) => !failedUsernames.has(r.username.toLowerCase())),
+        ...importExecution.results.filter((r) => !retryMap.has(r.username.toLowerCase())),
         ...res.results,
       ];
       const mergedSummary: ExcelUserImportExecutionSummary = {
         jobId: importExecution.jobId,
         totalRows: updatedResults.length,
-        createdRows: updatedResults.filter((r) => r.result === 'SUCCESS' || r.result === 'CREATED').length,
+        completedRows: updatedResults.filter((r) => r.overallStatus === 'COMPLETED' && r.result !== 'ALREADY_EXISTS').length,
+        failedBeforeCreationRows: updatedResults.filter((r) => r.creationState === 'FAILED' || (r.overallStatus === 'FAILED' && r.result === 'FAILED')).length,
+        userCreatedRolePendingRows: updatedResults.filter((r) => r.overallStatus === 'PARTIAL_FAILED' || r.result === 'PARTIAL_FAILED').length,
         alreadyExistingRows: updatedResults.filter((r) => r.result === 'ALREADY_EXISTS').length,
         invalidRows: updatedResults.filter((r) => r.result === 'INVALID' || r.result === 'VALIDATION_FAILED').length,
-        failedRows: updatedResults.filter((r) => r.result === 'FAILED' || r.result === 'REMOTE_ERROR').length,
+        failedRows: updatedResults.filter((r) => r.result === 'FAILED' || r.result === 'PARTIAL_FAILED' || r.result === 'REMOTE_ERROR').length,
         cancelledRows: updatedResults.filter((r) => r.result === 'CANCELLED').length,
         notProcessedRows: updatedResults.filter((r) => r.result === 'NOT_PROCESSED' || r.result === 'SKIPPED_DUPLICATE').length,
-        succeededRows: updatedResults.filter((r) => r.result === 'SUCCESS' || r.result === 'CREATED').length,
-        skippedRows: updatedResults.filter((r) => r.result === 'ALREADY_EXISTS' || r.result === 'NOT_PROCESSED' || r.result === 'SKIPPED_DUPLICATE').length,
+        succeededRows: updatedResults.filter((r) => r.overallStatus === 'COMPLETED' && r.result !== 'ALREADY_EXISTS').length,
+        skippedRows: updatedResults.filter((r) => r.result === 'ALREADY_EXISTS' || r.result === 'NOT_PROCESSED' || r.result === 'CANCELLED').length,
+        createdRows: updatedResults.filter((r) => r.result === 'SUCCESS' || r.result === 'CREATED' || r.creationState === 'COMPLETED').length,
+        batchStatus: res.batchStatus,
         results: updatedResults,
       };
 
       setImportExecution(mergedSummary);
       setActionMessage({
         type: 'success',
-        text: `✓ Retry complete: ${res.succeededRows} newly created, ${res.failedRows} still failed.`,
+        text: `✓ Retry complete: ${res.completedRows ?? res.succeededRows} completed, ${res.failedBeforeCreationRows ?? 0} failed before creation, ${res.userCreatedRolePendingRows ?? 0} role mapping pending.`,
       });
       await loadUsers();
     } catch (err: any) {
@@ -2132,25 +2394,44 @@ export const UsersPage: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Modal: Shared Credential Success (Create User & Password Reset) */}
+      {/* Modal: Shared Credential Success (Create User, Password Reset & Batch Import) */}
       <Modal
         isOpen={isCredentialSuccessModalOpen}
         onClose={closeCredentialSuccessModal}
         title=""
       >
         <div className="space-y-4 text-xs" data-testid="credential-success-modal">
+          {/* Batch Queue Indicator */}
+          {credentialBatchTotal > 1 && (
+            <div className="flex items-center justify-between px-3 py-2 bg-slate-900/90 border border-slate-700/80 rounded-lg text-xs">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 bg-sky-950 text-sky-300 border border-sky-800 rounded font-semibold text-[10px]">
+                  BATCH QUEUE
+                </span>
+                <span className="text-slate-200 font-medium">
+                  Credential {credentialBatchIndex} of {credentialBatchTotal}
+                </span>
+              </div>
+              {credentialQueue.length > 0 && (
+                <span className="text-slate-400 text-[11px]">
+                  ({credentialQueue.length} more in queue)
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Header Banner */}
           <div className="p-4 bg-emerald-950/80 border border-emerald-600/80 rounded-xl text-emerald-200">
             <div className="font-bold text-sm flex items-center gap-2 mb-1 text-emerald-300">
               <CheckCircle className="w-5 h-5 text-emerald-400" />
               <span>
-                {credentialSuccessInfo?.type === 'CREATE'
+                {activeCredential?.type === 'CREATE'
                   ? 'User created successfully'
                   : 'Password reset successfully'}
               </span>
             </div>
             <p className="text-[11px] text-emerald-200/90">
-              {credentialSuccessInfo?.type === 'CREATE'
+              {activeCredential?.type === 'CREATE'
                 ? 'The user was created and verified in the remote client system, and synchronized to Central Console.'
                 : 'The password reset was verified in the remote client system.'}
             </p>
@@ -2162,8 +2443,8 @@ export const UsersPage: React.FC = () => {
             <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
               <span className="text-slate-400 text-[11px] font-medium">Selected Client</span>
               <span className="font-semibold text-white font-mono text-xs">
-                {credentialSuccessInfo?.clientCode || selectedClient?.clientCode || 'N/A'}
-                {(credentialSuccessInfo?.clientName || selectedClient?.clientName) ? ` (${credentialSuccessInfo?.clientName || selectedClient?.clientName})` : ''}
+                {activeCredential?.clientCode || selectedClient?.clientCode || 'N/A'}
+                {(activeCredential?.clientName || selectedClient?.clientName) ? ` (${activeCredential?.clientName || selectedClient?.clientName})` : ''}
               </span>
             </div>
 
@@ -2172,14 +2453,19 @@ export const UsersPage: React.FC = () => {
               <div>
                 <span className="text-slate-400 text-[11px] block font-medium">Username</span>
                 <span className="font-mono text-sm font-bold text-white" data-testid="credential-username">
-                  {credentialSuccessInfo?.username || 'N/A'}
+                  {activeCredential?.username || 'N/A'}
                 </span>
+                {activeCredential?.fullName && (
+                  <span className="text-slate-400 text-[11px] block">
+                    ({activeCredential.fullName})
+                  </span>
+                )}
               </div>
               <button
                 type="button"
                 onClick={() => {
-                  if (credentialSuccessInfo?.username) {
-                    navigator.clipboard.writeText(credentialSuccessInfo.username);
+                  if (activeCredential?.username) {
+                    navigator.clipboard.writeText(activeCredential.username);
                     setCopiedCredentialUsername(true);
                     setTimeout(() => setCopiedCredentialUsername(false), 2000);
                   }
@@ -2196,25 +2482,33 @@ export const UsersPage: React.FC = () => {
             <div className="pt-1">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-slate-400 text-[11px] font-medium">
-                  {credentialSuccessInfo?.type === 'CREATE' ? 'Default Password' : 'New/Default Password'}
+                  {activeCredential?.type === 'CREATE' ? 'Default Password' : 'New/Default Password'}
                 </span>
-                {credentialSuccessInfo?.password && (
-                  <span className="text-amber-400 font-mono text-[10px] flex items-center gap-1">
+                {activeCredential?.password && !isCredentialExpired && !activeCredential?.isRestricted && (
+                  <span className="text-amber-400 font-mono text-[10px] flex items-center gap-1" data-testid="credential-countdown">
                     <Clock className="w-3 h-3" /> Auto-clears in {credentialPasswordCountdown}s
                   </span>
                 )}
               </div>
 
-              {credentialSuccessInfo?.password ? (
+              {isCredentialExpired || activeCredential?.isExpiredBeforeViewing ? (
+                <div className="p-3 bg-amber-950/40 rounded-lg border border-amber-800/60 text-amber-300 text-xs font-semibold" data-testid="credential-expired-notice">
+                  {activeCredential?.isExpiredBeforeViewing ? 'Default password display expired before viewing' : 'Default password display expired'}
+                </div>
+              ) : activeCredential?.isRestricted ? (
+                <div className="p-3 bg-slate-900/80 rounded-lg border border-amber-800/40 text-amber-300 text-xs font-medium italic" data-testid="credential-restricted-notice">
+                  Default Password: Restricted
+                </div>
+              ) : activeCredential?.password ? (
                 <div className="flex items-center justify-between bg-slate-900 px-3.5 py-3 rounded-lg border border-slate-700/80">
                   <span className="font-mono text-base font-bold text-emerald-400 tracking-wider select-all" data-testid="credential-password">
-                    {credentialSuccessInfo.password}
+                    {activeCredential.password}
                   </span>
                   <button
                     type="button"
                     onClick={() => {
-                      if (credentialSuccessInfo?.password) {
-                        navigator.clipboard.writeText(credentialSuccessInfo.password);
+                      if (activeCredential?.password) {
+                        navigator.clipboard.writeText(activeCredential.password);
                         setCopiedCredentialPassword(true);
                         setTimeout(() => setCopiedCredentialPassword(false), 2000);
                       }
@@ -2228,13 +2522,21 @@ export const UsersPage: React.FC = () => {
                   </button>
                 </div>
               ) : (
-                <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800 text-slate-400 text-xs italic">
-                  {credentialSuccessInfo?.type === 'CREATE'
-                    ? 'Default password was not provided by the client application.'
-                    : 'Password reset succeeded, but the client application did not provide the password.'}
+                <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800 text-slate-400 text-xs italic" data-testid="credential-unavailable-notice">
+                  Default Password: Not returned by client
                 </div>
               )}
             </div>
+
+            {/* Role Mapping Status Row if applicable */}
+            {activeCredential?.roleMappingStatus && (
+              <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+                <span className="text-slate-400">Role Mapping:</span>
+                <span className={`font-semibold ${activeCredential.roleMappingStatus === 'COMPLETED' ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {activeCredential.roleMappingStatus === 'COMPLETED' ? 'Completed & Verified' : 'Pending / Partial Failed'}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Ephemeral Policy Note */}
@@ -2246,15 +2548,34 @@ export const UsersPage: React.FC = () => {
           </div>
 
           {/* Modal Footer */}
-          <div className="flex justify-end pt-3 border-t border-slate-800">
+          <div className="flex justify-between items-center pt-3 border-t border-slate-800">
             <button
               type="button"
               onClick={closeCredentialSuccessModal}
-              className="px-5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg font-semibold text-xs transition-colors"
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-semibold text-xs transition-colors"
               data-testid="btn-close-credential-modal"
             >
-              Close
+              {credentialQueue.length > 0 ? 'Dismiss All' : 'Close'}
             </button>
+            {credentialQueue.length > 0 ? (
+              <button
+                type="button"
+                onClick={handleNextOrCloseCredentialModal}
+                className="px-5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center gap-1.5"
+                data-testid="btn-next-credential"
+              >
+                <span>Next User Credential ({credentialQueue.length} left)</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleNextOrCloseCredentialModal}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs transition-colors"
+                data-testid="btn-acknowledge-credential"
+              >
+                Acknowledge
+              </button>
+            )}
           </div>
         </div>
       </Modal>
@@ -2741,6 +3062,7 @@ export const UsersPage: React.FC = () => {
                       <th className="p-2">Username</th>
                       <th className="p-2">Full Name</th>
                       <th className="p-2">Mobile / Nat</th>
+                      <th className="p-2">Role(s)</th>
                       <th className="p-2">Status / Classification</th>
                       <th className="p-2">Validation Notes</th>
                     </tr>
@@ -2769,6 +3091,33 @@ export const UsersPage: React.FC = () => {
                           <td className="p-2 font-mono text-white font-medium">{r.username || '-'}</td>
                           <td className="p-2">{r.firstName} {r.lastName}</td>
                           <td className="p-2 text-slate-400">{r.mobileNumber || '-'} {r.nationality ? `(${r.nationality})` : ''}</td>
+                          <td className="p-2">
+                            <div className="flex flex-wrap gap-1 max-w-[200px]">
+                              {(r.roles && r.roles.length > 0
+                                ? r.roles
+                                : (r.parsedRoles && r.parsedRoles.length > 0
+                                  ? r.parsedRoles
+                                  : (r.role ? r.role.split(',').map((s) => s.trim()).filter(Boolean) : []))
+                              ).map((rl, idx) => {
+                                const isInvalid = r.invalidRoles?.includes(rl);
+                                return (
+                                  <span
+                                    key={idx}
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+                                      isInvalid
+                                        ? 'bg-red-950/80 text-red-300 border-red-800'
+                                        : 'bg-sky-950/80 text-sky-300 border-sky-800'
+                                    }`}
+                                  >
+                                    {rl}
+                                  </span>
+                                );
+                              })}
+                              {!r.role && (!r.roles || r.roles.length === 0) && (
+                                <span className="text-slate-500 text-xs">-</span>
+                              )}
+                            </div>
+                          </td>
                           <td className="p-2">
                             <span
                               className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
@@ -2838,7 +3187,20 @@ export const UsersPage: React.FC = () => {
                   <div className="font-bold text-white flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <CheckCircle className="w-4 h-4 text-emerald-400" />
-                      Import Execution Complete
+                      <span>Import Execution Summary</span>
+                      {importExecution.batchStatus && (
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                            importExecution.batchStatus === 'COMPLETED'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : importExecution.batchStatus === 'COMPLETED_WITH_ROW_ERRORS'
+                              ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                              : 'bg-red-950 text-red-300 border border-red-800'
+                          }`}
+                        >
+                          {importExecution.batchStatus.replace(/_/g, ' ')}
+                        </span>
+                      )}
                     </div>
                     <button
                       type="button"
@@ -2850,15 +3212,23 @@ export const UsersPage: React.FC = () => {
                     </button>
                   </div>
 
-                  {/* Accounting Grid: Total = Created + Already Existing + Invalid + Failed + Cancelled + Not Processed */}
-                  <div className="grid grid-cols-7 gap-1.5 text-center text-xs">
+                  {/* Accounting Grid: Total = Completed + Failed Before Creation + User Created Role Pending + Already Existing + Invalid + Skipped + Remaining */}
+                  <div className="grid grid-cols-8 gap-1.5 text-center text-xs">
                     <div className="p-2 bg-slate-950 rounded border border-sky-800">
                       <span className="block text-slate-400 text-[10px] font-semibold">Total</span>
                       <span className="text-sky-300 font-bold text-sm">{importExecution.totalRows}</span>
                     </div>
-                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
-                      <span className="block text-slate-500 text-[10px]">Created</span>
-                      <span className="text-emerald-400 font-bold text-sm">{importExecution.createdRows ?? importExecution.succeededRows}</span>
+                    <div className="p-2 bg-slate-950 rounded border border-emerald-900/60">
+                      <span className="block text-slate-400 text-[10px]">Completed</span>
+                      <span className="text-emerald-400 font-bold text-sm">{importExecution.completedRows ?? importExecution.createdRows ?? importExecution.succeededRows}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-red-950">
+                      <span className="block text-slate-400 text-[10px]">Create Failed</span>
+                      <span className="text-red-400 font-bold text-sm">{importExecution.failedBeforeCreationRows ?? importExecution.failedRows ?? 0}</span>
+                    </div>
+                    <div className="p-2 bg-slate-950 rounded border border-amber-950">
+                      <span className="block text-slate-400 text-[10px]">Role Pending</span>
+                      <span className="text-amber-400 font-bold text-sm">{importExecution.userCreatedRolePendingRows ?? 0}</span>
                     </div>
                     <div className="p-2 bg-slate-950 rounded border border-slate-800">
                       <span className="block text-slate-500 text-[10px]">Already Exists</span>
@@ -2869,21 +3239,17 @@ export const UsersPage: React.FC = () => {
                       <span className="text-amber-400 font-bold text-sm">{importExecution.invalidRows ?? 0}</span>
                     </div>
                     <div className="p-2 bg-slate-950 rounded border border-slate-800">
-                      <span className="block text-slate-500 text-[10px]">Failed</span>
-                      <span className="text-red-400 font-bold text-sm">{importExecution.failedRows}</span>
+                      <span className="block text-slate-500 text-[10px]">Skipped</span>
+                      <span className="text-slate-400 font-bold text-sm">{importExecution.skippedRows ?? (importExecution.cancelledRows ?? 0) + (importExecution.notProcessedRows ?? 0)}</span>
                     </div>
                     <div className="p-2 bg-slate-950 rounded border border-slate-800">
-                      <span className="block text-slate-500 text-[10px]">Cancelled</span>
-                      <span className="text-slate-400 font-bold text-sm">{importExecution.cancelledRows ?? 0}</span>
-                    </div>
-                    <div className="p-2 bg-slate-950 rounded border border-slate-800">
-                      <span className="block text-slate-500 text-[10px]">Not Processed</span>
-                      <span className="text-slate-400 font-bold text-sm">{importExecution.notProcessedRows ?? 0}</span>
+                      <span className="block text-slate-500 text-[10px]">Remaining</span>
+                      <span className="text-slate-400 font-bold text-sm">{importExecution.remainingUnprocessedRows ?? 0}</span>
                     </div>
                   </div>
 
                   {/* Results Table */}
-                  <div className="max-h-48 overflow-y-auto border border-slate-800 rounded bg-slate-950">
+                  <div className="max-h-56 overflow-y-auto border border-slate-800 rounded bg-slate-950">
                     <table className="w-full text-left text-[11px]">
                       <thead className="bg-slate-900 text-slate-400 uppercase font-semibold sticky top-0">
                         <tr>
@@ -2891,9 +3257,10 @@ export const UsersPage: React.FC = () => {
                           <th className="p-2">Row</th>
                           <th className="p-2">Username</th>
                           <th className="p-2">Full Name</th>
-                          <th className="p-2">Status</th>
-                          <th className="p-2">Remote / Current</th>
-                          <th className="p-2">Result Reason</th>
+                          <th className="p-2">Overall</th>
+                          <th className="p-2">Stages</th>
+                          <th className="p-2">Role Progress</th>
+                          <th className="p-2">Reason / Next Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800">
@@ -2906,8 +3273,10 @@ export const UsersPage: React.FC = () => {
                             <td className="p-2">
                               <span
                                 className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                  r.result === 'SUCCESS' || r.result === 'CREATED'
+                                  r.overallStatus === 'COMPLETED' || r.result === 'SUCCESS' || r.result === 'CREATED'
                                     ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                    : r.overallStatus === 'PARTIAL_FAILED' || r.result === 'PARTIAL_FAILED'
+                                    ? 'bg-amber-950 text-amber-300 border border-amber-800'
                                     : r.result === 'ALREADY_EXISTS'
                                     ? 'bg-purple-950 text-purple-300 border border-purple-800'
                                     : r.result === 'INVALID' || r.result === 'VALIDATION_FAILED'
@@ -2917,11 +3286,19 @@ export const UsersPage: React.FC = () => {
                                     : 'bg-red-950 text-red-300 border border-red-800'
                                 }`}
                               >
-                                {r.errorCode === 'REMOTE_CREATE_UNCONFIRMED' ? 'UNCONFIRMED' : r.result}
+                                {r.overallStatus || r.result}
                               </span>
                             </td>
-                            <td className="p-2 text-slate-300">{r.existingStatus || r.remoteStatus || 'N/A'}</td>
-                            <td className="p-2 text-slate-400">{r.message}</td>
+                            <td className="p-2">
+                              <div className="flex items-center gap-1 text-[9px]">
+                                <span title={`Creation: ${r.creationState || 'N/A'}`} className={`px-1 rounded ${r.creationState === 'COMPLETED' ? 'bg-emerald-900 text-emerald-200' : r.creationState === 'FAILED' ? 'bg-red-900 text-red-200' : 'bg-slate-800 text-slate-400'}`}>C</span>
+                                <span title={`Search: ${r.userSearchState || 'N/A'}`} className={`px-1 rounded ${r.userSearchState === 'EXACT_MATCH_FOUND' ? 'bg-emerald-900 text-emerald-200' : r.userSearchState === 'AMBIGUOUS' || r.userSearchState === 'FAILED' ? 'bg-amber-900 text-amber-200' : 'bg-slate-800 text-slate-400'}`}>S</span>
+                                <span title={`Role Selection: ${r.roleSelectionState || 'N/A'}`} className={`px-1 rounded ${r.roleSelectionState === 'SELECTED' ? 'bg-emerald-900 text-emerald-200' : r.roleSelectionState === 'PARTIAL' || r.roleSelectionState === 'FAILED' ? 'bg-amber-900 text-amber-200' : 'bg-slate-800 text-slate-400'}`}>R</span>
+                                <span title={`Verification: ${r.roleVerificationState || 'N/A'}`} className={`px-1 rounded ${r.roleVerificationState === 'PASSED' ? 'bg-emerald-900 text-emerald-200' : r.roleVerificationState === 'FAILED' ? 'bg-red-900 text-red-200' : 'bg-slate-800 text-slate-400'}`}>V</span>
+                              </div>
+                            </td>
+                            <td className="p-2 text-slate-300 text-[10px]">{r.roleSelectionProgress || (r.mappedRoles && r.mappedRoles.length > 0 ? r.mappedRoles.join(', ') : '—')}</td>
+                            <td className="p-2 text-slate-400 max-w-xs truncate" title={r.failureReason || r.message}>{r.failureReason || r.message}</td>
                           </tr>
                         ))}
                       </tbody>

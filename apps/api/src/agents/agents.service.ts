@@ -512,6 +512,7 @@ export class AgentsService {
     const isMutation = [
       'CREATE_CLIENT_USER',
       'CREATE_USER',
+      'MAP_USER_ROLES',
       'EDIT_CLIENT_USER',
       'EDIT_AND_UPDATE_CLIENT',
       'SET_CLIENT_USER_STATUS',

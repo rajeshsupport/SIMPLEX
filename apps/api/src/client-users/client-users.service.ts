@@ -9,6 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Like, In, Not, IsNull } from 'typeorm';
 import * as crypto from 'crypto';
+import * as zlib from 'zlib';
 import * as XLSX from 'xlsx';
 import {
   Client,
@@ -36,8 +37,38 @@ import {
   ClientCreateFormMetadata,
   UserImportAction,
   UserImportClassification,
+  parseAndValidateRoles,
+  BatchFinalStatus,
+  isSystemCircuitBreakerError,
+  SYSTEM_CIRCUIT_BREAKER_CODES,
+  PERMISSIONS,
+  UserEphemeralCredentialEvent,
+  CredentialDeliveryStatus,
+  EphemeralCredentialPayload,
+  EphemeralCredentialAck,
+  CREDENTIAL_QUEUE_REQUIRES_OPERATOR_ATTENTION,
+  assertValidOneTimeEventId,
+  isValidOneTimeEventId,
+  computeOneTimeEventIdHash,
+  SHA256_EMPTY_DIGEST,
 } from '@hmc/shared';
 import { AgentsService } from '../agents/agents.service.js';
+
+interface StoredEphemeralCredential {
+  oneTimeEventId: string;
+  oneTimeEventIdHash: string;
+  initiatingOperatorId: string;
+  initiatingSessionId?: string;
+  clientId: string;
+  jobId?: string;
+  rowNumber?: number;
+  username: string;
+  fullName?: string;
+  password?: string | null;
+  createdAt: number;
+  hardExpiresAt: number;
+  displayDurationSeconds: number;
+}
 
 @Injectable()
 export class ClientUsersService implements OnModuleInit {
@@ -841,7 +872,7 @@ export class ClientUsersService implements OnModuleInit {
     dto: CreateClientUserDto,
     user: JwtPayload,
     options?: { skipPostSync?: boolean }
-  ): Promise<ClientUser> {
+  ): Promise<ClientUser & { credentialDeliveryStatus?: CredentialDeliveryStatus; oneTimeCredentialEventId?: string }> {
     const client = await this.clientRepo.findOne({ where: { id: dto.clientId } });
     if (!client) throw new NotFoundException(`Client ${dto.clientId} not found`);
 
@@ -861,6 +892,7 @@ export class ClientUsersService implements OnModuleInit {
       mobileNumber: dto.mobileNumber,
       nationality: dto.nationality,
       role: dto.role,
+      roles: dto.roles,
       profileRole: dto.profileRole,
       barcodeNumber: dto.barcodeNumber,
       signatureBase64: dto.signatureBase64,
@@ -884,12 +916,16 @@ export class ClientUsersService implements OnModuleInit {
     // Check if role has dependent profile roles that require profileRole
     try {
       const formMeta = await this.getLiveFormOptions(dto.clientId, user, false).catch(() => null);
-      if (formMeta && formMeta.profileRoles && dto.role) {
-        const dependentProfileRoles = formMeta.profileRoles.filter((pr: any) => {
-          const parent = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
-          return parent && parent.toLowerCase().trim() === (dto.role || '').toLowerCase().trim();
+      if (formMeta && formMeta.profileRoles && (dto.role || (dto.roles && dto.roles.length > 0))) {
+        const rolesToCheck = (dto.roles && dto.roles.length > 0) ? dto.roles : (dto.role ? [dto.role] : []);
+        const hasDependent = rolesToCheck.some((r) => {
+          const dependentProfileRoles = formMeta.profileRoles.filter((pr: any) => {
+            const parent = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
+            return parent && parent.toLowerCase().trim() === r.toLowerCase().trim();
+          });
+          return dependentProfileRoles.length > 0;
         });
-        if (dependentProfileRoles.length > 0 && !dto.profileRole) {
+        if (hasDependent && !dto.profileRole) {
           throw new BadRequestException({
             code: 'REMOTE_REQUIRED_FIELD_UNSUPPORTED',
             message: 'REMOTE_REQUIRED_FIELD_UNSUPPORTED — Selected Role requires Profile Role.',
@@ -1092,16 +1128,29 @@ export class ClientUsersService implements OnModuleInit {
       );
 
       // Extract ephemeral default/temporary password from completed run result summary
-      let defaultPassword: string | undefined = undefined;
-      if (parsedResult.defaultPassword || parsedResult.temporaryPassword) {
-        defaultPassword = parsedResult.defaultPassword || parsedResult.temporaryPassword;
+      let capturedPassword: string | undefined = undefined;
+      if (parsedResult.ephemeralDefaultPassword || parsedResult.defaultPassword || parsedResult.temporaryPassword) {
+        capturedPassword = parsedResult.ephemeralDefaultPassword || parsedResult.defaultPassword || parsedResult.temporaryPassword;
       }
 
+      const deliveryRes = ClientUsersService.storeEphemeralCredential({
+        initiatingOperatorId: user.sub,
+        clientId: client.id,
+        username: dto.username,
+        fullName: saved.fullName,
+        password: capturedPassword,
+        user,
+      });
+
+      // Immediately scrub captured plaintext password from memory
+      capturedPassword = undefined;
+
       const resultDto = this.mapToDto(saved, client);
+
       return {
         ...resultDto,
-        defaultPassword,
-        temporaryPassword: defaultPassword,
+        credentialDeliveryStatus: deliveryRes.credentialDeliveryStatus,
+        oneTimeCredentialEventId: deliveryRes.oneTimeEventId,
         message: `User '${dto.username}' created and verified on client.`,
       };
     } finally {
@@ -1413,11 +1462,14 @@ export class ClientUsersService implements OnModuleInit {
         });
       }
 
-      // Remote verification succeeded -> Trigger automatic pull sync
-      await this.syncClientUsers(client.id, user);
+      // Remote verification succeeded -> Update Central snapshot immediately with verified remote status
+      snapshot.status = targetStatus;
+      snapshot.isPresentRemotely = true;
+      snapshot.lastSyncedAt = new Date();
+      const updatedSnapshot = await this.snapshotRepo.save(snapshot);
 
-      const updatedSnapshot = await this.snapshotRepo.findOne({ where: { id } });
-      if (!updatedSnapshot) throw new NotFoundException(`User ${id} not found after sync`);
+      // Trigger asynchronous background pull sync to reconcile entire directory
+      this.syncClientUsers(client.id, user).catch(() => {});
 
       await this.auditRepo.save(
         this.auditRepo.create({
@@ -1445,12 +1497,18 @@ export class ClientUsersService implements OnModuleInit {
   }
 
   /**
-   * Resets password on the remote client with verification and returns one-time temporary password.
+   * Resets password on the remote client with verification and delivers via ephemeral credential store.
    */
   async resetUserPassword(
     id: string,
     user: JwtPayload
-  ): Promise<{ temporaryPassword?: string; defaultPassword?: string; username?: string; message: string }> {
+  ): Promise<{
+    success: boolean;
+    username?: string;
+    credentialDeliveryStatus?: CredentialDeliveryStatus;
+    oneTimeCredentialEventId?: string;
+    message: string;
+  }> {
     const snapshot = await this.snapshotRepo.findOne({ where: { id } });
     if (!snapshot) throw new NotFoundException(`User ${id} not found`);
 
@@ -1571,6 +1629,18 @@ export class ClientUsersService implements OnModuleInit {
         message = parsedResult.message;
       }
 
+      const deliveryRes = ClientUsersService.storeEphemeralCredential({
+        initiatingOperatorId: user.sub,
+        clientId: client.id,
+        username: snapshot.username,
+        fullName: snapshot.fullName,
+        password: tempPassword,
+        user,
+      });
+
+      // Scrub plaintext immediately
+      tempPassword = undefined;
+
       // Record Audit (Zero plaintext password in audit log)
       await this.auditRepo.save(
         this.auditRepo.create({
@@ -1585,6 +1655,7 @@ export class ClientUsersService implements OnModuleInit {
             clientCode: client.clientCode,
             username: snapshot.username,
             runId: savedRun.id,
+            credentialDeliveryStatus: deliveryRes.credentialDeliveryStatus,
           }),
         })
       );
@@ -1595,9 +1666,10 @@ export class ClientUsersService implements OnModuleInit {
       });
 
       return {
-        temporaryPassword: tempPassword,
-        defaultPassword: tempPassword,
+        success: true,
         username: snapshot.username,
+        credentialDeliveryStatus: deliveryRes.credentialDeliveryStatus,
+        oneTimeCredentialEventId: deliveryRes.oneTimeEventId,
         message,
       };
     } finally {
@@ -1606,6 +1678,228 @@ export class ClientUsersService implements OnModuleInit {
   }
 
   private static formOptionsCache = new Map<string, { timestamp: number; data: ClientCreateFormMetadata }>();
+  private static ephemeralCredentialStore = new Map<string, StoredEphemeralCredential>();
+
+  /**
+   * Dedicated Ephemeral Credential Store:
+   * Holds transient credentials in memory only (never written to database, audit logs, or generic responses).
+   * Enforces 5-minute hard TTL and single-claim eviction.
+   */
+  public static storeEphemeralCredential(payload: {
+    initiatingOperatorId: string;
+    initiatingSessionId?: string;
+    clientId: string;
+    jobId?: string;
+    rowNumber?: number;
+    username: string;
+    fullName?: string;
+    password?: string | null;
+    user: JwtPayload;
+  }): { oneTimeEventId: string; oneTimeEventIdHash: string; credentialDeliveryStatus: CredentialDeliveryStatus } {
+    // Purge expired entries
+    const now = Date.now();
+    for (const [id, item] of ClientUsersService.ephemeralCredentialStore.entries()) {
+      if (now > item.hardExpiresAt) {
+        ClientUsersService.ephemeralCredentialStore.delete(id);
+      }
+    }
+
+    const hasCredentialViewPermission = Boolean(
+      payload.user.isSuperAdmin ||
+      (payload.user.permissions && (
+        payload.user.permissions.includes('client_user.credential_view') ||
+        payload.user.permissions.includes(PERMISSIONS.CLIENT_USER_CREDENTIAL_VIEW as any) ||
+        payload.user.permissions.includes('CLIENT_USER_CREDENTIAL_VIEW' as any)
+      ))
+    );
+
+    const oneTimeEventId = crypto.randomBytes(32).toString('hex');
+    assertValidOneTimeEventId(oneTimeEventId);
+    const oneTimeEventIdHash = computeOneTimeEventIdHash(oneTimeEventId);
+
+    if (!hasCredentialViewPermission) {
+      return {
+        oneTimeEventId,
+        oneTimeEventIdHash,
+        credentialDeliveryStatus: 'RESTRICTED',
+      };
+    }
+
+    if (!payload.password) {
+      return {
+        oneTimeEventId,
+        oneTimeEventIdHash,
+        credentialDeliveryStatus: 'UNAVAILABLE',
+      };
+    }
+
+    ClientUsersService.ephemeralCredentialStore.set(oneTimeEventId, {
+      oneTimeEventId,
+      oneTimeEventIdHash,
+      initiatingOperatorId: payload.initiatingOperatorId,
+      initiatingSessionId: payload.initiatingSessionId || payload.user.sessionId,
+      clientId: payload.clientId,
+      jobId: payload.jobId,
+      rowNumber: payload.rowNumber,
+      username: payload.username,
+      fullName: payload.fullName,
+      password: payload.password,
+      createdAt: now,
+      hardExpiresAt: now + 300000, // 5 minutes hard expiry
+      displayDurationSeconds: 60,
+    });
+
+    return {
+      oneTimeEventId,
+      oneTimeEventIdHash,
+      credentialDeliveryStatus: 'DELIVERED',
+    };
+  }
+
+  public claimEphemeralCredential(
+    dto: { oneTimeEventId: string; clientId?: string; jobId?: string; sessionId?: string } | string,
+    user: JwtPayload
+  ): {
+    oneTimeEventId: string;
+    oneTimeEventIdHash: string;
+    username: string;
+    fullName?: string;
+    password: string | null;
+    hardExpiresAt: string;
+    displayDurationSeconds: number;
+    credentialDeliveryStatus: CredentialDeliveryStatus;
+  } {
+    const hasCredentialViewPermission = Boolean(
+      user.isSuperAdmin ||
+      (user.permissions && (
+        user.permissions.includes('client_user.credential_view') ||
+        user.permissions.includes(PERMISSIONS.CLIENT_USER_CREDENTIAL_VIEW as any) ||
+        user.permissions.includes('CLIENT_USER_CREDENTIAL_VIEW' as any)
+      ))
+    );
+
+    if (!hasCredentialViewPermission) {
+      throw new ForbiddenException({
+        code: 'CREDENTIAL_VIEW_FORBIDDEN',
+        message: 'Operator lacks CLIENT_USER_CREDENTIAL_VIEW permission.',
+      });
+    }
+
+    const eventId = typeof dto === 'string' ? dto : dto?.oneTimeEventId;
+    if (!eventId || !isValidOneTimeEventId(eventId) || !ClientUsersService.ephemeralCredentialStore.has(eventId)) {
+      throw new NotFoundException({
+        code: 'CREDENTIAL_NOT_AVAILABLE',
+        message: 'Credential is not available.',
+      });
+    }
+
+    const stored = ClientUsersService.ephemeralCredentialStore.get(eventId)!;
+
+    // Strict Initiating Operator Ownership - Super Admin cross-operator claim is strictly forbidden!
+    if (stored.initiatingOperatorId !== user.sub) {
+      throw new NotFoundException({
+        code: 'CREDENTIAL_NOT_AVAILABLE',
+        message: 'Credential is not available.',
+      });
+    }
+
+    // Session Binding Check
+    const effectiveSessionId = user.sessionId || (typeof dto === 'object' ? dto.sessionId : undefined);
+    if (stored.initiatingSessionId && effectiveSessionId && stored.initiatingSessionId !== effectiveSessionId) {
+      throw new NotFoundException({
+        code: 'CREDENTIAL_NOT_AVAILABLE',
+        message: 'Credential is not available.',
+      });
+    }
+
+    // Client Binding Check
+    const effectiveClientId = typeof dto === 'object' ? dto.clientId : undefined;
+    if (effectiveClientId && stored.clientId && stored.clientId !== effectiveClientId) {
+      throw new NotFoundException({
+        code: 'CREDENTIAL_NOT_AVAILABLE',
+        message: 'Credential is not available.',
+      });
+    }
+
+    // Job Binding Check
+    const effectiveJobId = typeof dto === 'object' ? dto.jobId : undefined;
+    if (stored.jobId && effectiveJobId && stored.jobId !== effectiveJobId) {
+      throw new NotFoundException({
+        code: 'CREDENTIAL_NOT_AVAILABLE',
+        message: 'Credential is not available.',
+      });
+    }
+
+    // Hard TTL Check
+    if (Date.now() > stored.hardExpiresAt) {
+      ClientUsersService.ephemeralCredentialStore.delete(eventId);
+      throw new NotFoundException({
+        code: 'CREDENTIAL_NOT_AVAILABLE',
+        message: 'Credential is not available.',
+      });
+    }
+
+    // One-time retrieval: evict immediately
+    ClientUsersService.ephemeralCredentialStore.delete(eventId);
+
+    return {
+      oneTimeEventId: stored.oneTimeEventId,
+      oneTimeEventIdHash: stored.oneTimeEventIdHash,
+      username: stored.username,
+      fullName: stored.fullName,
+      password: stored.password || null,
+      hardExpiresAt: new Date(stored.hardExpiresAt).toISOString(),
+      displayDurationSeconds: stored.displayDurationSeconds,
+      credentialDeliveryStatus: 'DELIVERED',
+    };
+  }
+
+  public ackEphemeralCredential(
+    dto: { oneTimeEventId?: string; oneTimeEventIdHash?: string; status?: string } | string,
+    status?: string,
+    user?: JwtPayload
+  ): { success: boolean; acknowledged: boolean; oneTimeEventIdHash?: string } {
+    let eventId: string | undefined;
+    let eventIdHash: string | undefined;
+
+    if (typeof dto === 'string') {
+      eventId = dto;
+    } else if (dto && typeof dto === 'object') {
+      eventId = dto.oneTimeEventId;
+      eventIdHash = dto.oneTimeEventIdHash;
+    }
+
+    if (eventId) {
+      if (isValidOneTimeEventId(eventId)) {
+        if (ClientUsersService.ephemeralCredentialStore.has(eventId)) {
+          const stored = ClientUsersService.ephemeralCredentialStore.get(eventId);
+          if (stored) {
+            eventIdHash = stored.oneTimeEventIdHash;
+          }
+          ClientUsersService.ephemeralCredentialStore.delete(eventId);
+        } else {
+          eventIdHash = computeOneTimeEventIdHash(eventId);
+        }
+      }
+    } else if (eventIdHash) {
+      if (typeof eventIdHash === 'string' && eventIdHash.length === 64 && /^[a-f0-9]{64}$/i.test(eventIdHash) && eventIdHash !== SHA256_EMPTY_DIGEST) {
+        for (const [id, item] of ClientUsersService.ephemeralCredentialStore.entries()) {
+          if (item.oneTimeEventIdHash === eventIdHash) {
+            ClientUsersService.ephemeralCredentialStore.delete(id);
+            break;
+          }
+        }
+      } else {
+        eventIdHash = undefined;
+      }
+    }
+
+    return {
+      success: true,
+      acknowledged: true,
+      oneTimeEventIdHash: eventIdHash,
+    };
+  }
 
   /**
    * Retrieves live form dropdown options directly from the remote client Add User screen scoped by clientId, applicationVersion, and addUsersUrl.
@@ -1970,77 +2264,183 @@ export class ClientUsersService implements OnModuleInit {
     const roleList = (formMeta.roles || []).map(toLabel).filter(Boolean);
     const profList = (formMeta.profileRoles || []).map(toLabel).filter(Boolean);
 
-    const sampleNat = natList[0] || 'Saudi Arabia';
-    const sampleRole = roleList[0] || 'Physician';
-    const sampleProf = profList[0] || 'Clinical Specialist';
+    const sampleNat = natList[0] || 'Saudi ( SAU )';
+    const sampleRole1 = roleList.includes('Admin') ? 'Admin' : (roleList[0] || 'Admin');
+    const multiCandidates = ['Admin', 'PHARMACY', 'Appointment'].filter(r => roleList.includes(r));
+    const sampleMultiRole = multiCandidates.length >= 2 ? multiCandidates.join(',') : (roleList.slice(0, 3).join(',') || 'Admin,Appointment');
 
-    // 1. Sheet 1: Users (Headers in exact order: 9 columns, 1 SAMPLE row, no Password/Profile Role/Barcode column)
+    // 1. Sheet 1: User Import (Headers in exact order: 9 columns, 2 SAMPLE rows, clean header formatting)
     const headers = [
       'S.No',
-      'User Name *',
-      'First Name *',
+      'User Name',
+      'First Name',
       'Middle Name',
-      'Last Name *',
+      'Last Name',
       'Email',
-      'Mobile No *',
-      'Nationality *',
+      'Mobile No',
+      'Nationality',
       'Role',
     ];
 
     const templateRows = [
       {
-        'S.No': 'SAMPLE',
-        'User Name *': 'sample.user',
-        'First Name *': 'Sample',
+        'S.No': 'SAMPLE-1',
+        'User Name': 'john.doe',
+        'First Name': 'John',
         'Middle Name': 'A',
-        'Last Name *': 'User',
-        'Email': 'sample.user@example.com',
-        'Mobile No *': '0501234567',
-        'Nationality *': sampleNat,
-        'Role': sampleRole,
+        'Last Name': 'Doe',
+        'Email': 'john.doe@example.com',
+        'Mobile No': '0501234567',
+        'Nationality': sampleNat,
+        'Role': sampleRole1,
+      },
+      {
+        'S.No': 'SAMPLE-2',
+        'User Name': 'jane.smith',
+        'First Name': 'Jane',
+        'Middle Name': 'B',
+        'Last Name': 'Smith',
+        'Email': 'jane.smith@example.com',
+        'Mobile No': '0509876543',
+        'Nationality': sampleNat,
+        'Role': sampleMultiRole,
       },
     ];
 
-    const wsUsers = XLSX.utils.json_to_sheet(templateRows, { header: headers });
+    const wsUserImport = XLSX.utils.json_to_sheet(templateRows, { header: headers });
 
     // Set column widths
-    wsUsers['!cols'] = [
-      { wch: 10 }, // S.No
-      { wch: 20 }, // User Name *
-      { wch: 18 }, // First Name *
+    wsUserImport['!cols'] = [
+      { wch: 12 }, // S.No
+      { wch: 22 }, // User Name
+      { wch: 20 }, // First Name
       { wch: 16 }, // Middle Name
-      { wch: 18 }, // Last Name *
-      { wch: 28 }, // Email
-      { wch: 18 }, // Mobile No *
-      { wch: 24 }, // Nationality *
-      { wch: 24 }, // Role
+      { wch: 20 }, // Last Name
+      { wch: 30 }, // Email
+      { wch: 20 }, // Mobile No
+      { wch: 28 }, // Nationality
+      { wch: 35 }, // Role
     ];
 
     // Freeze top row
-    wsUsers['!views'] = [{ state: 'frozen', ySplit: 1 }];
+    wsUserImport['!views'] = [{ state: 'frozen', ySplit: 1 }];
 
     // Auto-filter
-    wsUsers['!autofilter'] = { ref: 'A1:I2' };
-
-    // Cell comments explaining required formats
-    const addComment = (cellRef: string, commentText: string) => {
-      if (!wsUsers[cellRef]) return;
-      wsUsers[cellRef].c = [{ t: commentText, a: 'Central Console' }];
-    };
-
-    addComment('A1', 'Unique serial number or identifier per row. Unchanged SAMPLE row will be ignored.');
-    addComment('B1', 'Required. Alphanumeric characters, dot, dash, and underscore only ([a-zA-Z0-9._-]).');
-    addComment('C1', "Required. User's given first name.");
-    addComment('D1', "Optional. User's middle name.");
-    addComment('E1', "Required. User's last or family name.");
-    addComment('F1', 'Optional. Valid email address format.');
-    addComment('G1', 'Required. Valid mobile phone number.');
-    addComment('H1', "Required. Must match a valid nationality from the 'Dropdown Options' sheet.");
-    addComment('I1', "Optional. Must match a valid role from the 'Dropdown Options' sheet.");
+    wsUserImport['!autofilter'] = { ref: 'A1:I3' };
 
     const routes = this.resolveClientUserRoutes(client);
 
-    // 2. Sheet 2: Dropdown Options (Column A: Nationality, Column B: Role)
+    // 2. Sheet 2: Instructions
+    const instructionsData = [
+      {
+        'Topic / Field': 'User Name',
+        'Requirement': 'Mandatory',
+        'Rules & Guidelines': 'Alphanumeric characters, dot (.), dash (-), and underscore (_) only ([a-zA-Z0-9._-]). Maximum 50 characters. Must be unique per client. Mandatory field displayed in RED in template header.',
+      },
+      {
+        'Topic / Field': 'First Name',
+        'Requirement': 'Mandatory',
+        'Rules & Guidelines': "User's given first name. Maximum 50 characters. Mandatory field displayed in RED in template header.",
+      },
+      {
+        'Topic / Field': 'Middle Name',
+        'Requirement': 'Optional',
+        'Rules & Guidelines': "User's middle name or middle initial. Optional field displayed in normal dark font in template header.",
+      },
+      {
+        'Topic / Field': 'Last Name',
+        'Requirement': 'Mandatory',
+        'Rules & Guidelines': "User's family or last name. Maximum 50 characters. Mandatory field displayed in RED in template header.",
+      },
+      {
+        'Topic / Field': 'Email',
+        'Requirement': 'Optional',
+        'Rules & Guidelines': 'Valid RFC 5322 email address (e.g., user@domain.com). Optional field displayed in normal dark font in template header.',
+      },
+      {
+        'Topic / Field': 'Mobile No',
+        'Requirement': 'Mandatory',
+        'Rules & Guidelines': 'Valid mobile phone number with digits and standard formatting. Mandatory field displayed in RED in template header.',
+      },
+      {
+        'Topic / Field': 'Nationality',
+        'Requirement': 'Mandatory',
+        'Rules & Guidelines': "Must match an active nationality listed in the 'Nationalities' sheet. Matching is case-insensitive. Mandatory field displayed in RED in template header.",
+      },
+      {
+        'Topic / Field': 'Role',
+        'Requirement': 'Optional',
+        'Rules & Guidelines': "Single role or comma-separated list of roles listed in the 'Roles' sheet. Optional field displayed in normal dark font in template header.",
+      },
+      {
+        'Topic / Field': 'Single-Role Syntax',
+        'Requirement': 'Usage Guide',
+        'Rules & Guidelines': `Enter exactly one role name matching the 'Roles' sheet (e.g., "${sampleRole1}").`,
+      },
+      {
+        'Topic / Field': 'Multi-Role Syntax',
+        'Requirement': 'Usage Guide',
+        'Rules & Guidelines': `Separate multiple roles using commas (e.g., "${sampleMultiRole}").`,
+      },
+      {
+        'Topic / Field': 'Space Trimming',
+        'Requirement': 'Engine Rule',
+        'Rules & Guidelines': 'Leading and trailing spaces around role names, usernames, and values are automatically trimmed by the engine.',
+      },
+      {
+        'Topic / Field': 'Case-Insensitive Validation',
+        'Requirement': 'Engine Rule',
+        'Rules & Guidelines': 'Role names and nationalities are matched case-insensitively against active client master records.',
+      },
+      {
+        'Topic / Field': 'Duplicate Role Removal',
+        'Requirement': 'Engine Rule',
+        'Rules & Guidelines': 'Duplicate role entries within a comma-separated list are automatically deduplicated prior to provisioning.',
+      },
+      {
+        'Topic / Field': 'Invalid Role Behavior',
+        'Requirement': 'Error Policy',
+        'Rules & Guidelines': 'Rows referencing invalid or unrecognized roles are rejected with INVALID_ROLE error in the validation preview.',
+      },
+      {
+        'Topic / Field': 'Invalid Nationality Behavior',
+        'Requirement': 'Error Policy',
+        'Rules & Guidelines': 'Rows referencing invalid nationalities are rejected with INVALID_NATIONALITY error in the validation preview.',
+      },
+      {
+        'Topic / Field': 'Sample-Row Behavior',
+        'Requirement': 'Import Rule',
+        'Rules & Guidelines': 'Sample rows (SAMPLE-1, SAMPLE-2) are provided for structural guidance only and are automatically excluded from import provisioning.',
+      },
+      {
+        'Topic / Field': 'Client Mismatch Protection',
+        'Requirement': 'Security Policy',
+        'Rules & Guidelines': `This workbook is strictly scoped to Client ID ${client.id}. Uploading to any other client triggers CLIENT_MISMATCH rejection.`,
+      },
+      {
+        'Topic / Field': 'Password Safety Invariant',
+        'Requirement': 'Security Policy',
+        'Rules & Guidelines': 'Passwords are NEVER stored in or imported via spreadsheet files. User credentials are created securely via central reset workflow.',
+      },
+      {
+        'Topic / Field': 'No Blank Rows',
+        'Requirement': 'Formatting Rule',
+        'Rules & Guidelines': 'Do not include blank or empty rows between user records in the User Import sheet.',
+      },
+      {
+        'Topic / Field': 'Do Not Rename Headers',
+        'Requirement': 'Formatting Rule',
+        'Rules & Guidelines': "Do not rename, remove, reorder, or modify column headers in row 1 of the 'User Import' sheet.",
+      },
+    ];
+
+    const wsInstructions = XLSX.utils.json_to_sheet(instructionsData, {
+      header: ['Topic / Field', 'Requirement', 'Rules & Guidelines'],
+    });
+    wsInstructions['!cols'] = [{ wch: 30 }, { wch: 20 }, { wch: 85 }];
+    wsInstructions['!views'] = [{ state: 'frozen', ySplit: 1 }];
+
+    // 3. Sheet 3: Nationalities
     const nationalities = Array.from(
       new Set(
         (formMeta.nationalities || [])
@@ -2049,6 +2449,23 @@ export class ClientUsersService implements OnModuleInit {
       )
     );
 
+    const nationalitiesRows = nationalities.map((n) => {
+      const orig = (formMeta.nationalities || []).find((raw: any) => (typeof raw === 'string' ? raw : raw?.label || raw?.value || '') === n);
+      return {
+        'Nationality': n,
+        'Code': (typeof orig === 'object' && orig?.value) ? orig.value : '',
+        'Status': 'ACTIVE',
+      };
+    });
+
+    const wsNationalities = XLSX.utils.json_to_sheet(nationalitiesRows.length > 0 ? nationalitiesRows : [{ 'Nationality': 'Saudi ( SAU )', 'Code': 'SAU', 'Status': 'ACTIVE' }], {
+      header: ['Nationality', 'Code', 'Status'],
+    });
+    wsNationalities['!cols'] = [{ wch: 35 }, { wch: 15 }, { wch: 15 }];
+    wsNationalities['!views'] = [{ state: 'frozen', ySplit: 1 }];
+    wsNationalities['!autofilter'] = { ref: `A1:C${Math.max(2, nationalitiesRows.length + 1)}` };
+
+    // 4. Sheet 4: Roles (Selected client-specific roles extracted from Role Master / live options)
     const roles = Array.from(
       new Set(
         (formMeta.roles || [])
@@ -2057,70 +2474,214 @@ export class ClientUsersService implements OnModuleInit {
       )
     );
 
-    const maxOptionRows = Math.max(nationalities.length, roles.length, 1);
-    const dropdownRows = [];
-    for (let i = 0; i < maxOptionRows; i++) {
-      dropdownRows.push({
-        'Nationality': nationalities[i] || '',
-        'Role': roles[i] || '',
-      });
-    }
-
-    const wsDropdown = XLSX.utils.json_to_sheet(dropdownRows, {
-      header: ['Nationality', 'Role'],
+    const clientRolesRows = roles.map((r) => {
+      const orig: any = (formMeta.roles || []).find((raw: any) => (typeof raw === 'string' ? raw : raw?.label || raw?.value || '') === r);
+      return {
+        'Role Name': r,
+        'Role ID': orig?.roleId || orig?.value || '',
+        'Description': orig?.description || '',
+        'Status': 'ACTIVE',
+      };
     });
 
-    wsDropdown['!cols'] = [
-      { wch: 25 }, // Nationality
-      { wch: 25 }, // Role
-    ];
-
-    wsDropdown['!views'] = [{ state: 'frozen', ySplit: 1 }];
-    wsDropdown['!autofilter'] = { ref: `A1:B${Math.max(2, dropdownRows.length + 1)}` };
-
-    // 3. Sheet 3: Roles (Selected client-specific roles extracted from Role Master / live options)
-    const clientRolesRows = roles.map((r) => ({
-      'Role Name': r,
-      'Client Code': client.clientCode,
-      'Client Name': client.clientName,
-    }));
-    const wsRoles = XLSX.utils.json_to_sheet(clientRolesRows.length > 0 ? clientRolesRows : [{ 'Role Name': 'Standard User', 'Client Code': client.clientCode, 'Client Name': client.clientName }], {
-      header: ['Role Name', 'Client Code', 'Client Name'],
+    const wsRoles = XLSX.utils.json_to_sheet(clientRolesRows.length > 0 ? clientRolesRows : [{ 'Role Name': 'Standard User', 'Role ID': '', 'Description': '', 'Status': 'ACTIVE' }], {
+      header: ['Role Name', 'Role ID', 'Description', 'Status'],
     });
-    wsRoles['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 30 }];
+    wsRoles['!cols'] = [{ wch: 40 }, { wch: 20 }, { wch: 45 }, { wch: 15 }];
     wsRoles['!views'] = [{ state: 'frozen', ySplit: 1 }];
+    wsRoles['!autofilter'] = { ref: `A1:D${Math.max(2, clientRolesRows.length + 1)}` };
 
-    // 4. Sheet 4: Template Info (Client identification metadata without credentials)
+    // 5. Sheet 5: Template Info (Client identification metadata without credentials)
     const templateInfoRows = [
       ['Property', 'Value'],
       ['Client ID', client.id],
       ['Client Code', client.clientCode],
       ['Client Name', client.clientName],
       ['Base URL', client.baseUrl],
-      ['Resolved Role URL', routes.resolvedRoleUrl],
-      ['Application Version', client.applicationVersion],
-      ['Generated At', new Date().toISOString()],
-      ['Notice', 'This template is scoped to the selected client. Cross-client import is prohibited.'],
+      ['Resolved Role Master URL', routes.resolvedRoleUrl],
+      ['Resolved Add Users URL', routes.resolvedAddUsersUrl || ''],
+      ['Selector Profile Version', (client as any).selectorProfileVersion || client.applicationVersion || 'v9.3'],
+      ['Template Generation Timestamp', new Date().toISOString()],
+      ['Extracted Roles Count', String(roles.length)],
+      ['Extracted Nationalities Count', String(nationalities.length)],
+      ['Security Notice', `This template is strictly scoped to Client ID ${client.id}. No secrets, credentials, tokens, or passwords are stored in this workbook. Cross-client import is prohibited.`],
     ];
     const wsTemplateInfo = XLSX.utils.aoa_to_sheet(templateInfoRows);
-    wsTemplateInfo['!cols'] = [{ wch: 20 }, { wch: 60 }];
+    wsTemplateInfo['!cols'] = [{ wch: 30 }, { wch: 90 }];
+    wsTemplateInfo['!views'] = [{ state: 'frozen', ySplit: 1 }];
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, wsUsers, 'Users');
-    XLSX.utils.book_append_sheet(wb, wsDropdown, 'Dropdown Options');
+    XLSX.utils.book_append_sheet(wb, wsUserImport, 'User Import');
+    XLSX.utils.book_append_sheet(wb, wsInstructions, 'Instructions');
+    XLSX.utils.book_append_sheet(wb, wsNationalities, 'Nationalities');
     XLSX.utils.book_append_sheet(wb, wsRoles, 'Roles');
     XLSX.utils.book_append_sheet(wb, wsTemplateInfo, 'Template Info');
 
     wb.Props = {
-      Title: 'User Import Template',
+      Title: 'HMC User Import Template',
       Subject: client.id,
       Company: client.clientName,
+      Author: 'Central Console User Management',
     };
 
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const rawBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = this.applyHeaderStylesToXlsx(rawBuffer);
     const filename = `${client.clientCode}_User_Import_Template_${Date.now()}.xlsx`;
 
     return { buffer, filename };
+  }
+
+  /**
+   * Applies red font (#C00000) to mandatory column headers and dark bold font (#1E293B) to optional headers
+   * with a consistent neutral background fill (#F1F5F9) for all columns in the User Import sheet.
+   */
+  private applyHeaderStylesToXlsx(xlsxBuf: Buffer): Buffer {
+    try {
+      const entries: Record<string, any> = {};
+      let offset = 0;
+      while (offset < xlsxBuf.length - 4) {
+        const sig = xlsxBuf.readUInt32LE(offset);
+        if (sig === 0x04034b50) {
+          const method = xlsxBuf.readUInt16LE(offset + 8);
+          const modTime = xlsxBuf.readUInt16LE(offset + 10);
+          const modDate = xlsxBuf.readUInt16LE(offset + 12);
+          const compSize = xlsxBuf.readUInt32LE(offset + 18);
+          const nameLen = xlsxBuf.readUInt16LE(offset + 26);
+          const extraLen = xlsxBuf.readUInt16LE(offset + 28);
+          const name = xlsxBuf.toString('utf8', offset + 30, offset + 30 + nameLen);
+          const dataStart = offset + 30 + nameLen + extraLen;
+          const compData = xlsxBuf.subarray(dataStart, dataStart + compSize);
+          let data: Buffer;
+          if (method === 8) {
+            data = zlib.inflateRawSync(compData);
+          } else if (method === 0) {
+            data = compData;
+          } else {
+            return xlsxBuf;
+          }
+          entries[name] = { name, data, modTime, modDate };
+          offset = dataStart + compSize;
+        } else if (sig === 0x02014b50 || sig === 0x06054b50) {
+          break;
+        } else {
+          offset++;
+        }
+      }
+
+      if (!entries['xl/styles.xml'] || !entries['xl/worksheets/sheet1.xml']) return xlsxBuf;
+
+      // 1. Add red (#C00000) and dark (#1E293B) fonts + neutral fill (#F1F5F9) + style XFs to styles.xml
+      let stylesXml = entries['xl/styles.xml'].data.toString('utf8');
+      stylesXml = stylesXml.replace(
+        /<fonts count="[^"]*">[\s\S]*?<\/fonts>/,
+        '<fonts count="3"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font><font><b/><sz val="11"/><color rgb="FFC00000"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font><font><b/><sz val="11"/><color rgb="FF1E293B"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font></fonts>'
+      );
+      stylesXml = stylesXml.replace(
+        /<fills count="[^"]*">[\s\S]*?<\/fills>/,
+        '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF1F5F9"/></patternFill></fill></fills>'
+      );
+      stylesXml = stylesXml.replace(
+        /<cellXfs count="[^"]*">[\s\S]*?<\/cellXfs>/,
+        '<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs>'
+      );
+      entries['xl/styles.xml'].data = Buffer.from(stylesXml, 'utf8');
+
+      // 2. Style row 1 of Sheet 1: Mandatory headers get s="1" (Red + Neutral Fill), optional headers get s="2" (Dark + Neutral Fill)
+      const mandatoryHeaders = ['user name', 'first name', 'last name', 'mobile no', 'nationality'];
+      let sheetXml = entries['xl/worksheets/sheet1.xml'].data.toString('utf8');
+      sheetXml = sheetXml.replace(/<row r="1">([\s\S]*?)<\/row>/, (match: string, cellsXml: string) => {
+        const styledCells = cellsXml.replace(/<c r="([A-Z]+1)"([^>]*)>(<v>([^<]*)<\/v>)<\/c>/g, (cellMatch: string, ref: string, attrs: string, valTag: string, text: string) => {
+          const norm = text.toLowerCase().replace(/\*/g, '').trim();
+          const isMandatory = mandatoryHeaders.includes(norm);
+          const styleId = isMandatory ? '1' : '2';
+          return `<c r="${ref}" s="${styleId}" t="str">${valTag}</c>`;
+        });
+        return `<row r="1">${styledCells}</row>`;
+      });
+      entries['xl/worksheets/sheet1.xml'].data = Buffer.from(sheetXml, 'utf8');
+
+      // CRC32 table
+      const crcTable: number[] = [];
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
+        crcTable[n] = c;
+      }
+
+      const fileHeaders: Buffer[] = [];
+      const centralHeaders: Buffer[] = [];
+      let zipOffset = 0;
+
+      for (const name of Object.keys(entries)) {
+        const entry = entries[name];
+        const dataBuf = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data, 'utf8');
+        const compData = zlib.deflateRawSync(dataBuf);
+        const nameBuf = Buffer.from(name, 'utf8');
+
+        let crc = 0 ^ (-1);
+        for (let i = 0; i < dataBuf.length; i++) {
+          crc = (crc >>> 8) ^ crcTable[(crc ^ dataBuf[i]) & 0xFF];
+        }
+        crc = (crc ^ (-1)) >>> 0;
+
+        const local = Buffer.alloc(30 + nameBuf.length);
+        local.writeUInt32LE(0x04034b50, 0);
+        local.writeUInt16LE(20, 4);
+        local.writeUInt16LE(0, 6);
+        local.writeUInt16LE(8, 8);
+        local.writeUInt16LE(entry.modTime || 0, 10);
+        local.writeUInt16LE(entry.modDate || 0, 12);
+        local.writeUInt32LE(crc, 14);
+        local.writeUInt32LE(compData.length, 18);
+        local.writeUInt32LE(dataBuf.length, 22);
+        local.writeUInt16LE(nameBuf.length, 26);
+        local.writeUInt16LE(0, 28);
+        nameBuf.copy(local, 30);
+
+        fileHeaders.push(local, compData);
+
+        const central = Buffer.alloc(46 + nameBuf.length);
+        central.writeUInt32LE(0x02014b50, 0);
+        central.writeUInt16LE(20, 4);
+        central.writeUInt16LE(20, 6);
+        central.writeUInt16LE(0, 8);
+        central.writeUInt16LE(8, 10);
+        central.writeUInt16LE(entry.modTime || 0, 12);
+        central.writeUInt16LE(entry.modDate || 0, 14);
+        central.writeUInt32LE(crc, 16);
+        central.writeUInt32LE(compData.length, 20);
+        central.writeUInt32LE(dataBuf.length, 24);
+        central.writeUInt16LE(nameBuf.length, 28);
+        central.writeUInt16LE(0, 30);
+        central.writeUInt16LE(0, 32);
+        central.writeUInt16LE(0, 34);
+        central.writeUInt16LE(0, 36);
+        central.writeUInt32LE(0, 38);
+        central.writeUInt32LE(zipOffset, 42);
+        nameBuf.copy(central, 46);
+
+        centralHeaders.push(central);
+        zipOffset += local.length + compData.length;
+      }
+
+      const centralOffset = zipOffset;
+      const centralBuf = Buffer.concat(centralHeaders);
+      const centralSize = centralBuf.length;
+
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(0, 4);
+      eocd.writeUInt16LE(0, 6);
+      eocd.writeUInt16LE(Object.keys(entries).length, 8);
+      eocd.writeUInt16LE(Object.keys(entries).length, 10);
+      eocd.writeUInt32LE(centralSize, 12);
+      eocd.writeUInt32LE(centralOffset, 16);
+      eocd.writeUInt16LE(0, 20);
+
+      return Buffer.concat([...fileHeaders, centralBuf, eocd]);
+    } catch {
+      return xlsxBuf;
+    }
   }
 
   /**
@@ -2177,7 +2738,7 @@ export class ClientUsersService implements OnModuleInit {
       });
     }
 
-    const sheetName = wb.SheetNames.find((s) => s.toLowerCase() === 'users') || wb.SheetNames[0];
+    const sheetName = wb.SheetNames.find((s) => ['user import', 'users'].includes(s.toLowerCase())) || wb.SheetNames[0];
     if (!sheetName) {
       throw new BadRequestException({
         code: 'INVALID_EXCEL_FORMAT',
@@ -2243,18 +2804,20 @@ export class ClientUsersService implements OnModuleInit {
       const rawMiddle = (row['Middle Name'] || row['MiddleName'] || row['middleName'] || '').toString().trim();
       const rawLast = (row['Last Name *'] || row['Last Name'] || row['LastName'] || row['lastName'] || '').toString().trim();
       const rawNick = (row['Nick Name'] || row['NickName'] || row['nickName'] || '').toString().trim();
-      const rawEmail = (row['Email'] || row['email'] || '').toString().trim();
+      const rawEmail = (row['Email *'] || row['Email'] || row['email'] || '').toString().trim();
       const rawMobile = (row['Mobile No *'] || row['Mobile No'] || row['Mobile Number'] || row['Mobile'] || row['mobileNumber'] || '').toString().trim();
       const rawNat = (row['Nationality *'] || row['Nationality'] || row['nationality'] || '').toString().trim();
-      const rawRole = (row['Role'] || row['role'] || '').toString().trim();
+      const rawRole = (row['Role(s) *'] || row['Role(s)'] || row['Roles *'] || row['Roles'] || row['Role *'] || row['Role'] || row['role'] || '').toString().trim();
       const rawProfile = (row['Profile Role'] || row['ProfileRole'] || row['profileRole'] || '').toString().trim();
       const rawBarcode = (row['Barcode No'] || row['Barcode Number'] || row['barcodeNumber'] || '').toString().trim();
       const rawStatus = (row['Status'] || row['Requested Status'] || 'ACTIVE').toString().toUpperCase().trim() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
 
-      // Ignore unchanged SAMPLE row
-      const isSampleSNo = rawSNo !== undefined && String(rawSNo).toUpperCase().trim() === 'SAMPLE';
-      const isSampleUser = rawUser.toLowerCase() === 'sample.user' || rawUser.toLowerCase() === 'sample_user';
-      if (isSampleSNo && (isSampleUser || !rawUser || rawFirst.toLowerCase() === 'sample')) {
+      // Ignore unchanged SAMPLE rows (e.g. SAMPLE, SAMPLE-1, SAMPLE-2)
+      const upperSNo = String(rawSNo ?? '').toUpperCase().trim();
+      const isSampleSNo = upperSNo.startsWith('SAMPLE');
+      const lowerUser = rawUser.toLowerCase();
+      const isSampleUser = ['sample.user', 'sample_user', 'john.doe', 'jane.smith'].includes(lowerUser);
+      if (isSampleSNo || (isSampleUser && ['sample', 'john', 'jane'].includes(rawFirst.toLowerCase()))) {
         continue;
       }
 
@@ -2343,19 +2906,32 @@ export class ClientUsersService implements OnModuleInit {
         classification = 'INVALID';
         errorCode = errorCode || 'REMOTE_DROPDOWN_OPTION_NOT_FOUND';
       }
-      if (role && normRoleSet.size > 0 && !normRoleSet.has(role.toLowerCase())) {
-        validationErrors.push(`Role '${role}' is not in the client's live options`);
+
+      // Parse and validate roles (supporting single roles, comma-separated multiple roles, quotes, whitespace, canonical casing)
+      const parsedRoleResult = parseAndValidateRoles(rawRole, liveOptions.roles);
+      const canonicalRoleStr = parsedRoleResult.canonicalRoleString || (role ? role : undefined);
+      const rolesArray = parsedRoleResult.validRoles.length > 0
+        ? parsedRoleResult.validRoles
+        : (parsedRoleResult.parsedRoles.length > 0 ? parsedRoleResult.parsedRoles : (role ? [role] : []));
+
+      if (!parsedRoleResult.isValid && parsedRoleResult.invalidRoles.length > 0) {
+        for (const invalidRole of parsedRoleResult.invalidRoles) {
+          validationErrors.push(`Role '${invalidRole}' is not in the client's live options`);
+        }
         classification = 'INVALID';
         errorCode = errorCode || 'REMOTE_DROPDOWN_OPTION_NOT_FOUND';
       }
 
       // Check if role genuinely requires profile role
-      if (role && rawProfileRoles.length > 0) {
-        const dependentProfileRoles = rawProfileRoles.filter((pr: any) => {
-          const parent = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
-          return parent && parent.toLowerCase().trim() === role.toLowerCase().trim();
+      if (rolesArray.length > 0 && rawProfileRoles.length > 0) {
+        const hasDependent = rolesArray.some((r) => {
+          const dependentProfileRoles = rawProfileRoles.filter((pr: any) => {
+            const parent = typeof pr === 'object' && pr?.roleDependency ? pr.roleDependency : '';
+            return parent && parent.toLowerCase().trim() === r.toLowerCase().trim();
+          });
+          return dependentProfileRoles.length > 0;
         });
-        if (dependentProfileRoles.length > 0 && !profileRole) {
+        if (hasDependent && !profileRole) {
           validationErrors.push('REMOTE_REQUIRED_FIELD_UNSUPPORTED — Selected Role requires Profile Role.');
           classification = 'INVALID';
           errorCode = errorCode || 'REMOTE_REQUIRED_FIELD_UNSUPPORTED';
@@ -2424,7 +3000,11 @@ export class ClientUsersService implements OnModuleInit {
         email,
         mobileNumber,
         nationality,
-        role,
+        role: canonicalRoleStr,
+        roles: rolesArray,
+        parsedRoles: parsedRoleResult.parsedRoles,
+        validRoles: parsedRoleResult.validRoles,
+        invalidRoles: parsedRoleResult.invalidRoles,
         profileRole,
         barcodeNumber,
         requestedStatus: rawStatus as ClientUserStatus,
@@ -2454,8 +3034,144 @@ export class ClientUsersService implements OnModuleInit {
   }
 
   /**
+   * Maps roles for a client user on /addUserRole screen.
+   */
+  async mapUserRoles(
+    dto: {
+      clientId: string;
+      username: string;
+      fullName?: string;
+      firstName?: string;
+      remoteUserId?: string;
+      roles: string[];
+    },
+    user: JwtPayload
+  ): Promise<any> {
+    const client = await this.clientRepo.findOne({ where: { id: dto.clientId } });
+    if (!client) throw new NotFoundException(`Client ${dto.clientId} not found`);
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(dto.clientId)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Role mapping is strictly blocked for PRODUCTION client '${client.clientCode}'.`,
+      });
+    }
+
+    const onlineAgents = (await this.agentsService.getAllAgents()).filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('Role mapping failed: Automation agent is offline.');
+    }
+
+    let credentials: { username: string; password: string } | undefined = undefined;
+    const cred = await this.credRepo.findOne({ where: { clientId: dto.clientId, isActive: true } });
+    if (cred) {
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'MAP_USER_ROLES',
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'MAP_USER_ROLES',
+        userId: user.sub,
+        clientId: client.id,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: routes.resolvedUsersUrl,
+        userRoleRoute: routes.resolvedRoleUrl,
+        credentials,
+        payload: {
+          username: dto.username,
+          fullName: dto.fullName,
+          firstName: dto.firstName,
+          remoteUserId: dto.remoteUserId,
+          roles: dto.roles,
+        },
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 30000) {
+      await new Promise((r) => setTimeout(r, 300));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun) {
+      savedRun.status = 'TIMED_OUT';
+      savedRun.errorMessage = 'Role mapping timed out: Automation agent did not respond within 30 seconds.';
+      await this.runRepo.save(savedRun).catch(() => {});
+      return {
+        success: false,
+        username: dto.username,
+        errorCode: 'OPERATION_TIMED_OUT',
+        errorMessage: 'Role mapping timed out: Automation agent did not respond within 30 seconds.',
+        failureReason: 'Role mapping timed out',
+        retryStartingPoint: 'ROLE_MAPPING',
+      };
+    }
+
+    let parsedResult: any = {};
+    try {
+      parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    if (completedRun.status === 'COMPLETED' || completedRun.status === 'SUCCEEDED') {
+      return {
+        success: true,
+        ...parsedResult,
+      };
+    }
+
+    return {
+      success: false,
+      username: dto.username,
+      errorCode: parsedResult.errorCode || 'ROLE_UPDATE_FAILED',
+      errorMessage: parsedResult.errorMessage || completedRun.errorMessage || 'Role mapping failed on client portal.',
+      failureReason: parsedResult.failureReason || parsedResult.errorMessage || completedRun.errorMessage || 'Role mapping failed',
+      userSearchState: parsedResult.userSearchState,
+      roleSelectionState: parsedResult.roleSelectionState,
+      roleUpdateState: parsedResult.roleUpdateState,
+      roleVerificationState: parsedResult.roleVerificationState,
+      requestedRoles: parsedResult.requestedRoles || dto.roles,
+      mappedRoles: parsedResult.mappedRoles || [],
+      missingRoles: parsedResult.missingRoles || dto.roles,
+      roleSelectionProgress: parsedResult.roleSelectionProgress,
+      retryStartingPoint: 'ROLE_MAPPING',
+    };
+  }
+
+  /**
    * Executes approved import rows sequentially with safe single-flight mutations.
-   * Enforces: Total = Created + Already Existing + Invalid + Failed + Cancelled + Not Processed.
+   * Continues to next user on row failure; pauses batch on system infrastructure errors.
+   * Enforces: Total = Completed + FailedBeforeCreation + UserCreatedRolePending + AlreadyExisting + Invalid + Skipped + RemainingUnprocessed.
    */
   async importExecute(clientId: string, rows: ExcelUserImportRow[], user: JwtPayload): Promise<ExcelUserImportExecutionSummary> {
     if (!clientId) throw new BadRequestException('Client ID is required');
@@ -2476,12 +3192,32 @@ export class ClientUsersService implements OnModuleInit {
 
     const jobId = `usr_imp_${Date.now()}`;
     const results: ExcelUserImportExecutionRowResult[] = [];
-    let createdCount = 0;
+    const ephemeralCredentialsList: UserEphemeralCredentialEvent[] = [];
+
+    const hasCredentialViewPermission = Boolean(
+      user.isSuperAdmin ||
+      (user.permissions && (
+        user.permissions.includes('client_user.credential_view') ||
+        user.permissions.includes(PERMISSIONS.CLIENT_USER_CREDENTIAL_VIEW as any) ||
+        user.permissions.includes('CLIENT_USER_CREDENTIAL_VIEW' as any)
+      ))
+    );
+
+    let completedCount = 0;
+    let failedBeforeCreationCount = 0;
+    let userCreatedRolePendingCount = 0;
     let alreadyExistingCount = 0;
     let invalidCount = 0;
-    let failedCount = 0;
     let cancelledCount = 0;
     let notProcessedCount = 0;
+    let remainingUnprocessedCount = 0;
+
+    let systemPaused = false;
+    let systemPauseReason: string | undefined = undefined;
+    let lastSuccessfulUser: string | undefined = undefined;
+    let currentFailedUser: string | undefined = undefined;
+    let consecutiveInfrastructureFailures = 0;
+    const MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES = 3;
 
     // Load existing snapshot users to look up status for already existing rows
     const existingUsers = await this.snapshotRepo.find({ where: { clientId } });
@@ -2490,12 +3226,40 @@ export class ClientUsersService implements OnModuleInit {
       existingUserMap.set(u.username.toLowerCase().trim(), u);
     }
 
+    let liveOptions: ClientCreateFormMetadata | null = null;
+    try {
+      liveOptions = await this.getLiveFormOptions(clientId, user, false);
+    } catch {}
+
+    const liveRoleNames = (liveOptions?.roles || []).map((r: any) => (typeof r === 'string' ? r : r.label || r.value || ''));
+
     const pendingReconciliationRows: { row: ExcelUserImportRow; resultIndex: number }[] = [];
 
     for (const row of rows) {
       const rowCorrelationId = crypto.randomUUID();
       const fullName = `${row.firstName || ''} ${row.lastName || ''}`.trim();
       const sNo = row.sNo !== undefined ? row.sNo : row.rowNumber - 1;
+
+      // If batch was paused due to system error, mark remaining rows as NOT_PROCESSED
+      if (systemPaused) {
+        remainingUnprocessedCount++;
+        results.push({
+          sNo,
+          rowNumber: row.rowNumber,
+          action: row.action,
+          username: row.username,
+          fullName,
+          result: 'NOT_PROCESSED',
+          overallStatus: 'NOT_PROCESSED',
+          errorCode: 'BATCH_PAUSED_SYSTEM_ERROR',
+          message: systemPauseReason || 'Batch paused due to system infrastructure failure.',
+          executedAt: new Date().toISOString(),
+          correlationId: rowCorrelationId,
+          retryStartingPoint: row.retryStartingPoint || 'USER_CREATION',
+          nextAction: 'Batch paused',
+        });
+        continue;
+      }
 
       // Check ALREADY_EXISTS first
       if (row.classification === 'ALREADY_EXISTS' || row.errorCode === 'ALREADY_EXISTS') {
@@ -2509,12 +3273,15 @@ export class ClientUsersService implements OnModuleInit {
           username: row.username,
           fullName,
           result: 'ALREADY_EXISTS',
+          overallStatus: 'COMPLETED',
           errorCode: 'ALREADY_EXISTS',
           existingStatus: currentStatus,
           remoteStatus: currentStatus,
           message: `User '${row.username}' already exists in client portal with status ${currentStatus}.`,
           executedAt: new Date().toISOString(),
           correlationId: rowCorrelationId,
+          retryStartingPoint: 'NONE',
+          nextAction: 'Skipped already existing user',
         });
         continue;
       }
@@ -2530,6 +3297,9 @@ export class ClientUsersService implements OnModuleInit {
         row.errorCode === 'DUPLICATE_USERNAME_IN_FILE'
       ) {
         invalidCount++;
+        const valMsg = (row.validationErrors && row.validationErrors.length > 0)
+          ? row.validationErrors.join('; ')
+          : row.message || 'Row failed dry-run validation';
         results.push({
           sNo,
           rowNumber: row.rowNumber,
@@ -2537,12 +3307,20 @@ export class ClientUsersService implements OnModuleInit {
           username: row.username,
           fullName,
           result: 'INVALID',
+          overallStatus: 'FAILED',
+          validationState: 'FAILED',
+          creationState: 'NOT_STARTED',
+          userSearchState: 'NOT_STARTED',
+          roleSelectionState: 'NOT_STARTED',
+          roleUpdateState: 'NOT_STARTED',
+          roleVerificationState: 'NOT_STARTED',
           errorCode: row.errorCode || 'REQUIRED_FIELD_MISSING',
-          message: (row.validationErrors && row.validationErrors.length > 0)
-            ? row.validationErrors.join('; ')
-            : row.message || 'Row failed dry-run validation',
+          message: valMsg,
+          failureReason: valMsg,
           executedAt: new Date().toISOString(),
           correlationId: rowCorrelationId,
+          retryStartingPoint: 'USER_CREATION',
+          nextAction: 'Correct invalid fields in Excel before retrying',
         });
         continue;
       }
@@ -2557,10 +3335,12 @@ export class ClientUsersService implements OnModuleInit {
           username: row.username,
           fullName,
           result: 'CANCELLED',
+          overallStatus: 'CANCELLED',
           errorCode: 'OPERATION_CANCELLED',
           message: row.message || 'Row import was cancelled.',
           executedAt: new Date().toISOString(),
           correlationId: rowCorrelationId,
+          retryStartingPoint: 'NONE',
         });
         continue;
       }
@@ -2581,38 +3361,217 @@ export class ClientUsersService implements OnModuleInit {
           username: row.username,
           fullName,
           result: 'NOT_PROCESSED',
+          overallStatus: 'NOT_PROCESSED',
           errorCode: 'NOT_PROCESSED',
           message: row.message || 'Row was not approved by operator for creation.',
           executedAt: new Date().toISOString(),
           correlationId: rowCorrelationId,
+          retryStartingPoint: 'NONE',
         });
         continue;
       }
 
-      // Execute eligible row
-      try {
-        if (row.action === 'CREATE') {
-          await this.createClientUser(
-            {
-              clientId,
-              username: row.username,
-              firstName: row.firstName,
-              middleName: row.middleName,
-              lastName: row.lastName,
-              nickName: row.nickName,
-              email: row.email,
-              mobileNumber: row.mobileNumber || '0500000000',
-              nationality: row.nationality || 'Saudi Arabia',
-              role: row.role,
-              profileRole: row.profileRole,
-              barcodeNumber: row.barcodeNumber,
-              status: row.requestedStatus || 'ACTIVE',
-              overrideDuplicateName: true,
-            },
-            user,
-            { skipPostSync: true }
-          );
+      // Parse role(s) to map
+      const rawRoleString = row.role || (row.roles ? row.roles.join(',') : '');
+      const parsedRoleResult = parseAndValidateRoles(rawRoleString, liveRoleNames);
+      const rolesToMap = parsedRoleResult.validRoles.length > 0
+        ? parsedRoleResult.validRoles
+        : (row.roles && row.roles.length > 0 ? row.roles : (row.role ? [row.role] : []));
 
+      const isRetryFromRoleMapping = row.retryStartingPoint === 'ROLE_MAPPING' || (row.action as any) === 'MAP_ROLE';
+
+      // Execute eligible row
+      if (row.action === 'CREATE' || isRetryFromRoleMapping) {
+        let userCreatedSuccessfully = isRetryFromRoleMapping;
+        let userCreatedResult: (ClientUser & { credentialDeliveryStatus?: CredentialDeliveryStatus; oneTimeCredentialEventId?: string }) | null = null;
+
+        // 1. Create User if not already created
+        if (!userCreatedSuccessfully) {
+          try {
+            userCreatedResult = await this.createClientUser(
+              {
+                clientId,
+                username: row.username,
+                firstName: row.firstName,
+                middleName: row.middleName,
+                lastName: row.lastName,
+                nickName: row.nickName,
+                email: row.email,
+                mobileNumber: row.mobileNumber || '0500000000',
+                nationality: row.nationality || 'Saudi Arabia',
+                role: rolesToMap[0] || row.role,
+                roles: rolesToMap,
+                profileRole: row.profileRole,
+                barcodeNumber: row.barcodeNumber,
+                status: row.requestedStatus || 'ACTIVE',
+                overrideDuplicateName: true,
+              },
+              user,
+              { skipPostSync: true }
+            );
+            userCreatedSuccessfully = true;
+          } catch (err: any) {
+            const errorCode = err.response?.code || err.code || 'REMOTE_ERROR';
+            const errorMsg = (err.response?.message || err.message || 'User creation failed on client portal.').replace(/<[^>]*>?/gm, '');
+
+            const isSystemError = isSystemCircuitBreakerError(errorCode, errorMsg);
+
+            const isDuplicateUser =
+              errorCode === 'DUPLICATE_USERNAME' ||
+              errorMsg.toLowerCase().includes('already exists') ||
+              errorMsg.toLowerCase().includes('already registered') ||
+              errorMsg.toLowerCase().includes('duplicate username');
+
+            if (isDuplicateUser && rolesToMap.length > 0) {
+              userCreatedSuccessfully = true;
+              // Advance to Step 2 (Role Mapping)
+            } else if (isDuplicateUser) {
+              alreadyExistingCount++;
+              results.push({
+                sNo,
+                rowNumber: row.rowNumber,
+                action: row.action,
+                username: row.username,
+                fullName,
+                result: 'ALREADY_EXISTS',
+                overallStatus: 'COMPLETED',
+                errorCode: 'ALREADY_EXISTS',
+                remoteStatus: 'ACTIVE',
+                message: `User '${row.username}' already exists in client portal.`,
+                executedAt: new Date().toISOString(),
+                correlationId: rowCorrelationId,
+                retryStartingPoint: 'NONE',
+                nextAction: 'Skipped already existing user',
+              });
+              continue;
+            } else if (isSystemError) {
+              systemPaused = true;
+              systemPauseReason = `Batch paused due to system error: ${errorMsg}`;
+              failedBeforeCreationCount++;
+              currentFailedUser = row.username;
+              results.push({
+                sNo,
+                rowNumber: row.rowNumber,
+                action: row.action,
+                username: row.username,
+                fullName,
+                result: 'FAILED',
+                overallStatus: 'FAILED',
+                validationState: 'PASSED',
+                creationState: 'FAILED',
+                userSearchState: 'NOT_STARTED',
+                roleSelectionState: 'NOT_STARTED',
+                roleUpdateState: 'NOT_STARTED',
+                roleVerificationState: 'NOT_STARTED',
+                errorCode,
+                message: errorMsg,
+                failureReason: errorMsg,
+                executedAt: new Date().toISOString(),
+                correlationId: rowCorrelationId,
+                retryStartingPoint: 'USER_CREATION',
+                nextAction: 'Batch paused due to infrastructure error',
+              });
+              continue;
+            } else if (
+              errorCode === 'REMOTE_CREATE_VERIFICATION_FAILED' ||
+              errorCode === 'OPERATION_TIMED_OUT' ||
+              errorMsg.toLowerCase().includes('could not be verified') ||
+              errorMsg.toLowerCase().includes('timed out')
+            ) {
+              consecutiveInfrastructureFailures++;
+              if (consecutiveInfrastructureFailures >= MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES) {
+                systemPaused = true;
+                systemPauseReason = 'Batch paused due to repeated consecutive infrastructure failures across rows.';
+              }
+              const resIdx = results.length;
+              results.push({
+                sNo,
+                rowNumber: row.rowNumber,
+                action: row.action,
+                username: row.username,
+                fullName,
+                result: 'FAILED',
+                overallStatus: 'FAILED',
+                validationState: 'PASSED',
+                creationState: 'FAILED',
+                userSearchState: 'NOT_STARTED',
+                roleSelectionState: 'NOT_STARTED',
+                roleUpdateState: 'NOT_STARTED',
+                roleVerificationState: 'NOT_STARTED',
+                errorCode: 'REMOTE_CREATE_VERIFICATION_FAILED',
+                message: errorMsg,
+                failureReason: errorMsg,
+                executedAt: new Date().toISOString(),
+                correlationId: rowCorrelationId,
+                retryStartingPoint: 'USER_CREATION',
+                nextAction: systemPaused ? 'Batch paused due to infrastructure error' : 'Continuing to next user',
+              });
+              failedBeforeCreationCount++;
+              currentFailedUser = row.username;
+              pendingReconciliationRows.push({ row, resultIndex: resIdx });
+              continue;
+            } else {
+              // Normal row-level rejection
+              consecutiveInfrastructureFailures = 0;
+              failedBeforeCreationCount++;
+              currentFailedUser = row.username;
+              results.push({
+                sNo,
+                rowNumber: row.rowNumber,
+                action: row.action,
+                username: row.username,
+                fullName,
+                result: 'FAILED',
+                overallStatus: 'FAILED',
+                validationState: 'PASSED',
+                creationState: 'FAILED',
+                userSearchState: 'NOT_STARTED',
+                roleSelectionState: 'NOT_STARTED',
+                roleUpdateState: 'NOT_STARTED',
+                roleVerificationState: 'NOT_STARTED',
+                errorCode,
+                message: errorMsg,
+                failureReason: errorMsg,
+                executedAt: new Date().toISOString(),
+                correlationId: rowCorrelationId,
+                retryStartingPoint: 'USER_CREATION',
+                nextAction: 'Continuing to next user',
+              });
+              continue;
+            }
+          }
+        }
+
+        // Reset consecutive failures on successful user creation
+        consecutiveInfrastructureFailures = 0;
+
+        // Ephemeral Credential Capture & Event Emission via Dedicated Store
+        let rowCredentialDeliveryStatus: CredentialDeliveryStatus = userCreatedResult?.credentialDeliveryStatus || 'UNAVAILABLE';
+        let rowOneTimeCredentialEventId: string | undefined = userCreatedResult?.oneTimeCredentialEventId;
+
+        if (userCreatedResult && rowOneTimeCredentialEventId) {
+          const oneTimeEventIdHash = crypto.createHash('sha256').update(rowOneTimeCredentialEventId).digest('hex');
+          ephemeralCredentialsList.push({
+            eventType: 'USER_EPHEMERAL_CREDENTIAL_READY',
+            oneTimeEventId: rowOneTimeCredentialEventId,
+            oneTimeEventIdHash,
+            jobId,
+            clientId,
+            rowNumber: row.rowNumber,
+            username: row.username,
+            fullName,
+            credentialDeliveryStatus: rowCredentialDeliveryStatus,
+            createdAt: new Date().toISOString(),
+            hardExpiresAt: new Date(Date.now() + 300000).toISOString(),
+            displayDurationSeconds: 60,
+          });
+        }
+
+        // 2. Role Mapping Step on /addUserRole
+        if (rolesToMap.length === 0) {
+          // No roles requested -> Completed
+          completedCount++;
+          lastSuccessfulUser = row.username;
           results.push({
             sNo,
             rowNumber: row.rowNumber,
@@ -2620,85 +3579,200 @@ export class ClientUsersService implements OnModuleInit {
             username: row.username,
             fullName,
             result: 'CREATED',
-            message: `User '${row.username}' created and verified on client.`,
+            overallStatus: 'COMPLETED',
+            validationState: 'PASSED',
+            creationState: 'COMPLETED',
+            userSearchState: 'SKIPPED',
+            roleSelectionState: 'SKIPPED',
+            roleUpdateState: 'SKIPPED',
+            roleVerificationState: 'SKIPPED',
             remoteStatus: 'ACTIVE',
+            message: `User '${row.username}' created and verified on client.`,
+            credentialDeliveryStatus: rowCredentialDeliveryStatus,
             executedAt: new Date().toISOString(),
             correlationId: rowCorrelationId,
+            retryStartingPoint: 'NONE',
+            nextAction: 'Completed',
           });
-          createdCount++;
-        } else if (row.action === 'ACTIVATE' || row.action === 'DEACTIVATE') {
-          const snap = await this.snapshotRepo.findOne({ where: { clientId, username: row.username } });
-          if (snap) {
-            await this.setUserStatus(snap.id, row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE', user);
-            results.push({
-              sNo,
-              rowNumber: row.rowNumber,
-              action: row.action,
-              username: row.username,
-              fullName,
-              result: 'SUCCESS',
-              message: `Status updated to ${row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE'}.`,
-              remoteStatus: row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE',
-              executedAt: new Date().toISOString(),
-              correlationId: rowCorrelationId,
-            });
-            createdCount++;
-          } else {
-            results.push({
-              sNo,
-              rowNumber: row.rowNumber,
-              action: row.action,
-              username: row.username,
-              fullName,
-              result: 'REMOTE_ERROR',
-              errorCode: 'REMOTE_USER_NOT_FOUND',
-              message: `User '${row.username}' not found in client snapshot.`,
-              executedAt: new Date().toISOString(),
-              correlationId: rowCorrelationId,
-            });
-            failedCount++;
-          }
-        }
-      } catch (err: any) {
-        const errorCode = err.response?.code || err.code || 'REMOTE_ERROR';
-        const errorMsg = (err.response?.message || err.message || 'Error executing row mutation').replace(/<[^>]*>?/gm, '');
 
-        if (
-          row.action === 'CREATE' &&
-          (errorCode === 'REMOTE_CREATE_VERIFICATION_FAILED' ||
-            errorCode === 'OPERATION_TIMED_OUT' ||
-            errorMsg.toLowerCase().includes('could not be verified') ||
-            errorMsg.toLowerCase().includes('timed out'))
-        ) {
-          const resIdx = results.length;
+          // Enforce 10-item unacknowledged queue capacity limit
+          if (ephemeralCredentialsList.length >= 10) {
+            systemPaused = true;
+            systemPauseReason = CREDENTIAL_QUEUE_REQUIRES_OPERATOR_ATTENTION;
+          }
+          continue;
+        }
+
+        // Execute role mapping
+        try {
+          const roleMappingRes = await this.mapUserRoles(
+            {
+              clientId,
+              username: row.username,
+              fullName,
+              firstName: row.firstName,
+              roles: rolesToMap,
+            },
+            user
+          );
+
+          if (roleMappingRes.success) {
+            consecutiveInfrastructureFailures = 0;
+            completedCount++;
+            lastSuccessfulUser = row.username;
+            results.push({
+              sNo,
+              rowNumber: row.rowNumber,
+              action: row.action,
+              username: row.username,
+              fullName,
+              result: 'CREATED',
+              overallStatus: 'COMPLETED',
+              validationState: 'PASSED',
+              creationState: 'COMPLETED',
+              userSearchState: 'EXACT_MATCH_FOUND',
+              roleSelectionState: 'SELECTED',
+              roleUpdateState: 'COMPLETED',
+              roleVerificationState: 'PASSED',
+              requestedRoles: rolesToMap,
+              mappedRoles: roleMappingRes.mappedRoles || rolesToMap,
+              missingRoles: [],
+              roleSelectionProgress: roleMappingRes.roleSelectionProgress || `${rolesToMap.length} of ${rolesToMap.length} selected`,
+              remoteStatus: 'ACTIVE',
+              message: `User '${row.username}' created and roles [${rolesToMap.join(', ')}] mapped and verified.`,
+              credentialDeliveryStatus: rowCredentialDeliveryStatus,
+              executedAt: new Date().toISOString(),
+              correlationId: rowCorrelationId,
+              retryStartingPoint: 'NONE',
+              nextAction: 'Completed',
+            });
+          } else {
+            // Role mapping failed, but user was created
+            const isSystemError = isSystemCircuitBreakerError(roleMappingRes.errorCode, roleMappingRes.errorMessage);
+
+            if (isSystemError) {
+              systemPaused = true;
+              systemPauseReason = `Batch paused due to system error: ${roleMappingRes.errorMessage}`;
+            }
+
+            userCreatedRolePendingCount++;
+            currentFailedUser = row.username;
+            results.push({
+              sNo,
+              rowNumber: row.rowNumber,
+              action: row.action,
+              username: row.username,
+              fullName,
+              result: 'PARTIAL_FAILED',
+              overallStatus: 'PARTIAL_FAILED',
+              validationState: 'PASSED',
+              creationState: 'COMPLETED',
+              userSearchState: roleMappingRes.userSearchState || 'FAILED',
+              roleSelectionState: roleMappingRes.roleSelectionState || 'NOT_STARTED',
+              roleUpdateState: roleMappingRes.roleUpdateState || 'NOT_STARTED',
+              roleVerificationState: roleMappingRes.roleVerificationState || 'NOT_STARTED',
+              requestedRoles: rolesToMap,
+              mappedRoles: roleMappingRes.mappedRoles || [],
+              missingRoles: roleMappingRes.missingRoles || rolesToMap,
+              roleSelectionProgress: roleMappingRes.roleSelectionProgress || `0 of ${rolesToMap.length} selected`,
+              errorCode: roleMappingRes.errorCode || 'ROLE_UPDATE_FAILED',
+              message: `User created successfully — role mapping failed/pending: ${roleMappingRes.failureReason || roleMappingRes.errorMessage || 'Role mapping failed'}.`,
+              failureReason: roleMappingRes.failureReason || roleMappingRes.errorMessage || 'Role mapping failed',
+              remoteStatus: 'ACTIVE',
+              credentialDeliveryStatus: rowCredentialDeliveryStatus,
+              executedAt: new Date().toISOString(),
+              correlationId: rowCorrelationId,
+              retryStartingPoint: 'ROLE_MAPPING',
+              nextAction: systemPaused ? 'Batch paused due to infrastructure error' : 'Continuing to next user',
+            });
+          }
+        } catch (roleErr: any) {
+          const roleErrMsg = (roleErr.message || 'Role mapping failed').replace(/<[^>]*>?/gm, '');
+          const isSystemError = isSystemCircuitBreakerError(roleErr.code || roleErr.response?.code, roleErrMsg);
+
+          if (isSystemError) {
+            systemPaused = true;
+            systemPauseReason = `Batch paused due to system error: ${roleErrMsg}`;
+          }
+
+          userCreatedRolePendingCount++;
+          currentFailedUser = row.username;
           results.push({
             sNo,
             rowNumber: row.rowNumber,
             action: row.action,
             username: row.username,
             fullName,
-            result: 'FAILED',
-            errorCode: 'REMOTE_CREATE_VERIFICATION_FAILED',
-            message: errorMsg,
+            result: 'PARTIAL_FAILED',
+            overallStatus: 'PARTIAL_FAILED',
+            validationState: 'PASSED',
+            creationState: 'COMPLETED',
+            userSearchState: 'FAILED',
+            roleSelectionState: 'NOT_STARTED',
+            roleUpdateState: 'NOT_STARTED',
+            roleVerificationState: 'NOT_STARTED',
+            requestedRoles: rolesToMap,
+            mappedRoles: [],
+            missingRoles: rolesToMap,
+            roleSelectionProgress: `0 of ${rolesToMap.length} selected`,
+            errorCode: 'ROLE_UPDATE_FAILED',
+            message: `User created successfully — role mapping failed/pending: ${roleErrMsg}.`,
+            failureReason: roleErrMsg,
+            remoteStatus: 'ACTIVE',
+            credentialDeliveryStatus: rowCredentialDeliveryStatus,
             executedAt: new Date().toISOString(),
             correlationId: rowCorrelationId,
+            retryStartingPoint: 'ROLE_MAPPING',
+            nextAction: systemPaused ? 'Batch paused due to infrastructure error' : 'Continuing to next user',
           });
-          failedCount++;
-          pendingReconciliationRows.push({ row, resultIndex: resIdx });
+        }
+
+        // Enforce 10-item unacknowledged queue capacity limit
+        if (ephemeralCredentialsList.length >= 10) {
+          systemPaused = true;
+          systemPauseReason = CREDENTIAL_QUEUE_REQUIRES_OPERATOR_ATTENTION;
+        }
+        continue;
+      }
+
+      if (row.action === 'ACTIVATE' || row.action === 'DEACTIVATE') {
+        const snap = await this.snapshotRepo.findOne({ where: { clientId, username: row.username } });
+        if (snap) {
+          await this.setUserStatus(snap.id, row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE', user);
+          results.push({
+            sNo,
+            rowNumber: row.rowNumber,
+            action: row.action,
+            username: row.username,
+            fullName,
+            result: 'SUCCESS',
+            overallStatus: 'COMPLETED',
+            message: `Status updated to ${row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE'}.`,
+            remoteStatus: row.action === 'ACTIVATE' ? 'ACTIVE' : 'INACTIVE',
+            executedAt: new Date().toISOString(),
+            correlationId: rowCorrelationId,
+            retryStartingPoint: 'NONE',
+            nextAction: 'Completed',
+          });
+          completedCount++;
         } else {
-          failedCount++;
           results.push({
             sNo,
             rowNumber: row.rowNumber,
             action: row.action,
             username: row.username,
             fullName,
-            result: 'FAILED',
-            errorCode,
-            message: errorMsg,
+            result: 'REMOTE_ERROR',
+            overallStatus: 'FAILED',
+            errorCode: 'REMOTE_USER_NOT_FOUND',
+            message: `User '${row.username}' not found in client snapshot.`,
+            failureReason: `User '${row.username}' not found in client snapshot.`,
             executedAt: new Date().toISOString(),
             correlationId: rowCorrelationId,
+            retryStartingPoint: 'USER_CREATION',
+            nextAction: 'Continuing to next user',
           });
+          failedBeforeCreationCount++;
         }
       }
     }
@@ -2734,28 +3808,48 @@ export class ClientUsersService implements OnModuleInit {
           // Reconcile row from FAILED to CREATED
           if (targetResult) {
             targetResult.result = 'CREATED';
+            targetResult.overallStatus = 'COMPLETED';
+            targetResult.creationState = 'COMPLETED';
             targetResult.remoteStatus = matched.status || 'ACTIVE';
             targetResult.errorCode = undefined;
+            targetResult.failureReason = undefined;
             targetResult.message = `User '${pending.row.username}' created and verified on client via batch reconciliation.`;
-            createdCount++;
-            failedCount = Math.max(0, failedCount - 1);
+            targetResult.retryStartingPoint = 'NONE';
+            targetResult.nextAction = 'Completed';
+            completedCount++;
+            failedBeforeCreationCount = Math.max(0, failedBeforeCreationCount - 1);
           }
         } else {
           // Truly absent remotely -> mark REMOTE_CREATE_UNCONFIRMED for explicit review
           if (targetResult) {
             targetResult.result = 'FAILED';
+            targetResult.overallStatus = 'FAILED';
             targetResult.errorCode = 'REMOTE_CREATE_UNCONFIRMED';
             targetResult.message = `REMOTE_CREATE_UNCONFIRMED — User '${pending.row.username}' could not be confirmed in client users directory after batch synchronization. Requires operator review before retry.`;
+            targetResult.failureReason = `REMOTE_CREATE_UNCONFIRMED — User '${pending.row.username}' could not be confirmed in client users directory.`;
           }
         }
       }
     }
 
-    // Strict invariant check: Total = Created + Already Existing + Invalid + Failed + Cancelled + Not Processed
+    // Determine batch status
+    let batchStatus: BatchFinalStatus = 'COMPLETED';
+    if (systemPaused) {
+      batchStatus = 'PAUSED_SYSTEM_ERROR';
+    } else if (failedBeforeCreationCount === 0 && userCreatedRolePendingCount === 0) {
+      batchStatus = 'COMPLETED';
+    } else if (completedCount > 0) {
+      batchStatus = 'COMPLETED_WITH_ROW_ERRORS';
+    } else {
+      batchStatus = 'FAILED_NO_ROWS_PROCESSED';
+    }
+
     const totalProcessed = rows.length;
-    const computedSum = createdCount + alreadyExistingCount + invalidCount + failedCount + cancelledCount + notProcessedCount;
+    const skippedSum = alreadyExistingCount + notProcessedCount + cancelledCount;
+    const computedSum = completedCount + failedBeforeCreationCount + userCreatedRolePendingCount + alreadyExistingCount + invalidCount + cancelledCount + notProcessedCount + remainingUnprocessedCount;
+
     if (totalProcessed !== computedSum) {
-      console.warn(`Discrepancy in row breakdown: total=${totalProcessed}, computedSum=${computedSum}`);
+      this.logger.warn(`Discrepancy in row breakdown: total=${totalProcessed}, computedSum=${computedSum}`);
     }
 
     await this.auditRepo.save(
@@ -2769,12 +3863,17 @@ export class ClientUsersService implements OnModuleInit {
           clientCode: client.clientCode,
           jobId,
           totalRows: totalProcessed,
-          createdRows: createdCount,
+          completedRows: completedCount,
+          failedBeforeCreationRows: failedBeforeCreationCount,
+          userCreatedRolePendingRows: userCreatedRolePendingCount,
           alreadyExistingRows: alreadyExistingCount,
           invalidRows: invalidCount,
-          failedRows: failedCount,
           cancelledRows: cancelledCount,
           notProcessedRows: notProcessedCount,
+          skippedRows: skippedSum,
+          remainingUnprocessedRows: remainingUnprocessedCount,
+          batchStatus,
+          systemPaused,
         }),
       })
     );
@@ -2782,15 +3881,25 @@ export class ClientUsersService implements OnModuleInit {
     return {
       jobId,
       totalRows: totalProcessed,
-      createdRows: createdCount,
+      completedRows: completedCount,
+      failedBeforeCreationRows: failedBeforeCreationCount,
+      userCreatedRolePendingRows: userCreatedRolePendingCount,
       alreadyExistingRows: alreadyExistingCount,
       invalidRows: invalidCount,
-      failedRows: failedCount,
       cancelledRows: cancelledCount,
       notProcessedRows: notProcessedCount,
-      succeededRows: createdCount,
-      skippedRows: alreadyExistingCount + notProcessedCount,
+      skippedRows: skippedSum,
+      remainingUnprocessedRows: remainingUnprocessedCount,
+      createdRows: completedCount + userCreatedRolePendingCount,
+      failedRows: failedBeforeCreationCount + userCreatedRolePendingCount,
+      succeededRows: completedCount,
+      batchStatus,
+      systemPaused,
+      systemPauseReason,
+      lastSuccessfulUser,
+      currentFailedUser,
       results,
+      ephemeralCredentials: ephemeralCredentialsList,
     };
   }
 

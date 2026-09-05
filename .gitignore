@@ -34,10 +34,15 @@ pnpm-debug.log*
 *.sln
 *.sw?
 
-# Playwright & Testing
-test-results/
+# Authentication and browser-session artifacts
+*.cookies
+*.session
+*.har
+
+# Browser automation and test output
 playwright-report/
 blob-report/
+test-results/
 playwright/.cache/
 coverage/
 
@@ -52,10 +57,20 @@ profiles/
 .hmc-console/
 uploads/
 screenshots/
-*.cookies
-*.session
-*.png
-*.jpg
-*.jpeg
-*.xlsx
-*.xls
+
+# Private staging evidence
+/private-staging-evidence/
+/staging_*.html
+/staging_*.png
+/staging_*.dump
+/staging_*.json
+
+# Generated local Excel artifacts
+/HMC_User_Import_Template.xlsx
+/HMC_GateA_Executable_Import.xlsx
+/HMC_Sequential_Workflow_Test.xlsx
+*.xlsx.tmp
+
+# Database backup artifacts
+*.bak
+*.dump

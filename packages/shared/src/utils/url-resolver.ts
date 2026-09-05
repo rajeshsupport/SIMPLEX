@@ -95,30 +95,23 @@ export function resolveClientRoleUrl(options: ResolveClientRoleUrlOptions): stri
     throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve Role Master URL');
   }
 
-  const roleRouteRaw = (options.userRoleRoute && options.userRoleRoute.trim())
+  let roleRouteRaw = (options.userRoleRoute && options.userRoleRoute.trim())
     ? options.userRoleRoute.trim()
     : '/addUserRole';
 
-  const roleRoute = roleRouteRaw.startsWith('/') ? roleRouteRaw : `/${roleRouteRaw}`;
-
-  // If input URL already ends with the target role route, validate and normalize without duplicating
-  const trimmed = rawUrl.trim();
-  try {
-    const u = new URL(trimmed);
-    const cleanPath = u.pathname.replace(/\/+/g, '/').replace(/\/+$/, '');
-    if (cleanPath.toLowerCase().endsWith(roleRoute.toLowerCase())) {
-      u.pathname = cleanPath;
-      u.search = '';
-      u.hash = '';
-      return u.toString().replace(/\/+$/, '');
-    }
-  } catch {
-    throw new Error(`INVALID_CLIENT_URL: Invalid client base URL format: '${trimmed}'`);
+  // If userRoleRoute is a full URL, extract its pathname
+  if (roleRouteRaw.startsWith('http://') || roleRouteRaw.startsWith('https://')) {
+    try {
+      const u = new URL(roleRouteRaw);
+      roleRouteRaw = u.pathname;
+    } catch {}
   }
 
+  let roleRoute = roleRouteRaw.startsWith('/') ? roleRouteRaw : `/${roleRouteRaw}`;
+
+  const trimmed = rawUrl.trim();
   const normalizedBase = normalizeClientBaseUrl(trimmed);
 
-  // If applicationPath is specified and not already in normalizedBase
   let finalBase = normalizedBase;
   if (options.applicationPath && options.applicationPath.trim()) {
     const appPath = options.applicationPath.trim().startsWith('/')
@@ -130,9 +123,18 @@ export function resolveClientRoleUrl(options: ResolveClientRoleUrlOptions): stri
     }
   }
 
+  // If roleRoute points to standard addUserRole or contains it, ensure clean single /addUserRole
+  if (roleRoute.toLowerCase().endsWith('/adduserrole') || roleRoute.toLowerCase() === '/adduserrole') {
+    roleRoute = '/addUserRole';
+  }
+
   const urlObj = new URL(finalBase);
-  const cleanPath = `${urlObj.pathname}/${roleRoute}`.replace(/\/+/g, '/').replace(/\/+$/, '');
-  urlObj.pathname = cleanPath;
+  let cleanBasePath = urlObj.pathname.replace(/\/+$/, '');
+  if (cleanBasePath.toLowerCase().endsWith('/adduserrole')) {
+    cleanBasePath = cleanBasePath.slice(0, cleanBasePath.length - '/adduserrole'.length);
+  }
+
+  urlObj.pathname = `${cleanBasePath}${roleRoute}`.replace(/\/+/g, '/').replace(/\/+$/, '');
   urlObj.search = '';
   urlObj.hash = '';
 

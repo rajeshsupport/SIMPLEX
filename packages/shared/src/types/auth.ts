@@ -36,6 +36,7 @@ export interface JwtPayload {
   permissions: PermissionCode[];
   allowedClientIds: string[]; // empty array means ALL if super admin
   isSuperAdmin: boolean;
+  sessionId?: string;
   iat?: number;
   exp?: number;
 }

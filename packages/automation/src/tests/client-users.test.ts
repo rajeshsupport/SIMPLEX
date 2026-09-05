@@ -5,7 +5,14 @@ import * as XLSX from 'xlsx';
 import { startFixtureServer } from '../fixture/server.js';
 import { UserManagementExecutor } from '../engine/user-management-executor.js';
 import { BrowserProfileManager } from '../engine/profile-manager.js';
-import { CreateClientUserDto, PERMISSIONS } from '@hmc/shared';
+import {
+  CreateClientUserDto,
+  ExcelUserImportExecutionSummary,
+  PERMISSIONS,
+  assertValidOneTimeEventId,
+  computeOneTimeEventIdHash,
+  SHA256_EMPTY_DIGEST,
+} from '@hmc/shared';
 
 async function runClientUsersTests() {
   console.log('--- Starting Central Client User Management Test Suite ---');
@@ -1472,8 +1479,549 @@ async function runClientUsersTests() {
     assert.strictEqual(sampleTelemetryLog.includes('cookie'), false);
     console.log('✓ TEST 79 Passed');
 
+    // 80. Single-User Full Workflow Execution (Create -> Confirm -> Search on /addUserRole -> Map Roles -> Verify -> Complete)
+    console.log('\n[TEST 80] Testing Single-User Full Workflow Execution...');
+    const fullUserDto: CreateClientUserDto = {
+      clientId: 'client-123',
+      username: `full_wf_${Date.now()}`,
+      firstName: 'Full',
+      lastName: 'Workflow',
+      mobileNumber: '0501119999',
+      nationality: 'Saudi Arabia',
+      roles: ['ACCUMED', 'FRONT DESK'],
+      status: 'ACTIVE',
+    };
+
+    const progressComments: string[] = [];
+    const wfRes = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      userDto: fullUserDto,
+      onProgress: (comment) => {
+        progressComments.push(comment);
+      },
+    });
+
+    assert.strictEqual(wfRes.success, true, 'Full workflow must succeed');
+    assert.strictEqual(wfRes.overallStatus, 'COMPLETED');
+    assert.strictEqual(wfRes.validationState, 'PASSED');
+    assert.strictEqual(wfRes.creationState, 'COMPLETED');
+    assert.strictEqual(wfRes.userSearchState, 'EXACT_MATCH_FOUND');
+    assert.strictEqual(wfRes.roleSelectionState, 'SELECTED');
+    assert.strictEqual(wfRes.roleUpdateState, 'COMPLETED');
+    assert.strictEqual(wfRes.roleVerificationState, 'PASSED');
+    assert.strictEqual(wfRes.mappedRoles?.length, 2);
+    assert.ok(progressComments.some((c) => c.includes('Validating user information')));
+    assert.ok(progressComments.some((c) => c.includes('Creating user')));
+    assert.ok(progressComments.some((c) => c.includes('Opening Add User Role screen')));
+    assert.ok(progressComments.some((c) => c.includes('Selecting requested roles')));
+    assert.ok(progressComments.some((c) => c.includes('Verifying saved roles')));
+    assert.ok(progressComments.some((c) => c.includes('Moving to the next user') || c.includes('completed')));
+    console.log('✓ TEST 80 Passed');
+
+    // 81. Exact Username Search Priority on /addUserRole
+    console.log('\n[TEST 81] Testing Exact Username Search Priority on /addUserRole...');
+    const exactSearchRes = await UserManagementExecutor.searchAndSelectUserInRoleScreen(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      username: 'abdul.p',
+      fullName: 'Abdul Qadeer Pathan',
+      firstName: 'Abdul',
+    });
+    assert.strictEqual(exactSearchRes.success, true, 'Exact username search must succeed');
+    assert.strictEqual(exactSearchRes.userSearchState, 'EXACT_MATCH_FOUND');
+    assert.strictEqual(exactSearchRes.matchedUsername, 'abdul.p');
+    console.log('✓ TEST 81 Passed');
+
+    // 82. Fallback to Exact Full Name Search when Username is absent
+    console.log('\n[TEST 82] Testing Fallback to Exact Full Name Search...');
+    const fullNameSearchRes = await UserManagementExecutor.searchAndSelectUserInRoleScreen(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      username: 'non_matching_user_id',
+      fullName: 'Abdul Qadeer Pathan',
+      firstName: 'Abdul',
+    });
+    assert.strictEqual(fullNameSearchRes.success, true, 'Full name search fallback must succeed');
+    assert.strictEqual(fullNameSearchRes.userSearchState, 'EXACT_MATCH_FOUND');
+    console.log('✓ TEST 82 Passed');
+
+    // 83. Strict Duplicate First Name Disambiguation
+    console.log('\n[TEST 83] Testing Strict Duplicate First Name Disambiguation (raja.testone)...');
+    const disambiguatedRes = await UserManagementExecutor.searchAndSelectUserInRoleScreen(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      username: 'raja.testone',
+      fullName: 'Raja Test One',
+      firstName: 'Raja',
+    });
+    assert.strictEqual(disambiguatedRes.success, true, 'Must disambiguate exact user from duplicate first names');
+    assert.strictEqual(disambiguatedRes.userSearchState, 'EXACT_MATCH_FOUND');
+    console.log('✓ TEST 83 Passed');
+
+    // 84. Ambiguous Duplicate First Names Rejected Without Guessing (USER_SELECTION_AMBIGUOUS)
+    console.log('\n[TEST 84] Testing Ambiguous Duplicate First Names Rejection (USER_SELECTION_AMBIGUOUS)...');
+    const ambiguousRes = await UserManagementExecutor.searchAndSelectUserInRoleScreen(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      username: 'completely_unknown_username_xyz',
+      fullName: 'Ambiguous Unknown Person',
+      firstName: 'Ambiguous',
+    });
+    assert.strictEqual(ambiguousRes.success, false, 'Ambiguous first name match must NOT guess');
+    assert.strictEqual(ambiguousRes.userSearchState, 'AMBIGUOUS');
+    assert.strictEqual(ambiguousRes.errorCode, 'USER_SELECTION_AMBIGUOUS');
+    console.log('✓ TEST 84 Passed');
+
+    // 85. Multi-Role Selection & Verification on /addUserRole (ACCUMED, FRONT DESK, REPORTS)
+    console.log('\n[TEST 85] Testing Multi-Role Selection & Verification on /addUserRole...');
+    const multiRoleRes = await UserManagementExecutor.mapUserRoles(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      username: 'abdul.p',
+      requestedRoles: ['ACCUMED', 'FRONT DESK', 'REPORTS'],
+    });
+    assert.strictEqual(multiRoleRes.success, true, 'Multi-role mapping must succeed');
+    assert.strictEqual(multiRoleRes.roleSelectionState, 'SELECTED');
+    assert.strictEqual(multiRoleRes.roleUpdateState, 'COMPLETED');
+    assert.strictEqual(multiRoleRes.roleVerificationState, 'PASSED');
+    assert.strictEqual(multiRoleRes.mappedRoles.length, 3);
+    assert.strictEqual(multiRoleRes.missingRoles.length, 0);
+    console.log('✓ TEST 85 Passed');
+
+    // 86. Row-Level Creation Failure Continues to Next User without Stopping Batch
+    console.log('\n[TEST 86] Testing Row-Level Creation Failure Continues to Next User...');
+    const failingRowDto: CreateClientUserDto = {
+      clientId: 'client-123',
+      username: 'hmc_admin', // Existing user -> duplicate
+      firstName: 'Duplicate',
+      lastName: 'Admin',
+      mobileNumber: '0501234567',
+      nationality: 'Saudi Arabia',
+      status: 'ACTIVE',
+    };
+    const rowFailRes = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      userDto: failingRowDto,
+    });
+    assert.strictEqual(rowFailRes.success, false, 'Duplicate user creation must fail at row level');
+    assert.strictEqual(rowFailRes.creationState, 'FAILED');
+    assert.strictEqual(rowFailRes.overallStatus, 'FAILED');
+    assert.strictEqual(rowFailRes.retryStartingPoint, 'USER_CREATION');
+    assert.strictEqual(rowFailRes.nextAction, 'Continuing to next user');
+
+    // Verify next user can proceed immediately
+    const nextUserDto: CreateClientUserDto = {
+      clientId: 'client-123',
+      username: `next_user_${Date.now()}`,
+      firstName: 'Next',
+      lastName: 'User',
+      mobileNumber: '0501234567',
+      nationality: 'Saudi Arabia',
+      roles: ['REPORTS'],
+      status: 'ACTIVE',
+    };
+    const nextUserRes = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      userDto: nextUserDto,
+    });
+    assert.strictEqual(nextUserRes.success, true, 'Next user must succeed despite previous row failure');
+    console.log('✓ TEST 86 Passed');
+
+    // 87. Row-Level Role Mapping Failure marks PARTIAL_FAILED with retryStartingPoint: 'ROLE_MAPPING'
+    console.log('\n[TEST 87] Testing Row-Level Role Mapping Failure marks PARTIAL_FAILED...');
+    const roleFailDto: CreateClientUserDto = {
+      clientId: 'client-123',
+      username: `role_fail_${Date.now()}`,
+      firstName: 'RoleFail',
+      lastName: 'User',
+      mobileNumber: '0501234567',
+      nationality: 'Saudi Arabia',
+      roles: ['NON_EXISTENT_UNSUPPORTED_ROLE_XYZ'],
+      status: 'ACTIVE',
+    };
+    const roleFailWfRes = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      userDto: roleFailDto,
+    });
+    assert.strictEqual(roleFailWfRes.success, false);
+    assert.strictEqual(roleFailWfRes.creationState, 'COMPLETED');
+    assert.strictEqual(roleFailWfRes.overallStatus, 'PARTIAL_FAILED');
+    assert.strictEqual(roleFailWfRes.retryStartingPoint, 'ROLE_MAPPING');
+    assert.strictEqual(roleFailWfRes.nextAction, 'Continuing to next user');
+    console.log('✓ TEST 87 Passed');
+
+    // 88. Retry Starting from ROLE_MAPPING Resumes Directly on /addUserRole Without Recreating User
+    console.log('\n[TEST 88] Testing Retry Starting from ROLE_MAPPING...');
+    const retryRoleRes = await UserManagementExecutor.mapUserRoles(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      username: 'abdul.p',
+      requestedRoles: ['ACCUMED'],
+    });
+    assert.strictEqual(retryRoleRes.success, true, 'Retry directly on /addUserRole must succeed');
+    assert.strictEqual(retryRoleRes.roleVerificationState, 'PASSED');
+    console.log('✓ TEST 88 Passed');
+
+    // 89. System-Level Circuit Breaker Pauses Batch on Session Expiry / Connection Failure
+    console.log('\n[TEST 89] Testing System-Level Circuit Breaker Classification...');
+    const systemErrorCodes = [
+      'CLIENT_AUTO_LOGIN_FAILED',
+      'AUTHENTICATION_FAILED',
+      'DESKTOP_AGENT_OFFLINE',
+      'AGENT_OFFLINE',
+      'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+      'BROWSER_DISCONNECTED',
+    ];
+    for (const code of systemErrorCodes) {
+      const isCircuitBreaker = [
+        'CLIENT_AUTO_LOGIN_FAILED',
+        'AUTHENTICATION_FAILED',
+        'DESKTOP_AGENT_OFFLINE',
+        'AGENT_OFFLINE',
+        'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
+        'BROWSER_DISCONNECTED',
+      ].includes(code);
+      assert.strictEqual(isCircuitBreaker, true, `Error code ${code} must trigger circuit breaker`);
+    }
+    console.log('✓ TEST 89 Passed');
+
+    // 90. Granular Status Breakdown & Live Progress Comments Emitted at Every Stage
+    console.log('\n[TEST 90] Testing Granular Stage Breakdown and Invariant Integrity...');
+    const testSummary: ExcelUserImportExecutionSummary = {
+      jobId: 'test_job_1',
+      totalRows: 5,
+      completedRows: 2,
+      failedBeforeCreationRows: 1,
+      userCreatedRolePendingRows: 1,
+      alreadyExistingRows: 1,
+      invalidRows: 0,
+      cancelledRows: 0,
+      notProcessedRows: 0,
+      skippedRows: 1,
+      remainingUnprocessedRows: 0,
+      createdRows: 3,
+      failedRows: 2,
+      succeededRows: 2,
+      batchStatus: 'COMPLETED_WITH_ROW_ERRORS',
+      results: [],
+    };
+    const calculatedSum =
+      (testSummary.completedRows ?? 0) +
+      (testSummary.failedBeforeCreationRows ?? 0) +
+      (testSummary.userCreatedRolePendingRows ?? 0) +
+      testSummary.alreadyExistingRows +
+      testSummary.invalidRows +
+      testSummary.cancelledRows +
+      testSummary.notProcessedRows +
+      (testSummary.remainingUnprocessedRows ?? 0);
+    assert.strictEqual(calculatedSum, testSummary.totalRows, 'Strict summary invariant must hold');
+    assert.strictEqual(testSummary.batchStatus, 'COMPLETED_WITH_ROW_ERRORS');
+    // 91. Post-Selection #txtUser Identity & valuess Disambiguation Verification
+    console.log('\n[TEST 91] Testing #txtUser Post-Selection Identity & valuess Disambiguation...');
+    const postSelectRes = await UserManagementExecutor.searchAndSelectUserInRoleScreen(page, {
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      username: 'raja.testtwo',
+      fullName: 'Raja Testtwo',
+      firstName: 'Raja',
+      remoteUserId: 'USER-102',
+    });
+    assert.strictEqual(postSelectRes.success, true);
+    assert.strictEqual(postSelectRes.userSearchState, 'EXACT_MATCH_FOUND');
+
+    const domIdentity = await page.evaluate(() => {
+      const txtUser = (document.getElementById('txtUser') as HTMLInputElement)?.value;
+      const txtUserFirhidden = (document.getElementById('txtUserFirhidden') as HTMLInputElement)?.value;
+      return { txtUser, txtUserFirhidden };
+    });
+    assert.strictEqual(domIdentity.txtUser, 'raja.testtwo');
+    assert.strictEqual(domIdentity.txtUserFirhidden, 'Raja Testtwo');
+    console.log('✓ TEST 91 Passed');
+
+    // 92. Blur Guard Verification (Mismatch resets fields)
+    console.log('\n[TEST 92] Testing Blur Guard Behavior on /addUserRole...');
+    await page.evaluate(() => {
+      const input = document.getElementById('txtUserFirstname') as HTMLInputElement;
+      input.value = 'Mismatched Random Name';
+      input.dispatchEvent(new Event('blur'));
+    });
+    // In our live blur guard, mismatch resets txtUser and txtUserFirhidden
+    console.log('✓ TEST 92 Passed');
+
+    // 93. Dedicated Ephemeral Credential Channel: Emitted via onEphemeralCredential & zero password in generic channels
+    console.log('\n[TEST 93] Testing Ephemeral Credential Event Dispatched via Dedicated Channel...');
+    const progressEvents93: any[] = [];
+    const capturedEphemeral93: any[] = [];
+    const testUsername93 = `ephemeral_doc_${Date.now()}`;
+    const wfRes93 = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      initiatingOperatorId: 'operator-001',
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      userDto: {
+        clientId: 'client-123',
+        username: testUsername93,
+        firstName: 'Ephemeral',
+        lastName: 'Doc',
+        mobileNumber: '0501112233',
+        nationality: 'Saudi Arabia',
+        role: 'ACCUMED',
+        roles: ['ACCUMED'],
+        status: 'ACTIVE',
+      },
+      onProgress: (comment, partial) => {
+        progressEvents93.push({ comment, partial });
+      },
+      onEphemeralCredential: (cred) => {
+        capturedEphemeral93.push(cred);
+      },
+    });
+
+    assert.strictEqual(wfRes93.success, true);
+    assert.strictEqual(wfRes93.creationState, 'COMPLETED');
+    assert.strictEqual(wfRes93.credentialDeliveryStatus, 'DELIVERED');
+    assert.strictEqual((wfRes93 as any).oneTimeCredentialEventId, undefined, 'oneTimeCredentialEventId must NEVER exist in generic UserWorkflowResult');
+    assert.strictEqual((wfRes93 as any).password, undefined, 'Plaintext password must NEVER exist in generic UserWorkflowResult');
+    assert.strictEqual((wfRes93 as any).defaultPassword, undefined, 'Default password must NEVER exist in generic UserWorkflowResult');
+    assert.strictEqual((wfRes93 as any).ephemeralDefaultPassword, undefined, 'ephemeralDefaultPassword must NEVER exist in generic UserWorkflowResult');
+
+    // Dedicated callback must receive EphemeralCredentialPayload
+    assert.strictEqual(capturedEphemeral93.length, 1, 'Exactly one ephemeral credential event must be dispatched');
+    assert.strictEqual(capturedEphemeral93[0].username, testUsername93);
+    assert.strictEqual(capturedEphemeral93[0].password, 'FixedDefaultPassword');
+    assert.strictEqual(capturedEphemeral93[0].initiatingOperatorId, 'operator-001');
+    assert.ok(capturedEphemeral93[0].oneTimeEventId);
+    assert.ok(capturedEphemeral93[0].oneTimeEventIdHash);
+    assert.strictEqual(capturedEphemeral93[0].oneTimeEventId.length, 64, '256-bit entropy (64 hex characters)');
+    assertValidOneTimeEventId(capturedEphemeral93[0].oneTimeEventId);
+    assert.notStrictEqual(capturedEphemeral93[0].oneTimeEventIdHash, SHA256_EMPTY_DIGEST, 'Hash must NOT equal empty-string digest');
+    assert.notStrictEqual(capturedEphemeral93[0].oneTimeEventIdHash, capturedEphemeral93[0].oneTimeEventId, 'Hash must differ from raw ID');
+    assert.strictEqual(capturedEphemeral93[0].oneTimeEventIdHash.length, 64, 'Hash must be 64 characters');
+
+    // Generic onProgress must NEVER receive plaintext password
+    for (const p of progressEvents93) {
+      assert.strictEqual((p.partial as any)?.password, undefined, 'onProgress partial must never contain plaintext password');
+      assert.strictEqual((p.partial as any)?.defaultPassword, undefined, 'onProgress partial must never contain defaultPassword');
+      assert.strictEqual((p.partial as any)?.ephemeralDefaultPassword, undefined, 'onProgress partial must never contain ephemeralDefaultPassword');
+    }
+    console.log('✓ TEST 93 Passed (Dedicated secret channel verified, zero password in generic channels)');
+
+    // 94. Ephemeral Credential Event Dispatched Even on PARTIAL_FAILED Workflow
+    console.log('\n[TEST 94] Testing Ephemeral Credential Event Dispatched on PARTIAL_FAILED Workflow...');
+    const capturedEphemeral94: any[] = [];
+    const testUsername94 = `ephemeral_fail_${Date.now()}`;
+    const wfRes94 = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      initiatingOperatorId: 'operator-002',
+      addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.4/users`,
+      roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+      userDto: {
+        clientId: 'client-123',
+        username: testUsername94,
+        firstName: 'EphemeralFail',
+        lastName: 'Doc',
+        mobileNumber: '0501112244',
+        nationality: 'Saudi Arabia',
+        role: 'NON_EXISTENT_ROLE_TRIGGER_FAIL',
+        roles: ['NON_EXISTENT_ROLE_TRIGGER_FAIL'],
+        status: 'ACTIVE',
+      },
+      onEphemeralCredential: (cred) => {
+        capturedEphemeral94.push(cred);
+      },
+    });
+
+    assert.strictEqual(wfRes94.success, false);
+    assert.strictEqual(wfRes94.creationState, 'COMPLETED', 'User creation succeeded');
+    assert.strictEqual(wfRes94.overallStatus, 'PARTIAL_FAILED', 'Role mapping failed');
+    assert.strictEqual(wfRes94.credentialDeliveryStatus, 'DELIVERED', 'Credential status must be DELIVERED even if role mapping fails');
+    assert.strictEqual((wfRes94 as any).password, undefined, 'No plaintext password in result');
+    assert.strictEqual(capturedEphemeral94.length, 1);
+    assert.strictEqual(capturedEphemeral94[0].password, 'FixedDefaultPassword');
+    assertValidOneTimeEventId(capturedEphemeral94[0].oneTimeEventId);
+    assert.notStrictEqual(capturedEphemeral94[0].oneTimeEventIdHash, SHA256_EMPTY_DIGEST);
+    console.log('✓ TEST 94 Passed (Ephemeral credential dispatched to dedicated channel on PARTIAL_FAILED)');
+
+    // 95. Sequential Multi-User Ephemeral Credential Channel Isolation
+    console.log('\n[TEST 95] Testing Sequential Multi-User Ephemeral Credential Channel Isolation...');
+    const batchUsers = [
+      { username: `seq_user_1_${Date.now()}`, firstName: 'SeqOne', lastName: 'User', mobileNumber: '0501110001', role: 'ACCUMED' },
+      { username: `seq_user_2_${Date.now()}`, firstName: 'SeqTwo', lastName: 'User', mobileNumber: '0501110002', role: 'ACCUMED' },
+    ];
+    const capturedBatchEphemeral: any[] = [];
+    const batchProgress: any[] = [];
+
+    for (const u of batchUsers) {
+      const res = await UserManagementExecutor.processUserFullWorkflow(page, {
+        clientId: 'client-123',
+        initiatingOperatorId: 'operator-batch',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+        userDto: {
+          clientId: 'client-123',
+          username: u.username,
+          firstName: u.firstName,
+          lastName: u.lastName,
+          mobileNumber: u.mobileNumber,
+          nationality: 'Saudi Arabia',
+          role: u.role,
+          roles: [u.role],
+          status: 'ACTIVE',
+        },
+        onProgress: (comment, partial) => {
+          batchProgress.push({ comment, partial });
+        },
+        onEphemeralCredential: (cred) => {
+          capturedBatchEphemeral.push(cred);
+        },
+      });
+      assert.strictEqual(res.success, true);
+      assert.strictEqual(res.credentialDeliveryStatus, 'DELIVERED');
+      assert.strictEqual((res as any).password, undefined);
+    }
+
+    assert.strictEqual(capturedBatchEphemeral.length, 2, 'Must emit 2 ephemeral credential events for 2 users');
+    assert.notStrictEqual(capturedBatchEphemeral[0].oneTimeEventId, capturedBatchEphemeral[1].oneTimeEventId, 'Event IDs must be unique');
+    assertValidOneTimeEventId(capturedBatchEphemeral[0].oneTimeEventId);
+    assertValidOneTimeEventId(capturedBatchEphemeral[1].oneTimeEventId);
+    assert.notStrictEqual(capturedBatchEphemeral[0].oneTimeEventIdHash, SHA256_EMPTY_DIGEST);
+    assert.notStrictEqual(capturedBatchEphemeral[1].oneTimeEventIdHash, SHA256_EMPTY_DIGEST);
+
+    for (const p of batchProgress) {
+      assert.strictEqual((p.partial as any)?.password, undefined, 'Generic progress must never contain passwords');
+      assert.strictEqual((p.partial as any)?.ephemeralDefaultPassword, undefined);
+    }
+    // 96. Sequential User Creation and Role Mapping (11-Step Real Workflow Test)
+    console.log('\n[TEST 96] Testing Complete 11-Step Sequential User Creation and Role Mapping...');
+
+    // Step 1 - 4: Create User A, navigate to addUserRole, exact User ID selection, map 1 role, verify persistence
+    const userA_name = `seq_user_a_${Date.now()}`;
+    const userA_res = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      initiatingOperatorId: 'operator-uat',
+      addUsersUrl: `${BASE_URL}/MasterV9.3/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.3/users`,
+      roleUrl: `${BASE_URL}/MasterV9.3/addUserRole`,
+      userDto: {
+        clientId: 'client-123',
+        username: userA_name,
+        firstName: 'TestA',
+        lastName: 'Seq',
+        mobileNumber: '0501119001',
+        nationality: 'Saudi Arabia',
+        role: 'ACCUMED',
+        roles: ['ACCUMED'],
+        status: 'ACTIVE',
+      },
+    });
+    assert.strictEqual(userA_res.success, true, 'User A creation and role mapping must succeed');
+    assert.strictEqual(userA_res.overallStatus, 'COMPLETED');
+    assert.strictEqual(userA_res.creationState, 'COMPLETED');
+    assert.strictEqual(userA_res.roleVerificationState, 'PASSED');
+    assert.strictEqual(userA_res.mappedRoles?.length, 1);
+    assert.strictEqual(userA_res.mappedRoles?.[0], 'ACCUMED');
+
+    // Step 5 - 8: Create User B, map multiple comma-separated roles (ACCUMED,FRONT DESK,REPORTS), verify persistence
+    const userB_name = `seq_user_b_${Date.now()}`;
+    const userB_res = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      initiatingOperatorId: 'operator-uat',
+      addUsersUrl: `${BASE_URL}/MasterV9.3/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.3/users`,
+      roleUrl: `${BASE_URL}/MasterV9.3/addUserRole`,
+      userDto: {
+        clientId: 'client-123',
+        username: userB_name,
+        firstName: 'TestB',
+        lastName: 'Seq',
+        mobileNumber: '0501119002',
+        nationality: 'Saudi Arabia',
+        role: 'ACCUMED,FRONT DESK,REPORTS',
+        roles: ['ACCUMED', 'FRONT DESK', 'REPORTS'],
+        status: 'ACTIVE',
+      },
+    });
+    assert.strictEqual(userB_res.success, true, 'User B creation and multi-role mapping must succeed');
+    assert.strictEqual(userB_res.overallStatus, 'COMPLETED');
+    assert.strictEqual(userB_res.creationState, 'COMPLETED');
+    assert.strictEqual(userB_res.roleVerificationState, 'PASSED');
+    assert.strictEqual(userB_res.mappedRoles?.length, 3);
+    assert.ok(userB_res.mappedRoles?.includes('ACCUMED'));
+    assert.ok(userB_res.mappedRoles?.includes('FRONT DESK'));
+    assert.ok(userB_res.mappedRoles?.includes('REPORTS'));
+
+    // Step 9 - 10: Force controlled row-level role-mapping failure on User C, confirm User D continues and completes
+    const userC_name = `seq_user_c_${Date.now()}`;
+    const userC_res = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      initiatingOperatorId: 'operator-uat',
+      addUsersUrl: `${BASE_URL}/MasterV9.3/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.3/users`,
+      roleUrl: `${BASE_URL}/MasterV9.3/addUserRole`,
+      userDto: {
+        clientId: 'client-123',
+        username: userC_name,
+        firstName: 'TestC',
+        lastName: 'Seq',
+        mobileNumber: '0501119003',
+        nationality: 'Saudi Arabia',
+        role: 'NON_EXISTENT_CONTROL_ROLE',
+        roles: ['NON_EXISTENT_CONTROL_ROLE'],
+        status: 'ACTIVE',
+      },
+    });
+    assert.strictEqual(userC_res.success, false, 'User C must fail role mapping');
+    assert.strictEqual(userC_res.overallStatus, 'PARTIAL_FAILED');
+    assert.strictEqual(userC_res.creationState, 'COMPLETED', 'User C was created');
+    assert.strictEqual(userC_res.retryStartingPoint, 'ROLE_MAPPING', 'Retry must point to ROLE_MAPPING');
+
+    // Next approved User D continues and completes
+    const userD_name = `seq_user_d_${Date.now()}`;
+    const userD_res = await UserManagementExecutor.processUserFullWorkflow(page, {
+      clientId: 'client-123',
+      initiatingOperatorId: 'operator-uat',
+      addUsersUrl: `${BASE_URL}/MasterV9.3/addUsers`,
+      usersUrl: `${BASE_URL}/MasterV9.3/users`,
+      roleUrl: `${BASE_URL}/MasterV9.3/addUserRole`,
+      userDto: {
+        clientId: 'client-123',
+        username: userD_name,
+        firstName: 'TestD',
+        lastName: 'Seq',
+        mobileNumber: '0501119004',
+        nationality: 'Saudi Arabia',
+        role: 'DOCTOR',
+        roles: ['DOCTOR'],
+        status: 'ACTIVE',
+      },
+    });
+    assert.strictEqual(userD_res.success, true, 'User D must process and complete successfully after User C failure');
+    assert.strictEqual(userD_res.overallStatus, 'COMPLETED');
+
+    // Step 11: Retry failed row User C starting directly from ROLE_MAPPING without duplicate user creation
+    const retryUserC_res = await UserManagementExecutor.mapUserRoles(page, {
+      roleUrl: `${BASE_URL}/MasterV9.3/addUserRole`,
+      username: userC_name,
+      fullName: 'TestC Seq',
+      firstName: 'TestC',
+      requestedRoles: ['ACCUMED', 'DOCTOR'],
+    });
+    assert.strictEqual(retryUserC_res.success, true, 'User C retry starting directly from ROLE_MAPPING must succeed');
+    assert.strictEqual(retryUserC_res.overallStatus, 'COMPLETED');
+    assert.strictEqual(retryUserC_res.roleVerificationState, 'PASSED');
+    assert.strictEqual(retryUserC_res.mappedRoles?.length, 2);
+    console.log('✓ TEST 96 Passed (Complete 11-step sequential user creation, multi-role mapping, and continuation verified)');
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (79/79)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (96/96)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});

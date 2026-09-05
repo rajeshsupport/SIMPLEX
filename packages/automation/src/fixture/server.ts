@@ -94,6 +94,13 @@ export function createFixtureApp(): express.Express {
     },
   ];
 
+  const userRolesMap = new Map<string, string[]>();
+  userRolesMap.set('hmc_admin', ['Admin', 'Super User']);
+  userRolesMap.set('dr_sarah', ['Physician']);
+  userRolesMap.set('nurse_ali', ['Nurse']);
+  userRolesMap.set('abdul.p', ['Physician']);
+  userRolesMap.set('synthetic.test.user', ['Admin']);
+
   // 1. Login Page
   const handleLoginGet = (req: Request, res: Response) => {
     const error = req.query.error as string;
@@ -334,11 +341,14 @@ export function createFixtureApp(): express.Express {
     `);
   };
 
+  app.get('/users', handleUsersListGet);
   app.get('/MasterV9.4/users', handleUsersListGet);
+  app.get('/MasterV9.3/users', handleUsersListGet);
   app.get('/hmc/users', handleUsersListGet);
 
-  // 4. Add User Screen (/MasterV9.4/addUsers)
-  app.get('/MasterV9.4/addUsers', (req: Request, res: Response) => {
+  // 4. Add User Screen (/MasterV9.4/addUsers, /MasterV9.3/addUsers, /addUsers)
+  const handleAddUsersGet = (req: Request, res: Response) => {
+    const postAction = req.path;
     res.send(`
       <!DOCTYPE html>
       <html lang="en">
@@ -362,7 +372,7 @@ export function createFixtureApp(): express.Express {
         <div class="content">
           <div class="card">
             <h2>Add User Master</h2>
-            <form id="addUserForm" method="POST" action="/MasterV9.4/addUsers">
+            <form id="addUserForm" method="POST" action="${postAction}">
               <div class="grid">
                 <div class="field">
                   <label for="username">User Name *</label>
@@ -452,7 +462,7 @@ export function createFixtureApp(): express.Express {
       </body>
       </html>
     `);
-  });
+  };
 
   app.get('/MasterV9.4/addUsers-no-button', (req: Request, res: Response) => {
     res.send(`
@@ -657,11 +667,12 @@ export function createFixtureApp(): express.Express {
     res.redirect('/MasterV9.4/users');
   });
 
-  app.post('/MasterV9.4/addUsers', (req: Request, res: Response) => {
+  const handleAddUsersPost = (req: Request, res: Response) => {
     const { username, firstName, middleName, lastName, nickName, email, mobileNumber, nationality, role, profileRole, barcodeNumber } = req.body;
     if (clientUsers.some((u) => u.username.toLowerCase() === (username || '').toLowerCase())) {
       return res.status(400).send('<div class="alert-danger">User already exists</div>');
     }
+    const targetUrl = req.path.includes('MasterV9.3') ? '/MasterV9.3/users' : (req.path.includes('MasterV9.4') ? '/MasterV9.4/users' : '/users');
     clientUsers.push({
       username: username || `user_${Date.now()}`,
       firstName: firstName || 'First',
@@ -677,8 +688,15 @@ export function createFixtureApp(): express.Express {
       status: 'ACTIVE',
       barcodeNumber,
     });
-    res.redirect('/MasterV9.4/users');
-  });
+    res.redirect(targetUrl);
+  };
+
+  app.get('/addUsers', handleAddUsersGet);
+  app.get('/MasterV9.4/addUsers', handleAddUsersGet);
+  app.get('/MasterV9.3/addUsers', handleAddUsersGet);
+  app.post('/addUsers', handleAddUsersPost);
+  app.post('/MasterV9.4/addUsers', handleAddUsersPost);
+  app.post('/MasterV9.3/addUsers', handleAddUsersPost);
 
   // Client User Mutation APIs
   app.post('/MasterV9.4/api/users/:username/toggle-status', (req: Request, res: Response) => {
@@ -694,6 +712,265 @@ export function createFixtureApp(): express.Express {
   app.post('/MasterV9.4/api/users/:username/reset-password', (req: Request, res: Response) => {
     const tempPassword = `Tmp@${Math.random().toString(36).substring(2, 8)}!1`;
     res.json({ success: true, temporaryPassword: tempPassword });
+  });
+
+  // User Role Master Screen (/addUserRole, /MasterV9.4/addUserRole, /MasterV9.3/addUserRole)
+  const handleAddUserRoleGet = (req: Request, res: Response) => {
+    const selectedUsername = (req.query.username as string) || '';
+    const successMsg = req.query.success as string;
+    const errorMsg = req.query.error as string;
+    const currentRoles = selectedUsername ? (userRolesMap.get(selectedUsername) || []) : [];
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>HMC Portal - Add User Role Master</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; }
+          .header { background: #1e293b; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+          .nav a { color: #94a3b8; text-decoration: none; margin-right: 1.5rem; font-weight: 500; }
+          .content { padding: 2rem; max-width: 850px; margin: 0 auto; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.5rem; border: 1px solid #334155; }
+          .field { margin-bottom: 1.25rem; }
+          label { display: block; margin-bottom: 0.35rem; font-size: 0.875rem; color: #94a3b8; font-weight: 500; }
+          input[type="text"], input[type="search"] { width: 100%; box-sizing: border-box; padding: 0.6rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #fff; font-size: 0.9rem; }
+          .user-dropdown { position: relative; }
+          .dropdown-results { position: absolute; left: 0; right: 0; top: 100%; background: #0f172a; border: 1px solid #38bdf8; border-radius: 0.375rem; max-height: 220px; overflow-y: auto; z-index: 50; margin-top: 4px; box-shadow: 0 10px 25px rgba(0,0,0,0.7); }
+          .user-option { padding: 0.6rem 1rem; border-bottom: 1px solid #1e293b; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+          .user-option:hover, .user-option.active { background: #1e293b; color: #38bdf8; }
+          .role-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 1rem; background: #0f172a; padding: 1.25rem; border-radius: 0.375rem; border: 1px solid #334155; }
+          .role-checkbox-label { display: flex; align-items: center; gap: 0.5rem; color: #e2e8f0; font-size: 0.875rem; cursor: pointer; }
+          .role-checkbox-label input { width: 16px; height: 16px; cursor: pointer; }
+          .btn-update { background: #0284c7; color: white; border: none; padding: 0.65rem 1.5rem; border-radius: 0.375rem; font-weight: bold; cursor: pointer; font-size: 0.9rem; }
+          .btn-update:hover { background: #0369a1; }
+          .alert-success { background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #34d399; padding: 0.75rem 1rem; border-radius: 0.375rem; margin-bottom: 1.25rem; font-size: 0.875rem; }
+          .alert-danger { background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #f87171; padding: 0.75rem 1rem; border-radius: 0.375rem; margin-bottom: 1.25rem; font-size: 0.875rem; }
+          .spinner { display: none; margin-left: 0.5rem; color: #38bdf8; font-size: 0.8rem; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div style="font-weight: bold; font-size: 1.25rem; color: #38bdf8;">HMC Clinical Suite</div>
+          <div class="nav">
+            <a href="/MasterV9.4/users">Users</a>
+            <a href="/addUserRole" class="active">Add User Role</a>
+            <a href="/login">Logout</a>
+          </div>
+        </div>
+        <div class="content" data-testid="add-user-role-screen">
+          <div class="card">
+            <h2>User Role Master</h2>
+            <p style="color: #64748b; font-size: 0.875rem; margin-bottom: 1.5rem;">Map single and multiple role permissions to client users.</p>
+
+            ${successMsg ? `<div class="alert-success" id="successMsg" data-testid="msg-role-success">${successMsg}</div>` : ''}
+            ${errorMsg ? `<div class="alert-danger" id="errorMsg" data-testid="msg-role-error">${errorMsg}</div>` : ''}
+
+            <form id="UserRole" name="UserRole" method="POST" action="${req.path}" class="form-horizontal fv-form fv-form-bootstrap">
+              <div class="field user-dropdown form-group">
+                <label for="txtUserFirstname" class="control-label">User <span style="color:red;">*</span> <span id="searchSpinner" class="spinner" data-testid="search-spinner">(Searching…)</span></label>
+                <input
+                  type="text"
+                  id="txtUserFirstname"
+                  name="txtUserFirstname"
+                  data-testid="input-user-role-search"
+                  placeholder="User Id"
+                  class="form-control filter-table ui-autocomplete-input"
+                  value="${selectedUsername}"
+                  autocomplete="off"
+                  oninput="handleUserSearchInput(this.value)"
+                  onfocus="handleUserSearchInput(this.value)"
+                />
+                <input type="hidden" id="txtUser" name="txtUser" data-testid="hidden-selected-username" value="${selectedUsername}" />
+                <input type="hidden" id="txtUserFirhidden" name="txtUserFirhidden" value="${selectedUsername}" />
+                <input type="hidden" id="selectedUsername" name="username" value="${selectedUsername}" />
+                <ul id="userDropdownResults" class="ui-autocomplete ui-menu dropdown-results" style="display: none; list-style: none; padding: 0; margin: 4px 0 0 0;" data-testid="user-dropdown-results"></ul>
+              </div>
+
+              <div id="roleSelectionContainer" style="display: ${selectedUsername ? 'block' : 'none'};">
+                <label>Available Role Controls for <strong id="displayUsername" style="color: #38bdf8;">${selectedUsername}</strong></label>
+
+                <table class="table table-striped table-hover role-table" id="adduserrole" data-testid="table-adduserrole" style="width: 100%; margin-top: 1rem; border-collapse: collapse;">
+                  <thead class="text-uppercase" style="background: #0f172a; color: #94a3b8; font-size: 0.8rem;">
+                    <tr>
+                      <th style="padding: 0.5rem; text-align: left;">Role Name</th>
+                      <th style="padding: 0.5rem; text-align: center;">Assign</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${[
+                      'ACCUMED',
+                      'FRONT DESK',
+                      'REPORTS',
+                      'ADMIN',
+                      'DOCTOR',
+                      'NURSE',
+                      'PHYSICIAN',
+                      'PHARMACIST',
+                      'LAB TECHNICIAN',
+                      'OPERATOR',
+                      'SUPER USER',
+                      'BILLING SUPER USER',
+                      'Physician',
+                      'Nurse',
+                      'Admin',
+                      'Pharmacist',
+                      'Super User',
+                    ].map((role) => {
+                      const isChecked = currentRoles.some((r) => r.toLowerCase().trim() === role.toLowerCase().trim());
+                      return `
+                        <tr style="border-bottom: 1px solid #334155;">
+                          <td class="checkrole" style="padding: 0.5rem;">${role}</td>
+                          <td style="padding: 0.5rem; text-align: center;">
+                            <label class="role-checkbox-label" style="display: inline-flex; align-items: center; cursor: pointer;">
+                              <input
+                                type="checkbox"
+                                name="txtRole[]"
+                                value="${role}"
+                                data-chckrole="${role}"
+                                data-role="${role}"
+                                class="adduserole checkrolehide"
+                                data-testid="checkbox-role-${role.toLowerCase().replace(/\\s+/g, '-')}"
+                                ${isChecked ? 'checked' : ''}
+                              />
+                            </label>
+                          </td>
+                        </tr>
+                      `;
+                    }).join('')}
+                  </tbody>
+                </table>
+
+                <div style="margin-top: 1.5rem; display: flex; justify-content: flex-end; gap: 0.75rem;">
+                  <button type="submit" id="btnUpdateRoles" class="btn btn-info btn-update" data-testid="btn-update-roles">ADD</button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <script>
+          const rawClientUsers = ${JSON.stringify(clientUsers)};
+          const userRolesStore = ${JSON.stringify(Object.fromEntries(userRolesMap.entries()))};
+
+          // Synthetic Ambiguity Candidates for automated test validation
+          const extendedUsers = [
+            ...rawClientUsers,
+            { username: 'raja.testone', firstName: 'Raja', lastName: 'Testone', fullName: 'Raja Testone', remoteUserId: 'USER-101' },
+            { username: 'raja.testtwo', firstName: 'Raja', lastName: 'Testtwo', fullName: 'Raja Testtwo', remoteUserId: 'USER-102' },
+            { username: 'raja.testthree', firstName: 'Raja', lastName: 'Testthree', fullName: 'Raja Testthree', remoteUserId: 'USER-103' },
+            // Ambiguous fixture with no username or ID exposed
+            { username: 'ambig.1', firstName: 'AmbiguousOnly', lastName: '', fullName: 'AmbiguousOnly', isAmbiguousFixture: true },
+            { username: 'ambig.2', firstName: 'AmbiguousOnly', lastName: '', fullName: 'AmbiguousOnly', isAmbiguousFixture: true },
+          ];
+
+          let searchDebounceTimer = null;
+
+          function handleUserSearchInput(val) {
+            const query = (val || '').trim().toLowerCase();
+            const spinner = document.getElementById('searchSpinner');
+            const resultsContainer = document.getElementById('userDropdownResults');
+            if (spinner) spinner.style.display = 'inline';
+
+            clearTimeout(searchDebounceTimer);
+            searchDebounceTimer = setTimeout(() => {
+              if (spinner) spinner.style.display = 'none';
+              if (!query) {
+                resultsContainer.style.display = 'none';
+                return;
+              }
+
+              const matched = extendedUsers.filter((u) => {
+                const uNorm = (u.username || '').toLowerCase();
+                const fNorm = (u.fullName || '').toLowerCase();
+                const fnNorm = (u.firstName || '').toLowerCase();
+                const idNorm = (u.remoteUserId || '').toLowerCase();
+                return uNorm.includes(query) || fNorm.includes(query) || fnNorm.includes(query) || idNorm.includes(query);
+              });
+
+              if (matched.length === 0) {
+                resultsContainer.innerHTML = '<li class="ui-menu-item user-option" style="color: #64748b; padding: 0.5rem 1rem;">No users found</li>';
+                resultsContainer.style.display = 'block';
+                return;
+              }
+
+              resultsContainer.innerHTML = matched.map((u, idx) => {
+                if (u.isAmbiguousFixture) {
+                  return \`<li class="ui-menu-item user-option" data-testid="user-option" onclick="selectUser('\${u.username}', '\${u.fullName}')"><span>\${u.fullName}</span></li>\`;
+                }
+                const idText = u.remoteUserId ? ' [' + u.remoteUserId + ']' : '';
+                return \`<li class="ui-menu-item user-option" data-testid="user-option" data-value="\${u.username}" data-username="\${u.username}" data-userid="\${u.remoteUserId || ''}" onclick="selectUser('\${u.username}', '\${u.fullName}')" style="padding: 0.5rem 1rem; border-bottom: 1px solid #1e293b; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+                  <span><strong>\${u.fullName}</strong> (\${u.username})</span>
+                  <span style="color: #64748b; font-size: 0.75rem;">\${idText}</span>
+                </li>\`;
+              }).join('');
+              resultsContainer.style.display = 'block';
+            }, 100);
+          }
+
+          function selectUser(username, fullName) {
+            document.getElementById('txtUserFirstname').value = fullName;
+            document.getElementById('txtUser').value = username;
+            document.getElementById('txtUserFirhidden').value = fullName;
+            document.getElementById('selectedUsername').value = username;
+            document.getElementById('displayUsername').textContent = username + ' (' + fullName + ')';
+            document.getElementById('userDropdownResults').style.display = 'none';
+            document.getElementById('roleSelectionContainer').style.display = 'block';
+
+            // Refresh checkboxes based on current mapping
+            const current = userRolesStore[username] || [];
+            const checkboxes = document.querySelectorAll('input[name="txtRole[]"], input[name="roles"]');
+            checkboxes.forEach((cb) => {
+              const val = cb.getAttribute('data-chckrole') || cb.value;
+              cb.checked = current.some((r) => r.toLowerCase().trim() === val.toLowerCase().trim());
+            });
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleAddUserRolePost = (req: Request, res: Response) => {
+    const userVal = (req.body.txtUser || req.body.username || '').toString().trim();
+    if (!userVal) {
+      return res.redirect(`${req.path}?error=` + encodeURIComponent('Please select a user first.'));
+    }
+
+    const rawRoles = req.body['txtRole[]'] || req.body.txtRole || req.body.roles || [];
+    const rolesArr = Array.isArray(rawRoles) ? rawRoles : (rawRoles ? [rawRoles] : []);
+    userRolesMap.set(userVal, rolesArr);
+
+    // Also update clientUsers in-memory snapshot if present
+    const matchedUser = clientUsers.find((u) => u.username.toLowerCase() === userVal.toLowerCase());
+    if (matchedUser && rolesArr.length > 0) {
+      matchedUser.role = rolesArr.join(', ');
+    }
+
+    res.redirect(`${req.path}?username=` + encodeURIComponent(userVal) + '&success=' + encodeURIComponent(`Roles updated successfully for user '${userVal}'. Saved roles: [${rolesArr.join(', ')}].`));
+  };
+
+  app.get('/addUserRole', handleAddUserRoleGet);
+  app.post('/addUserRole', handleAddUserRolePost);
+  app.get('/MasterV9.4/addUserRole', handleAddUserRoleGet);
+  app.post('/MasterV9.4/addUserRole', handleAddUserRolePost);
+  app.get('/MasterV9.3/addUserRole', handleAddUserRoleGet);
+  app.post('/MasterV9.3/addUserRole', handleAddUserRolePost);
+
+  // User Role APIs
+  app.get('/MasterV9.4/api/user-roles/:username', (req: Request, res: Response) => {
+    const uname = String(req.params.username || '');
+    const roles = userRolesMap.get(uname) || [];
+    res.json({ success: true, username: uname, roles });
+  });
+
+  app.post('/MasterV9.4/api/user-roles/:username', (req: Request, res: Response) => {
+    const uname = String(req.params.username || '');
+    const { roles } = req.body;
+    const rolesArr = Array.isArray(roles) ? roles : (roles ? [roles] : []);
+    userRolesMap.set(uname, rolesArr);
+    res.json({ success: true, username: uname, roles: rolesArr });
   });
 
   // Services Screen
