@@ -17,3 +17,8 @@ export * from './automation-run-step.entity.js';
 export * from './stored-file.entity.js';
 export * from './retention-policy.entity.js';
 export * from './client-user-snapshot.entity.js';
+export * from './client-resource-snapshot.entity.js';
+export * from './client-resource-department.entity.js';
+export * from './client-resource-service.entity.js';
+export * from './resource-import-job.entity.js';
+export * from './resource-import-row.entity.js';

@@ -122,9 +122,14 @@ async function runBootstrapLeakAudit() {
   await auditRepo.delete({ actorUsername: testUsername });
 
   console.log('\n✓ Bootstrap Output & Plaintext Leak Integrity Audit Passed: ZERO Plaintext Leaks Detected.');
+  if (AppDataSource.isInitialized) {
+    await AppDataSource.destroy();
+  }
 }
 
-runBootstrapLeakAudit().catch((err) => {
-  console.error('[FATAL] Leak Audit failed:', err);
-  process.exit(1);
-});
+runBootstrapLeakAudit()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('[FATAL] Leak Audit failed:', err);
+    process.exit(1);
+  });

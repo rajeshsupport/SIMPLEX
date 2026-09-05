@@ -130,9 +130,14 @@ async function runBootstrapSecurityTests() {
   // Cleanup test user
   await userRepo.delete({ username: testAdminUser });
   console.log('\nAll Secure Administrator Bootstrap Tests Passed Successfully!');
+  if (AppDataSource.isInitialized) {
+    await AppDataSource.destroy();
+  }
 }
 
-runBootstrapSecurityTests().catch((err) => {
-  console.error('[FATAL] Bootstrap Security Tests failed:', err);
-  process.exit(1);
-});
+runBootstrapSecurityTests()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('[FATAL] Bootstrap Security Tests failed:', err);
+    process.exit(1);
+  });

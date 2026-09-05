@@ -28,6 +28,12 @@ const KNOWN_SCREEN_ROUTES = [
   '/dashboard',
   '/index',
   '/home',
+  '/addresourceparentdetails',
+  '/addparentresourceuser',
+  '/addresource',
+  '/resources',
+  '/resourceusermapping',
+  '/resource',
 ];
 
 /**
@@ -246,5 +252,85 @@ export function resolveClientRoute(options: ResolveClientRouteOptions): string {
   }
 
   return `${origin}${combinedPath}`;
+}
+
+export interface ResolveClientResourceUrlOptions {
+  baseUrl?: string;
+  configuredUrl?: string;
+  applicationPath?: string;
+  quickResourceRoute?: string | null;
+}
+
+export function resolveClientResourceUrl(options: ResolveClientResourceUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve resource URL');
+  }
+
+  const resourceRouteRaw = options.quickResourceRoute || '/addResourceParentDetails';
+  let resourceRoute = resourceRouteRaw.startsWith('/') ? resourceRouteRaw : `/${resourceRouteRaw}`;
+
+  const trimmed = rawUrl.trim();
+  const normalizedBase = normalizeClientBaseUrl(trimmed);
+
+  let finalBase = normalizedBase;
+  if (options.applicationPath && options.applicationPath.trim()) {
+    const appPath = options.applicationPath.trim().startsWith('/')
+      ? options.applicationPath.trim()
+      : `/${options.applicationPath.trim()}`;
+    const cleanAppPath = appPath.replace(/\/+$/, '');
+    if (!normalizedBase.toLowerCase().endsWith(cleanAppPath.toLowerCase())) {
+      finalBase = `${normalizedBase}${cleanAppPath}`;
+    }
+  }
+
+  const urlObj = new URL(finalBase);
+  let cleanBasePath = urlObj.pathname.replace(/\/+$/, '');
+
+  urlObj.pathname = `${cleanBasePath}${resourceRoute}`.replace(/\/+/g, '/').replace(/\/+$/, '');
+  urlObj.search = '';
+  urlObj.hash = '';
+
+  return urlObj.toString().replace(/\/+$/, '');
+}
+
+export interface ResolveClientResourceUserMappingUrlOptions {
+  baseUrl?: string;
+  configuredUrl?: string;
+  applicationPath?: string;
+  resourceUserRoute?: string | null;
+}
+
+export function resolveClientResourceUserMappingUrl(options: ResolveClientResourceUserMappingUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve resource user mapping URL');
+  }
+
+  const mappingRouteRaw = options.resourceUserRoute || '/addParentResourceUser';
+  let mappingRoute = mappingRouteRaw.startsWith('/') ? mappingRouteRaw : `/${mappingRouteRaw}`;
+
+  const trimmed = rawUrl.trim();
+  const normalizedBase = normalizeClientBaseUrl(trimmed);
+
+  let finalBase = normalizedBase;
+  if (options.applicationPath && options.applicationPath.trim()) {
+    const appPath = options.applicationPath.trim().startsWith('/')
+      ? options.applicationPath.trim()
+      : `/${options.applicationPath.trim()}`;
+    const cleanAppPath = appPath.replace(/\/+$/, '');
+    if (!normalizedBase.toLowerCase().endsWith(cleanAppPath.toLowerCase())) {
+      finalBase = `${normalizedBase}${cleanAppPath}`;
+    }
+  }
+
+  const urlObj = new URL(finalBase);
+  let cleanBasePath = urlObj.pathname.replace(/\/+$/, '');
+
+  urlObj.pathname = `${cleanBasePath}${mappingRoute}`.replace(/\/+/g, '/').replace(/\/+$/, '');
+  urlObj.search = '';
+  urlObj.hash = '';
+
+  return urlObj.toString().replace(/\/+$/, '');
 }
 

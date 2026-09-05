@@ -5,6 +5,7 @@ import {
   Server,
   FileSpreadsheet,
   Users,
+  Layers,
   Shield,
   History,
   Laptop,
@@ -44,6 +45,12 @@ export const Sidebar: React.FC = () => {
         hasPermission(PERMISSIONS.CLIENT_USERS_VIEW) ||
         hasPermission(PERMISSIONS.USER_MANAGEMENT_VIEW) ||
         hasPermission(PERMISSIONS.APPLICATION_USER_MANAGE),
+    },
+    {
+      label: 'Resource Master',
+      path: '/resources',
+      icon: Layers,
+      visible: hasPermission(PERMISSIONS.CLIENT_RESOURCES_VIEW),
     },
     {
       label: 'Roles & RBAC',

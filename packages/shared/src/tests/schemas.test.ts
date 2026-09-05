@@ -4,8 +4,15 @@ import {
   CreateClientSchema,
   ServiceMasterRowSchema,
   UserImportRowSchema,
+  CreateClientResourceSchema,
+  UpdateClientResourceSchema,
+  SetClientResourceStatusSchema,
+  MapResourceUserSchema,
+  SyncClientResourcesSchema,
   resolveClientRoute,
   resolveClientRoleUrl,
+  resolveClientResourceUrl,
+  resolveClientResourceUserMappingUrl,
   normalizeClientBaseUrl,
   validateRedirectHost,
   parseAndValidateRoles,
@@ -13,6 +20,9 @@ import {
   isValidOneTimeEventId,
   computeOneTimeEventIdHash,
   SHA256_EMPTY_DIGEST,
+  PERMISSIONS,
+  generateResourceImportWorkbook,
+  parseAndValidateResourceWorkbook,
 } from '../index.js';
 
 function runSchemaTests() {
@@ -333,7 +343,96 @@ function runSchemaTests() {
   }
   console.log('✓ TEST 26: 10,000 generated 256-bit event IDs verified (0 duplicates, 0 empty digests, 0 all-zeroes).');
 
-  console.log('\nAll shared schema, URL architecture, Role Parser & Event-ID cryptographic tests passed successfully!');
+  // --- Testing Client Resource URLs, Schemas & Permissions ---
+  console.log('\n--- Testing Client Resource URLs, Schemas & Permissions ---');
+
+  // Test 27: Resource URL Resolver (Defaults to /addResourceParentDetails)
+  const resUrl1 = resolveClientResourceUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3' });
+  if (resUrl1 !== 'https://staging.simplexworld.com/MasterV9.3/addResourceParentDetails') {
+    throw new Error(`Test 27 Failed: Expected /addResourceParentDetails, got ${resUrl1}`);
+  }
+  const resUrl2 = resolveClientResourceUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', quickResourceRoute: '/customResource' });
+  if (resUrl2 !== 'https://staging.simplexworld.com/MasterV9.3/customResource') {
+    throw new Error(`Test 27 Failed: Custom quickResourceRoute not resolved properly: ${resUrl2}`);
+  }
+  console.log('✓ TEST 27: resolveClientResourceUrl correctly resolves /addResourceParentDetails and custom routes.');
+
+  // Test 28: Resource User Mapping URL Resolver (Defaults to /addParentResourceUser)
+  const mapUrl1 = resolveClientResourceUserMappingUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3' });
+  if (mapUrl1 !== 'https://staging.simplexworld.com/MasterV9.3/addParentResourceUser') {
+    throw new Error(`Test 28 Failed: Expected /addParentResourceUser, got ${mapUrl1}`);
+  }
+  const mapUrl2 = resolveClientResourceUserMappingUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', resourceUserRoute: '/customMapping' });
+  if (mapUrl2 !== 'https://staging.simplexworld.com/MasterV9.3/customMapping') {
+    throw new Error(`Test 28 Failed: Custom resourceUserRoute not resolved: ${mapUrl2}`);
+  }
+  console.log('✓ TEST 28: resolveClientResourceUserMappingUrl correctly resolves /addParentResourceUser and custom routes.');
+
+  // Test 29: CreateQuickResourceSchema Validation
+  const validResDto = CreateClientResourceSchema.safeParse({
+    clientId: 'e6371c6d-3183-4a7b-a3d8-e3cf14a1a9e5',
+    resourceName: 'Dr. Tariq Al-Mansoor',
+    isResourceHuman: true,
+    resourceType: 'Consultant Physician',
+    specialty: 'Cardiology',
+    departments: 'ALL',
+    services: 'ALL',
+  });
+  if (!validResDto.success) throw new Error(`Test 29 Failed: Valid resource DTO rejected: ${JSON.stringify(validResDto.error)}`);
+
+  const invalidResDto = CreateClientResourceSchema.safeParse({
+    clientId: 'invalid',
+    resourceName: '',
+  });
+  if (invalidResDto.success) throw new Error('Test 29 Failed: Invalid resource DTO accepted');
+  console.log('✓ TEST 29: CreateClientResourceSchema validates valid and invalid payloads.');
+
+  // Test 30: MapResourceUserSchema and SetClientResourceStatusSchema
+  const validMap = MapResourceUserSchema.safeParse({
+    clientId: 'e6371c6d-3183-4a7b-a3d8-e3cf14a1a9e5',
+    remoteResourceId: 'REM-DOC-01',
+    remoteUserId: 'REM-USR-01',
+    username: 'dr_tariq',
+    isShownInRegistration: true,
+  });
+  if (!validMap.success) throw new Error('Test 30 Failed: Valid user mapping rejected');
+  const validStat = SetClientResourceStatusSchema.safeParse({
+    clientId: 'e6371c6d-3183-4a7b-a3d8-e3cf14a1a9e5',
+    remoteResourceId: 'REM-01',
+    status: 'INACTIVE',
+  });
+  if (!validStat.success) throw new Error('Test 30 Failed: Valid status update rejected');
+  console.log('✓ TEST 30: MapResourceUserSchema and SetClientResourceStatusSchema verified.');
+
+  // Test 31: Resource Permissions Constant Check
+  if (!PERMISSIONS.CLIENT_RESOURCES_VIEW || !PERMISSIONS.CLIENT_RESOURCES_CREATE || !PERMISSIONS.CLIENT_RESOURCES_SYNC || !PERMISSIONS.CLIENT_RESOURCE_USER_MAP) {
+    throw new Error('Test 31 Failed: Resource permissions missing from PERMISSIONS constant');
+  }
+  console.log('✓ TEST 31: CLIENT_RESOURCES_* permissions constant correctly registered.');
+
+  // Test 32: 10-Sheet Workbook Generation & Client Mismatch Protection
+  console.log('\n--- Testing 10-Sheet Workbook Generation & Validation ---');
+  const testClientId = 'e6371c6d-3183-4a7b-a3d8-e3cf14a1a9e5';
+  const wbBuffer = generateResourceImportWorkbook({
+    clientId: testClientId,
+    clientCode: 'CLI_TEST',
+    clientName: 'Test Hospital',
+  });
+  if (!wbBuffer || wbBuffer.length === 0) throw new Error('Test 32 Failed: Workbook generation failed');
+
+  const parsedWb = parseAndValidateResourceWorkbook(wbBuffer, testClientId);
+  if (!parsedWb.isValid || parsedWb.validRows.length !== 2) {
+    throw new Error(`Test 32 Failed: Valid workbook failed validation (expected 2 valid rows): ${JSON.stringify(parsedWb)}`);
+  }
+
+  // Client Mismatch check
+  const mismatchCheck = parseAndValidateResourceWorkbook(wbBuffer, 'different-client-id');
+  if (!mismatchCheck.clientMismatch) {
+    throw new Error('Test 32 Failed: Client mismatch was not detected');
+  }
+  console.log('✓ TEST 32: 10-Sheet Workbook generated, parsed, and verified with client ID mismatch protection.');
+
+  console.log('\nAll shared schema, URL architecture, Role Parser, Resource & Event-ID cryptographic tests passed successfully!');
 }
 
 runSchemaTests();

@@ -31,6 +31,16 @@ export const PERMISSIONS = {
   CLIENT_USERS_VIEW_SIGNATURE: 'client_users.view_signature',
   CLIENT_USERS_VIEW_PROFILE: 'client_users.view_profile',
 
+  // Client Resources (Doctors, Clinicians, Staff, Equipment, Rooms)
+  CLIENT_RESOURCES_VIEW: 'client_resources.view',
+  CLIENT_RESOURCES_SYNC: 'client_resources.sync',
+  CLIENT_RESOURCES_CREATE: 'client_resources.create',
+  CLIENT_RESOURCES_EDIT: 'client_resources.edit',
+  CLIENT_RESOURCES_STATUS_CHANGE: 'client_resources.status_change',
+  CLIENT_RESOURCES_IMPORT: 'client_resources.import',
+  CLIENT_RESOURCES_EXPORT: 'client_resources.export',
+  CLIENT_RESOURCE_USER_MAP: 'client_resource.user_map',
+
   // Service Master
   SERVICE_MASTER_VIEW: 'service_master.view',
   SERVICE_MASTER_IMPORT: 'service_master.import',
@@ -67,7 +77,7 @@ export type PermissionCode = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 export interface PermissionDefinition {
   code: PermissionCode;
   name: string;
-  category: 'Dashboard' | 'Clients' | 'Credentials' | 'HMC Users' | 'Services' | 'Imports' | 'Audit' | 'System & RBAC' | 'Workflows' | 'Agents';
+  category: 'Dashboard' | 'Clients' | 'Credentials' | 'HMC Users' | 'Resources' | 'Services' | 'Imports' | 'Audit' | 'System & RBAC' | 'Workflows' | 'Agents';
   description: string;
 }
 
@@ -84,6 +94,14 @@ export const ALL_PERMISSIONS: PermissionDefinition[] = [
   { code: PERMISSIONS.USER_MANAGEMENT_CREATE, name: 'Create HMC User', category: 'HMC Users', description: 'Trigger single or batch user creation in target HMC' },
   { code: PERMISSIONS.USER_MANAGEMENT_RESET_PASSWORD, name: 'Reset HMC User Password', category: 'HMC Users', description: 'Trigger user password reset in target HMC' },
   { code: PERMISSIONS.CLIENT_USER_CREDENTIAL_VIEW, name: 'View User Credentials', category: 'HMC Users', description: 'View ephemeral generated default passwords after user creation and reset' },
+  { code: PERMISSIONS.CLIENT_RESOURCES_VIEW, name: 'View Client Resources', category: 'Resources', description: 'View client resource directory and metadata' },
+  { code: PERMISSIONS.CLIENT_RESOURCES_SYNC, name: 'Sync Client Resources', category: 'Resources', description: 'Trigger automated sync of client resources' },
+  { code: PERMISSIONS.CLIENT_RESOURCES_CREATE, name: 'Create Client Resource', category: 'Resources', description: 'Create single resource in target HMC' },
+  { code: PERMISSIONS.CLIENT_RESOURCES_EDIT, name: 'Edit Client Resource', category: 'Resources', description: 'Update resource metadata in target HMC' },
+  { code: PERMISSIONS.CLIENT_RESOURCES_STATUS_CHANGE, name: 'Change Resource Status', category: 'Resources', description: 'Toggle resource active/inactive status' },
+  { code: PERMISSIONS.CLIENT_RESOURCES_IMPORT, name: 'Import Resources', category: 'Resources', description: 'Bulk import resources from Excel workbook' },
+  { code: PERMISSIONS.CLIENT_RESOURCES_EXPORT, name: 'Export Resources', category: 'Resources', description: 'Export client resources to Excel/CSV' },
+  { code: PERMISSIONS.CLIENT_RESOURCE_USER_MAP, name: 'Map Resource User', category: 'Resources', description: 'Link client resource to console user' },
   { code: PERMISSIONS.SERVICE_MASTER_VIEW, name: 'View Services', category: 'Services', description: 'View service master screens' },
   { code: PERMISSIONS.SERVICE_MASTER_IMPORT, name: 'Import Services', category: 'Services', description: 'Trigger service master import in target HMC' },
   { code: PERMISSIONS.IMPORT_PREVIEW, name: 'Preview Imports', category: 'Imports', description: 'Upload and validate spreadsheet data before import' },

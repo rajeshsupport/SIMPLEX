@@ -49,6 +49,15 @@ export class Client {
   @Column({ type: 'nvarchar', length: 255, default: '/addUserRole', nullable: true })
   userRoleRoute?: string | null;
 
+  @Column({ type: 'nvarchar', length: 255, default: '/addResourceParentDetails', nullable: true })
+  quickResourceRoute?: string | null;
+
+  @Column({ type: 'nvarchar', length: 255, default: '/addParentResourceUser', nullable: true })
+  resourceUserRoute?: string | null;
+
+  @Column({ type: 'nvarchar', length: 255, default: null, nullable: true })
+  resourceDirectoryRoute?: string | null;
+
   @Column({ type: 'nvarchar', length: 50, default: 'ACTIVE' })
   status!: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
 

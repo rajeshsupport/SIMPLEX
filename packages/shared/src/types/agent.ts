@@ -58,7 +58,21 @@ export interface AgentTaskAssignment {
     | 'CREATE_USER'
     | 'RESET_PASSWORD'
     | 'CREATE_SERVICE'
-    | 'BULK_IMPORT';
+    | 'BULK_IMPORT'
+    | 'SYNC_CLIENT_RESOURCES'
+    | 'SYNC_CLIENT_RESOURCES_HEADLESS'
+    | 'CREATE_CLIENT_RESOURCE'
+    | 'EDIT_CLIENT_RESOURCE'
+    | 'SET_CLIENT_RESOURCE_STATUS'
+    | 'MAP_RESOURCE_USER'
+    | 'IMPORT_CLIENT_RESOURCES'
+    | 'SYNC_RESOURCES'
+    | 'CREATE_RESOURCE'
+    | 'IMPORT_RESOURCES'
+    | 'ACTIVATE_RESOURCE'
+    | 'DEACTIVATE_RESOURCE'
+    | 'PROCESS_RESOURCE_WORKFLOW'
+    | 'PROCESS_RESOURCE_ROW_WORKFLOW';
   clientId: string;
   clientBaseUrl: string;
   clientAppPath: string;

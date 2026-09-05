@@ -1,6 +1,6 @@
 import { BrowserContext, Page } from 'playwright';
-import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
-import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, normalizeClientBaseUrl } from '@hmc/shared';
+import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
+import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, normalizeClientBaseUrl } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
 function buildAbsoluteUrl(baseUrl: string, route?: string, fallbackRoute: string = '/'): string {
@@ -43,7 +43,12 @@ export class AutomationWorker {
     const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
     
     // Determine strict profile namespace
-    const isHeadlessSync = task.taskType === 'SYNC_CLIENT_USERS_HEADLESS' || task.taskType === 'SYNC_CLIENT_USERS';
+    const isHeadlessSync =
+      task.taskType === 'SYNC_CLIENT_USERS_HEADLESS' ||
+      task.taskType === 'SYNC_CLIENT_USERS' ||
+      task.taskType === 'SYNC_CLIENT_RESOURCES_HEADLESS' ||
+      task.taskType === 'SYNC_CLIENT_RESOURCES' ||
+      task.taskType === 'SYNC_RESOURCES';
     const isInspectTask = task.taskType === 'INSPECT_CREATE_FORM_METADATA' || task.taskType === 'INSPECT_FORM_OPTIONS';
     const isMutationTask = [
       'CREATE_CLIENT_USER',
@@ -55,6 +60,18 @@ export class AutomationWorker {
       'RESET_CLIENT_USER_PASSWORD',
       'MAP_USER_ROLES',
       'PROCESS_USER_FULL_WORKFLOW',
+      'CREATE_CLIENT_RESOURCE',
+      'CREATE_RESOURCE',
+      'EDIT_CLIENT_RESOURCE',
+      'SET_CLIENT_RESOURCE_STATUS',
+      'ACTIVATE_RESOURCE',
+      'DEACTIVATE_RESOURCE',
+      'MAP_RESOURCE_USER',
+      'PROCESS_RESOURCE_WORKFLOW',
+      'PROCESS_RESOURCE_ROW_WORKFLOW',
+      'IMPORT_CLIENT_RESOURCES',
+      'IMPORT_RESOURCES',
+      'IMPORT_RESOURCES_BATCH',
     ].includes(task.taskType);
 
     const namespace: 'interactive' | 'sync' | 'mutation' = isHeadlessSync || isInspectTask
@@ -200,6 +217,105 @@ export class AutomationWorker {
           try {
             await syncContext.close();
             onProgress?.('[BACKGROUND SYNC] Headless sync context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // =========================================================================
+    // 1.2 DEDICATED HEADLESS BACKGROUND RESOURCE SYNC HANDLER (namespace: 'sync')
+    // =========================================================================
+    if (
+      task.taskType === 'SYNC_CLIENT_RESOURCES_HEADLESS' ||
+      task.taskType === 'SYNC_CLIENT_RESOURCES' ||
+      task.taskType === 'SYNC_RESOURCES'
+    ) {
+      if (!task.payload?.resourceDirectoryRoute) {
+        onProgress?.(`✗ Rejected task [${task.taskType}]: RESOURCE_DIRECTORY_ROUTE_NOT_CONFIGURED`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: 'RESOURCE_DIRECTORY_ROUTE_NOT_CONFIGURED: Resource Directory route is not configured for this client.',
+          totalDurationMs: Date.now() - startTime,
+          resultData: {
+            success: false,
+            errorCode: 'RESOURCE_DIRECTORY_ROUTE_NOT_CONFIGURED',
+            errorMessage: 'Resource Directory route is not configured for this client.',
+          },
+        });
+        return;
+      }
+
+      let syncContext: BrowserContext | null = null;
+      try {
+        onProgress?.(`[BACKGROUND SYNC] Launching isolated headless resource sync context for client [${task.clientId}]...`);
+        syncContext = await BrowserProfileManager.launchPersistentContext({
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          isHeaded: false,
+          namespace: 'sync',
+          slowMo: 0,
+        });
+
+        const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
+
+        const resourcesUrl = resolveClientResourceUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.payload?.applicationPath,
+          quickResourceRoute: task.payload?.quickResourceRoute || '/resources',
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.payload?.applicationPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+
+        onProgress?.(`[BACKGROUND SYNC] Executing resource scrape on ${resourcesUrl}...`);
+
+        const syncRes = await ResourceManagementExecutor.syncResourcesHeadless(syncPage, {
+          resourcesUrl,
+          loginUrl,
+          credentials: task.credentials?.password
+            ? { username: task.credentials.username, password: task.credentials.password }
+            : undefined,
+          onProgress: (update) => {
+            onProgress?.(`[RESOURCE SYNC PROGRESS] ${update.message}`);
+          },
+        });
+
+        const totalDurationMs = Date.now() - startTime;
+        if (syncRes.success) {
+          onProgress?.(`✓ [RESOURCE SYNC COMPLETED] Discovered ${syncRes.totalScraped} resources.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: syncRes,
+          });
+        } else {
+          const safeError = sanitizeErrorMessage(syncRes.errorMessage || syncRes.errorCode || 'Resource sync failed');
+          onProgress?.(`✗ [RESOURCE SYNC FAILED] ${safeError}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: safeError,
+            totalDurationMs,
+            resultData: { ...syncRes, errorMessage: safeError },
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        const safeMsg = sanitizeErrorMessage(err.message || 'Resource sync runtime failure');
+        onProgress?.(`[FATAL RESOURCE SYNC ERROR] ${safeMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs,
+          resultData: { success: false, errorCode: 'CLIENT_RESOURCE_SYNC_FAILED', errorMessage: safeMsg },
+        });
+      } finally {
+        if (syncContext) {
+          try {
+            await syncContext.close();
           } catch {}
         }
       }
@@ -676,6 +792,220 @@ export class AutomationWorker {
           } else {
             const safeError = sanitizeErrorMessage(mapRes.failureReason || mapRes.errorMessage || 'Role mapping failed');
             onProgress?.(`✗ Role mapping failed for '${username}': ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        // 7. Create Client Resource
+        if (task.taskType === 'CREATE_CLIENT_RESOURCE' || task.taskType === 'CREATE_RESOURCE') {
+          const resourceDto = task.payload?.resource || task.payload;
+          const addResourceUrl = resolveClientResourceUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            quickResourceRoute: task.payload?.quickResourceRoute || '/addResourceParentDetails',
+          });
+
+          onProgress?.(`Creating resource [${resourceDto.resourceCode}] - ${resourceDto.resourceName}...`);
+
+          const createRes = await ResourceManagementExecutor.createResource(mutationPage, {
+            addResourceUrl,
+            resource: resourceDto,
+            loginUrl,
+            credentials: task.credentials,
+            onProgress: (msg: string) => onProgress?.(msg),
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(createRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (createRes.success) {
+            onProgress?.(`✓ Created and verified resource '${createRes.resourceCode}' on client.`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(createRes.errorMessage || createRes.message || 'Resource creation failed');
+            onProgress?.(`✗ Failed to create resource: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        // 8. Set Client Resource Status
+        if (
+          task.taskType === 'SET_CLIENT_RESOURCE_STATUS' ||
+          task.taskType === 'ACTIVATE_RESOURCE' ||
+          task.taskType === 'DEACTIVATE_RESOURCE'
+        ) {
+          const resourceCode = task.payload?.resourceCode;
+          const targetStatus = task.taskType === 'ACTIVATE_RESOURCE'
+            ? 'ACTIVE'
+            : task.taskType === 'DEACTIVATE_RESOURCE'
+            ? 'INACTIVE'
+            : task.payload?.status || 'ACTIVE';
+
+          const resourcesUrl = resolveClientResourceUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            quickResourceRoute: task.payload?.quickResourceRoute || '/resources',
+          });
+
+          onProgress?.(`Setting status of resource [${resourceCode}] to ${targetStatus}...`);
+
+          const statusRes = await ResourceManagementExecutor.setResourceStatus(mutationPage, {
+            resourcesUrl,
+            resourceCode,
+            status: targetStatus,
+            loginUrl,
+            credentials: task.credentials,
+            onProgress: (msg: string) => onProgress?.(msg),
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(statusRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (statusRes.success) {
+            onProgress?.(`✓ Resource '${resourceCode}' status updated to ${targetStatus}.`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(statusRes.errorMessage || statusRes.message || 'Resource status update failed');
+            onProgress?.(`✗ Failed to update resource status: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        // 9. Map Resource User
+        if (task.taskType === 'MAP_RESOURCE_USER') {
+          const { resourceCode, username } = task.payload;
+          const mappingUrl = resolveClientResourceUserMappingUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            resourceUserRoute: task.payload?.resourceUserRoute || '/addParentResourceUser',
+          });
+
+          onProgress?.(`Mapping resource [${resourceCode}] to user [${username}]...`);
+
+          const mapRes = await ResourceManagementExecutor.mapResourceUser(mutationPage, {
+            mappingUrl,
+            resourceCode,
+            username,
+            loginUrl,
+            credentials: task.credentials,
+            onProgress: (msg: string) => onProgress?.(msg),
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(mapRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (mapRes.success) {
+            onProgress?.(`✓ Resource '${resourceCode}' mapped to '${username}'.`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(mapRes.errorMessage || mapRes.message || 'Resource user mapping failed');
+            onProgress?.(`✗ Failed to map resource user: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        // 10. Process Resource Workflow (Human multi-stage or Non-Human)
+        if (task.taskType === 'PROCESS_RESOURCE_WORKFLOW' || task.taskType === 'PROCESS_RESOURCE_ROW_WORKFLOW') {
+          const payloadData = task.payload?.row || task.payload?.payload || task.payload;
+          const quickResourceRoute = resolveClientResourceUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            quickResourceRoute: task.payload?.quickResourceRoute || '/addResourceParentDetails',
+          });
+          const addUsersRoute = resolveClientRoute({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            route: task.payload?.addUsersRoute || '/addUsers',
+            fallbackRoute: '/addUsers',
+          });
+          const addUserRoleRoute = resolveClientRoleUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            userRoleRoute: task.payload?.addUserRoleRoute || '/addUserRole',
+          });
+          const resourceUserRoute = resolveClientResourceUserMappingUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            resourceUserRoute: task.payload?.resourceUserRoute || '/addParentResourceUser',
+          });
+
+          onProgress?.(`Starting resource full workflow for '${payloadData.resourceName}'…`);
+
+          const workflowRes = await ResourceManagementExecutor.processResourceFullWorkflow(mutationPage, {
+            row: payloadData,
+            routes: {
+              quickResourceRoute,
+              addUsersRoute,
+              addUserRoleRoute,
+              resourceUserRoute,
+              loginUrl,
+            },
+            credentials: task.credentials,
+            startStage: task.payload?.startStage,
+            existingState: task.payload?.existingState,
+            onEphemeralPassword: async (evt) => {
+              if (task.payload?.ephemeralDeliveryCallbackUrl) {
+                // optional webhook callback
+              }
+            },
+            onProgress: (stage: string, message: string) => {
+              onProgress?.(`[${stage}] ${message}`);
+              this.agentClient.sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { stage, message },
+              }).catch(() => {});
+            },
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(workflowRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (workflowRes.success) {
+            onProgress?.(`✓ Resource workflow completed successfully for '${payloadData.resourceName}'.`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(workflowRes.errorMessage || 'Resource workflow failed');
+            onProgress?.(`✗ Resource workflow failed for '${payloadData.resourceName}': ${safeError}`);
             await this.agentClient.sendTelemetry(task.runId, {
               status: 'FAILED',
               errorMessage: safeError,

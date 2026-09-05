@@ -28,6 +28,11 @@ import {
   StoredFile,
   RetentionPolicy,
   ClientUserSnapshot,
+  ClientResourceSnapshot,
+  ClientResourceDepartment,
+  ClientResourceService,
+  ResourceImportJob,
+  ResourceImportRow,
 } from './entities/index.js';
 
 export const allEntities = [
@@ -50,6 +55,11 @@ export const allEntities = [
   StoredFile,
   RetentionPolicy,
   ClientUserSnapshot,
+  ClientResourceSnapshot,
+  ClientResourceDepartment,
+  ClientResourceService,
+  ResourceImportJob,
+  ResourceImportRow,
 ];
 
 export const getDataSourceOptions = (): DataSourceOptions => {

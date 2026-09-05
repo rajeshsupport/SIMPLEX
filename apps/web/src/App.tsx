@@ -9,6 +9,7 @@ import { DashboardPage } from './pages/DashboardPage.js';
 import { ClientsPage } from './pages/ClientsPage.js';
 import { ImportsPage } from './pages/ImportsPage.js';
 import { UsersPage } from './pages/UsersPage.js';
+import { ResourcesPage } from './pages/ResourcesPage.js';
 import { RolesPage } from './pages/RolesPage.js';
 import { AuditPage } from './pages/AuditPage.js';
 import { AgentsPage } from './pages/AgentsPage.js';
@@ -75,6 +76,14 @@ export const App: React.FC = () => {
             element={
               <ProtectedLayout>
                 <UsersPage />
+              </ProtectedLayout>
+            }
+          />
+          <Route
+            path="/resources"
+            element={
+              <ProtectedLayout>
+                <ResourcesPage />
               </ProtectedLayout>
             }
           />

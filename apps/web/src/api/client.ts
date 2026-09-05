@@ -180,3 +180,100 @@ export class ApiClient {
     return { blob, filename };
   }
 }
+
+export const clientResourcesApi = {
+  getResources: (params: {
+    clientId: string;
+    search?: string;
+    specialty?: string;
+    resourceType?: string;
+    status?: string;
+    isResourceHuman?: boolean | string;
+    page?: number;
+    limit?: number;
+  }) => {
+    const q = new URLSearchParams();
+    q.set('clientId', params.clientId);
+    if (params.search) q.set('search', params.search);
+    if (params.specialty) q.set('specialty', params.specialty);
+    if (params.resourceType) q.set('resourceType', params.resourceType);
+    if (params.status) q.set('status', params.status);
+    if (params.isResourceHuman !== undefined) q.set('isResourceHuman', String(params.isResourceHuman));
+    if (params.page) q.set('page', String(params.page));
+    if (params.limit) q.set('limit', String(params.limit));
+    return ApiClient.request<{ data: any[]; total: number; page: number; limit: number }>(`/client-resources?${q.toString()}`);
+  },
+
+  syncResources: (clientId: string) =>
+    ApiClient.request<{ success: boolean; message: string; count?: number }>('/client-resources/sync', {
+      method: 'POST',
+      body: JSON.stringify({ clientId }),
+    }),
+
+  createResource: (payload: any) =>
+    ApiClient.request<{ success: boolean; message: string; resource: any }>('/client-resources/create', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  setResourceStatus: (payload: { clientId: string; remoteResourceId: string; status: string; reason?: string }) =>
+    ApiClient.request<{ success: boolean; message: string }>('/client-resources/status', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  mapResourceUser: (payload: { clientId: string; remoteResourceId: string; username: string }) =>
+    ApiClient.request<{ success: boolean; message: string }>('/client-resources/map-user', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  importPreview: (clientId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('clientId', clientId);
+    formData.append('file', file);
+    return ApiClient.request<any>('/client-resources/import-preview', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  importExecute: (jobId: string) =>
+    ApiClient.request<any>('/client-resources/import-execute', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    }),
+
+  getImportJob: (jobId: string) =>
+    ApiClient.request<any>(`/client-resources/import-jobs/${jobId}`),
+
+  retryImportJob: (jobId: string) =>
+    ApiClient.request<any>(`/client-resources/import-jobs/${jobId}/retry`, {
+      method: 'POST',
+    }),
+
+  exportJobResults: (jobId: string) =>
+    ApiClient.downloadBlob(`/client-resources/import-jobs/${jobId}/export-results`),
+
+  downloadTemplate: (clientId?: string, clientCode?: string) => {
+    const q = new URLSearchParams();
+    if (clientId) q.set('clientId', clientId);
+    if (clientCode) q.set('clientCode', clientCode);
+    return ApiClient.downloadBlob(`/client-resources/template?${q.toString()}`);
+  },
+
+  exportResources: (clientId: string, mode: 'ALL' | 'ACTIVE_ONLY' = 'ALL') =>
+    ApiClient.downloadBlob(`/client-resources/export?clientId=${encodeURIComponent(clientId)}&mode=${encodeURIComponent(mode)}`),
+
+  getResourceTypes: (clientId: string) =>
+    ApiClient.request<string[]>(`/client-resources/resource-types?clientId=${encodeURIComponent(clientId)}`),
+
+  getSpecialties: (clientId: string) =>
+    ApiClient.request<string[]>(`/client-resources/specialties?clientId=${encodeURIComponent(clientId)}`),
+
+  getDepartments: (clientId: string) =>
+    ApiClient.request<any[]>(`/client-resources/departments?clientId=${encodeURIComponent(clientId)}`),
+
+  getServices: (clientId: string) =>
+    ApiClient.request<any[]>(`/client-resources/services?clientId=${encodeURIComponent(clientId)}`),
+};

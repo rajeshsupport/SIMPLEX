@@ -15,6 +15,7 @@ import { AuditModule } from './audit/audit.module.js';
 import { RetentionModule } from './retention/retention.module.js';
 import { HealthModule } from './health/health.module.js';
 import { ClientUsersModule } from './client-users/client-users.module.js';
+import { ClientResourcesModule } from './client-resources/client-resources.module.js';
 
 import { CorrelationIdInterceptor } from './common/interceptors/correlation-id.interceptor.js';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
@@ -41,6 +42,7 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
     RetentionModule,
     HealthModule,
     ClientUsersModule,
+    ClientResourcesModule,
   ],
   providers: [
     {

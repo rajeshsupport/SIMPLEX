@@ -21,6 +21,7 @@
     "lint": "echo 'Linting shared...'"
   },
   "dependencies": {
+    "xlsx": "^0.18.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {

@@ -20,11 +20,17 @@ import {
   StoredFile,
   RetentionPolicy,
   ApplicationLoginHistory,
+  ClientResourceSnapshot,
+  ClientResourceDepartment,
+  ClientResourceService,
+  ResourceImportJob,
+  ResourceImportRow,
 } from '../entities/index.js';
 import { EnvelopeEncryption } from '../crypto/envelope-encryption.js';
 import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema.js';
 import { AddUserDisableFields1700000000001 } from '../migrations/1700000000001-AddUserDisableFields.js';
 import { AddClientUserRoleRoute1700000000002 } from '../migrations/1700000000002-AddClientUserRoleRoute.js';
+import { AddClientResources1700000000003 } from '../migrations/1700000000003-AddClientResources.js';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -60,6 +66,11 @@ const testDataSource = new DataSource({
     StoredFile,
     RetentionPolicy,
     ApplicationLoginHistory,
+    ClientResourceSnapshot,
+    ClientResourceDepartment,
+    ClientResourceService,
+    ResourceImportJob,
+    ResourceImportRow,
   ],
   synchronize: false,
   options: {
@@ -81,6 +92,7 @@ async function runLiveMssqlIntegrationTests() {
     new InitialSchema1700000000000(),
     new AddUserDisableFields1700000000001(),
     new AddClientUserRoleRoute1700000000002(),
+    new AddClientResources1700000000003(),
   ];
   try {
     for (const m of migrations) {

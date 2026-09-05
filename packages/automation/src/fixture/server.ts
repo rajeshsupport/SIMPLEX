@@ -101,6 +101,43 @@ export function createFixtureApp(): express.Express {
   userRolesMap.set('abdul.p', ['Physician']);
   userRolesMap.set('synthetic.test.user', ['Admin']);
 
+  const clientResources: Array<{
+    resourceCode: string;
+    resourceName: string;
+    department?: string;
+    specialization?: string;
+    resourceType?: string;
+    linkedUsername?: string;
+    status: 'ACTIVE' | 'INACTIVE';
+  }> = [
+    {
+      resourceCode: 'RES-001',
+      resourceName: 'Dr. Sarah Mansoor',
+      department: 'Cardiology',
+      specialization: 'Interventional Cardiology',
+      resourceType: 'DOCTOR',
+      linkedUsername: 'dr_sarah',
+      status: 'ACTIVE',
+    },
+    {
+      resourceCode: 'RES-002',
+      resourceName: 'Nurse Ali Hassan',
+      department: 'Emergency',
+      specialization: 'Critical Care',
+      resourceType: 'STAFF',
+      linkedUsername: 'nurse_ali',
+      status: 'ACTIVE',
+    },
+    {
+      resourceCode: 'RES-003',
+      resourceName: 'Consultation Room 101',
+      department: 'OPD',
+      specialization: 'General OPD',
+      resourceType: 'ROOM',
+      status: 'ACTIVE',
+    },
+  ];
+
   // 1. Login Page
   const handleLoginGet = (req: Request, res: Response) => {
     const error = req.query.error as string;
@@ -1093,6 +1130,338 @@ export function createFixtureApp(): express.Express {
       </body>
       </html>
     `);
+  });
+
+  // =========================================================================
+  // RESOURCE MANAGEMENT MOCK ROUTES
+  // =========================================================================
+  const handleResourcesGet = (req: Request, res: Response) => {
+    const rowsHtml = clientResources
+      .map(
+        (r) => `
+        <tr>
+          <td>${r.resourceCode}</td>
+          <td>${r.resourceName}</td>
+          <td>${r.department || ''}</td>
+          <td>${r.specialization || ''}</td>
+          <td>${r.resourceType || 'DOCTOR'}</td>
+          <td>${r.linkedUsername || '-'}</td>
+          <td><span class="badge ${r.status === 'ACTIVE' ? 'badge-active' : 'badge-inactive'}">${r.status}</span></td>
+          <td><button type="button" class="btn-toggle" onclick="toggleStatus('${r.resourceCode}')">Toggle</button></td>
+        </tr>
+      `
+      )
+      .join('');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>HMC Portal - Resource Master</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.75rem; border: 1px solid #334155; }
+          table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+          th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #334155; }
+          th { background: #0f172a; color: #38bdf8; }
+          .badge-active { background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; }
+          .badge-inactive { background: rgba(239, 68, 68, 0.2); color: #f87171; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; }
+          .btn-toggle { background: #334155; color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 0.25rem; cursor: pointer; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>Resource Master Directory</h2>
+          <table id="gridResources" class="table-resources">
+            <thead>
+              <tr>
+                <th>Resource Code</th>
+                <th>Resource Name</th>
+                <th>Department</th>
+                <th>Specialization</th>
+                <th>Type</th>
+                <th>Linked User</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </div>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleAddResourceGet = (req: Request, res: Response) => {
+    const error = req.query.error as string;
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>HMC Portal - Add Resource</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; display: flex; justify-content: center; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.75rem; border: 1px solid #334155; width: 100%; max-width: 500px; }
+          .field { margin-bottom: 1rem; }
+          label { display: block; margin-bottom: 0.5rem; font-size: 0.875rem; color: #94a3b8; }
+          input, select { width: 100%; box-sizing: border-box; padding: 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #fff; font-size: 1rem; }
+          button { width: 100%; padding: 0.75rem; background: #0284c7; color: #fff; border: none; border-radius: 0.375rem; font-weight: 600; cursor: pointer; font-size: 1rem; }
+          .error { color: #f87171; background: rgba(239, 68, 68, 0.1); padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem; font-size: 0.875rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>Add Client Resource</h2>
+          ${error ? `<div class="error">${error}</div>` : ''}
+          <form method="POST" action="${req.path}">
+            <div class="field">
+              <label for="txtResourceCode">Resource Code</label>
+              <input type="text" id="txtResourceCode" name="resourceCode" required />
+            </div>
+            <div class="field">
+              <label for="txtResourceName">Resource Name</label>
+              <input type="text" id="txtResourceName" name="resourceName" required />
+            </div>
+            <div class="field">
+              <label for="txtDepartment">Department</label>
+              <input type="text" id="txtDepartment" name="department" />
+            </div>
+            <div class="field">
+              <label for="txtSpecialization">Specialization</label>
+              <input type="text" id="txtSpecialization" name="specialization" />
+            </div>
+            <div class="field">
+              <label for="ddlResourceType">Resource Type</label>
+              <select id="ddlResourceType" name="resourceType">
+                <option value="DOCTOR">DOCTOR</option>
+                <option value="STAFF">STAFF</option>
+                <option value="ROOM">ROOM</option>
+                <option value="EQUIPMENT">EQUIPMENT</option>
+                <option value="OTHER">OTHER</option>
+              </select>
+            </div>
+            <button type="submit" id="btnSave">Save Resource</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleAddResourceParentDetailsGet = (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>ADD-RESOURCE DETAILS</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; display: flex; justify-content: center; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.75rem; border: 1px solid #334155; width: 100%; max-width: 600px; }
+          .field { margin-bottom: 1rem; }
+          label { display: block; margin-bottom: 0.5rem; font-size: 0.875rem; color: #94a3b8; }
+          input, select { width: 100%; box-sizing: border-box; padding: 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #fff; font-size: 1rem; }
+          button { width: 100%; padding: 0.75rem; background: #0284c7; color: #fff; border: none; border-radius: 0.375rem; font-weight: 600; cursor: pointer; font-size: 1rem; }
+          .alert-success { background: #064e3b; color: #6ee7b7; padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2 class="screen-title">ADD-RESOURCE DETAILS</h2>
+          ${req.query.msg ? `<div class="alert-success" id="successMsg">${req.query.msg}</div>` : ''}
+          ${req.query.error ? `<div class="alert-danger" id="errorMsg" style="background: #7f1d1d; color: #fca5a5; padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem;">${req.query.error}</div>` : ''}
+          <form method="POST" action="${req.path}" id="addResourceForm">
+            <div class="field">
+              <label for="txtResourceName">Resource Name *</label>
+              <input type="text" id="txtResourceName" name="resourceName" required />
+            </div>
+            <div class="field">
+              <label for="ddlIsHuman">Is Resource Human *</label>
+              <select id="ddlIsHuman" name="isResourceHuman">
+                <option value="Yes">Yes</option>
+                <option value="No">No</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="ddlResourceType">Resource Type *</label>
+              <select id="ddlResourceType" name="resourceType">
+                <option value="Consultant Physician">Consultant Physician</option>
+                <option value="Specialist">Specialist</option>
+                <option value="Staff Nurse">Staff Nurse</option>
+                <option value="Room / Facility">Room / Facility</option>
+                <option value="Equipment">Equipment</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="ddlSpecialty">Specialty *</label>
+              <select id="ddlSpecialty" name="specialty">
+                <option value="Cardiology">Cardiology</option>
+                <option value="Neurology">Neurology</option>
+                <option value="Pediatrics">Pediatrics</option>
+                <option value="Radiology">Radiology</option>
+                <option value="General">General</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="txtDepartment">Departments *</label>
+              <input type="text" id="txtDepartment" name="departments" value="ALL" />
+            </div>
+            <div class="field">
+              <label for="txtColorCode">Color Identification Code</label>
+              <input type="text" id="txtColorCode" name="colorIdentificationCode" value="FFFFFF" />
+            </div>
+            <div class="field">
+              <label for="txtServices">Services *</label>
+              <input type="text" id="txtServices" name="services" value="ALL" />
+            </div>
+            <div class="field">
+              <label for="txtOperatingFrom">Operating From *</label>
+              <input type="text" id="txtOperatingFrom" name="operatingFrom" value="00:00" />
+            </div>
+            <div class="field">
+              <label for="txtOperatingTo">Operating To *</label>
+              <input type="text" id="txtOperatingTo" name="operatingTo" value="23:55" />
+            </div>
+            <button type="submit" id="btnSave">Save</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleAddResourceParentDetailsPost = (req: Request, res: Response) => {
+    const { resourceName, isResourceHuman, resourceType, specialty, departments, services } = req.body;
+    const exists = clientResources.find((r) => r.resourceName.toLowerCase() === (resourceName || '').toLowerCase());
+    if (exists) {
+      return res.redirect(`${req.path}?error=` + encodeURIComponent(`Duplicate resource '${resourceName}' already exists`));
+    }
+    const newId = `RES-${100 + clientResources.length + 1}`;
+    clientResources.push({
+      resourceCode: newId,
+      resourceName,
+      department: departments || 'ALL',
+      specialization: specialty || 'General',
+      resourceType: resourceType || 'Consultant Physician',
+      status: 'ACTIVE',
+    });
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>ADD-RESOURCE DETAILS</title></head>
+      <body>
+        <div class="alert-success" id="successMsg">Congrats!! Resource added successfully with ID: ${newId}</div>
+        <div id="remoteResourceId">${newId}</div>
+        <script>setTimeout(() => { window.location.href = '${req.path}?msg=' + encodeURIComponent('Resource added successfully with ID: ${newId}'); }, 100);</script>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleAddParentResourceUserGet = (req: Request, res: Response) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>ADD-RESOURCE USER DETAILS</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; display: flex; flex-direction: column; align-items: center; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.75rem; border: 1px solid #334155; width: 100%; max-width: 650px; margin-bottom: 2rem; }
+          .field { margin-bottom: 1rem; }
+          label { display: block; margin-bottom: 0.5rem; font-size: 0.875rem; color: #94a3b8; }
+          input, select { width: 100%; box-sizing: border-box; padding: 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #fff; font-size: 1rem; }
+          button { width: 100%; padding: 0.75rem; background: #0284c7; color: #fff; border: none; border-radius: 0.375rem; font-weight: 600; cursor: pointer; font-size: 1rem; }
+          table { width: 100%; max-width: 650px; border-collapse: collapse; margin-top: 1rem; background: #1e293b; }
+          th, td { padding: 0.75rem; border: 1px solid #334155; text-align: left; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2 class="screen-title">ADD-RESOURCE USER DETAILS</h2>
+          <form method="POST" action="${req.path}" id="addParentResourceUserForm">
+            <div class="field">
+              <label for="ddlUser">User Name *</label>
+              <select id="ddlUser" name="username">
+                ${clientUsers.map((u) => `<option value="${u.username}">${u.username} (${u.fullName})</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label for="ddlResource">Resource *</label>
+              <select id="ddlResource" name="resourceCode">
+                ${clientResources.map((r) => `<option value="${r.resourceCode}">${r.resourceCode} - ${r.resourceName}</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label>
+                <input type="checkbox" id="chkShownInReg" name="isShownInRegistration" value="Yes" checked style="width: auto;" />
+                Is Shown in Registration *
+              </label>
+            </div>
+            <button type="submit" id="btnSave">ADD</button>
+          </form>
+        </div>
+        <table id="tblResourceUserMappings">
+          <thead>
+            <tr>
+              <th>Resource ID</th>
+              <th>User Name</th>
+              <th>Shown in Registration</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${clientResources.filter((r) => r.linkedUsername).map((r) => `
+              <tr data-resource-id="${r.resourceCode}" data-username="${r.linkedUsername}">
+                <td>${r.resourceCode}</td>
+                <td>${r.linkedUsername}</td>
+                <td>Yes</td>
+                <td>ACTIVE</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleAddParentResourceUserPost = (req: Request, res: Response) => {
+    const { resourceCode, username } = req.body;
+    const target = clientResources.find((r) => r.resourceCode === resourceCode || r.resourceName === resourceCode);
+    if (target) {
+      target.linkedUsername = username;
+    }
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>ADD-RESOURCE USER DETAILS</title></head>
+      <body>
+        <div class="alert-success" id="successMsg">Resource user mapped successfully.</div>
+        <script>setTimeout(() => { window.location.href = '${req.path}'; }, 100);</script>
+      </body>
+      </html>
+    `);
+  };
+
+  // Register across various client paths
+  ['/resources', '/hmc/resources', '/MasterV9.4/resources', '/MasterV9.3/resources'].forEach((p) => {
+    app.get(p, handleResourcesGet);
+  });
+
+  ['/addResourceParentDetails', '/hmc/addResourceParentDetails', '/MasterV9.4/addResourceParentDetails', '/MasterV9.3/addResourceParentDetails', '/addResource', '/hmc/addResource'].forEach((p) => {
+    app.get(p, handleAddResourceParentDetailsGet);
+    app.post(p, handleAddResourceParentDetailsPost);
+  });
+
+  ['/addParentResourceUser', '/hmc/addParentResourceUser', '/MasterV9.4/addParentResourceUser', '/MasterV9.3/addParentResourceUser', '/resourceUserMapping', '/hmc/resourceUserMapping'].forEach((p) => {
+    app.get(p, handleAddParentResourceUserGet);
+    app.post(p, handleAddParentResourceUserPost);
   });
 
   return app;
