@@ -205,19 +205,35 @@ export class AgentsService {
     });
 
     if (pendingRun) {
-      pendingRun.desktopAgentId = agent.id;
-      const task = await this.buildTaskAssignment(pendingRun);
-      pendingRun.status = 'CLAIMED';
-      pendingRun.startedAt = new Date();
-      pendingRun.updatedAt = new Date();
-      await this.runRepo.save(pendingRun);
+      // Atomic status claim to prevent multiple agents or overlapping polls claiming the same run
+      const updateResult = await this.runRepo
+        .createQueryBuilder()
+        .update(AutomationRun)
+        .set({
+          status: 'CLAIMED',
+          desktopAgentId: agent.id,
+          startedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where('id = :id AND status IN (:...statuses)', {
+          id: pendingRun.id,
+          statuses: ['PENDING', 'QUEUED'],
+        })
+        .execute();
 
-      agent.status = 'BUSY';
-      agent.lastHeartbeatAt = new Date();
-      await this.agentRepo.save(agent);
+      if (updateResult.affected && updateResult.affected > 0) {
+        pendingRun.status = 'CLAIMED';
+        pendingRun.desktopAgentId = agent.id;
+        const task = await this.buildTaskAssignment(pendingRun);
 
-      return { acknowledged: true, pendingRun: task };
+        agent.status = 'BUSY';
+        agent.lastHeartbeatAt = new Date();
+        await this.agentRepo.save(agent);
+
+        return { acknowledged: true, pendingRun: task };
+      }
     }
+
 
     return { acknowledged: true };
   }
@@ -527,7 +543,7 @@ export class AgentsService {
     ].includes(run.runType);
 
     const isHeaded = isMutation || isInteractive || params.isHeaded === true;
-    const leaveBrowserOpen = isInteractive || params.leaveBrowserOpen === true;
+    const leaveBrowserOpen = params.leaveBrowserOpen === true;
     const executionMode = (isMutation || isInteractive) ? ('HEADED_MUTATION' as const) : ('HEADLESS_SYNC' as const);
 
     return {

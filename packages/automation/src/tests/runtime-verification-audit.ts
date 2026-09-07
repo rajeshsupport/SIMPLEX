@@ -48,7 +48,9 @@ async function runRuntimeAudit() {
   console.log('         RUNTIME PROCESS & LIVE ENDPOINT VERIFICATION           ');
   console.log('================================================================\n');
 
-  const rootDir = process.cwd();
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'apps'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '../..');
   const processes: ChildProcess[] = [];
   let webServer: http.Server | null = null;
 
@@ -120,13 +122,17 @@ async function runRuntimeAudit() {
     if (webServer) webServer.close();
     for (const proc of processes) {
       try {
-        proc.kill('SIGTERM');
+        proc.kill('SIGKILL');
       } catch {}
     }
   }
 }
 
-runRuntimeAudit().catch((err) => {
-  console.error('[FATAL] Runtime Verification Audit failed:', err);
-  process.exit(1);
-});
+runRuntimeAudit()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error('[FATAL] Runtime Verification Audit failed:', err);
+    process.exit(1);
+  });

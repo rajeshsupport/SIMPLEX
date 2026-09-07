@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Logger,
   OnModuleInit,
@@ -847,21 +848,55 @@ export class ClientUsersService implements OnModuleInit {
     }
   }
 
-  private static activeMutationLocks = new Map<string, number>();
+  private static activeMutationLocks = new Map<
+    string,
+    { ownerToken: string; acquiredAt: number; lastHeartbeatAt: number; timer?: NodeJS.Timeout }
+  >();
+  private static readonly MUTATION_LOCK_STALE_TTL_MS = 60000;
 
   private acquireMutationLock(clientId: string, username: string): () => void {
     const key = `${clientId}:${username.trim().toLowerCase()}`;
     const now = Date.now();
-    const existingLockTime = ClientUsersService.activeMutationLocks.get(key);
-    if (existingLockTime && now - existingLockTime < 45000) {
-      throw new BadRequestException({
-        code: 'OPERATION_IN_PROGRESS',
-        message: `Another mutation operation is already in progress for user '${username}'.`,
-      });
+    const existing = ClientUsersService.activeMutationLocks.get(key);
+
+    if (existing) {
+      if (now - existing.lastHeartbeatAt < ClientUsersService.MUTATION_LOCK_STALE_TTL_MS) {
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'OPERATION_IN_PROGRESS',
+          message: `Another mutation operation is already in progress for user '${username}'.`,
+        });
+      }
+      // Recover stale lock from dead process/unhandled crash
+      if (existing.timer) clearInterval(existing.timer);
     }
-    ClientUsersService.activeMutationLocks.set(key, now);
+
+    const ownerToken = crypto.randomUUID();
+    const lockEntry = {
+      ownerToken,
+      acquiredAt: now,
+      lastHeartbeatAt: now,
+      timer: undefined as NodeJS.Timeout | undefined,
+    };
+
+    // Lifecycle heartbeat renewal: holds the lock until task terminal state calls release
+    lockEntry.timer = setInterval(() => {
+      const current = ClientUsersService.activeMutationLocks.get(key);
+      if (current && current.ownerToken === ownerToken) {
+        current.lastHeartbeatAt = Date.now();
+      } else {
+        clearInterval(lockEntry.timer);
+      }
+    }, 15000);
+
+    ClientUsersService.activeMutationLocks.set(key, lockEntry);
+
     return () => {
-      ClientUsersService.activeMutationLocks.delete(key);
+      if (lockEntry.timer) clearInterval(lockEntry.timer);
+      const current = ClientUsersService.activeMutationLocks.get(key);
+      if (current && current.ownerToken === ownerToken) {
+        ClientUsersService.activeMutationLocks.delete(key);
+      }
     };
   }
 

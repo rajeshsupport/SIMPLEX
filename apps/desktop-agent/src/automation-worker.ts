@@ -1,7 +1,8 @@
 import { BrowserContext, Page } from 'playwright';
-import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
+import { BrowserProfileManager, BrowserLifecycleManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
 import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, normalizeClientBaseUrl } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
+
 
 function buildAbsoluteUrl(baseUrl: string, route?: string, fallbackRoute: string = '/'): string {
   return resolveClientRoute({ baseUrl, route, fallbackRoute });
@@ -36,8 +37,10 @@ export class AutomationWorker {
   private activeOperatorContexts: Map<string, BrowserContext> = new Map();
   // Single-flight task locks per client profile key
   private singleFlightTasks: Map<string, Promise<void>> = new Map();
+  private browserLifecycleManager = BrowserLifecycleManager.getInstance();
 
   constructor(private agentClient: AgentClient) {}
+
 
   public async executeTask(task: AgentTaskAssignment, onProgress?: (msg: string) => void): Promise<void> {
     const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -127,19 +130,22 @@ export class AutomationWorker {
     // 1. DEDICATED HEADLESS BACKGROUND SYNC HANDLER (namespace: 'sync')
     // =========================================================================
     if (task.taskType === 'SYNC_CLIENT_USERS_HEADLESS' || task.taskType === 'SYNC_CLIENT_USERS') {
-      let syncContext: BrowserContext | null = null;
+      let lease: any = null;
       try {
         onProgress?.(`[BACKGROUND SYNC] Launching isolated headless sync context for client [${task.clientId}]...`);
         
-        syncContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: false,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'sync',
+          isHeaded: false,
           slowMo: 0,
         });
 
-        const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
+        const syncPage = lease.primaryPage;
 
         const usersListUrl = resolveClientRoute({
           baseUrl: task.clientBaseUrl,
@@ -213,15 +219,16 @@ export class AutomationWorker {
           },
         });
       } finally {
-        if (syncContext) {
+        if (lease) {
           try {
-            await syncContext.close();
+            await lease.close({ reason: 'SYNC_COMPLETED' });
             onProgress?.('[BACKGROUND SYNC] Headless sync context cleanly released.');
           } catch {}
         }
       }
       return;
     }
+
 
     // =========================================================================
     // 1.2 DEDICATED HEADLESS BACKGROUND RESOURCE SYNC HANDLER (namespace: 'sync')
@@ -246,18 +253,21 @@ export class AutomationWorker {
         return;
       }
 
-      let syncContext: BrowserContext | null = null;
+      let lease: any = null;
       try {
         onProgress?.(`[BACKGROUND SYNC] Launching isolated headless resource sync context for client [${task.clientId}]...`);
-        syncContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: false,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'sync',
+          isHeaded: false,
           slowMo: 0,
         });
 
-        const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
+        const syncPage = lease.primaryPage;
 
         const resourcesUrl = resolveClientResourceUrl({
           baseUrl: task.clientBaseUrl,
@@ -313,9 +323,9 @@ export class AutomationWorker {
           resultData: { success: false, errorCode: 'CLIENT_RESOURCE_SYNC_FAILED', errorMessage: safeMsg },
         });
       } finally {
-        if (syncContext) {
+        if (lease) {
           try {
-            await syncContext.close();
+            await lease.close({ reason: 'SYNC_COMPLETED' });
           } catch {}
         }
       }
@@ -326,18 +336,21 @@ export class AutomationWorker {
     // 1.5 DEDICATED HEADLESS LIVE FORM OPTIONS INSPECTOR (namespace: 'sync')
     // =========================================================================
     if (task.taskType === 'INSPECT_CREATE_FORM_METADATA' || task.taskType === 'INSPECT_FORM_OPTIONS') {
-      let inspectContext: BrowserContext | null = null;
+      let lease: any = null;
       try {
         onProgress?.(`[INSPECT OPTIONS] Launching isolated headless browser context for client [${task.clientId}]...`);
-        inspectContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: false,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'sync',
+          isHeaded: false,
           slowMo: 0,
         });
 
-        const inspectPage = inspectContext.pages()[0] || (await inspectContext.newPage());
+        const inspectPage = lease.primaryPage;
         const appPath = task.clientAppPath || task.payload?.applicationPath;
         const addUsersUrl = resolveClientRoute({
           baseUrl: task.clientBaseUrl,
@@ -397,15 +410,16 @@ export class AutomationWorker {
           },
         });
       } finally {
-        if (inspectContext) {
+        if (lease) {
           try {
-            await inspectContext.close();
+            await lease.close({ reason: 'INSPECT_COMPLETED' });
             onProgress?.('[INSPECT OPTIONS] Headless inspect context cleanly released.');
           } catch {}
         }
       }
       return;
     }
+
 
     // =========================================================================
     // 2. REMOTE CLIENT MUTATION WORKFLOWS (VISIBLE CHROME - namespace: 'mutation')
@@ -420,7 +434,20 @@ export class AutomationWorker {
       'RESET_CLIENT_USER_PASSWORD',
       'MAP_USER_ROLES',
       'PROCESS_USER_FULL_WORKFLOW',
+      'CREATE_CLIENT_RESOURCE',
+      'CREATE_RESOURCE',
+      'EDIT_CLIENT_RESOURCE',
+      'SET_CLIENT_RESOURCE_STATUS',
+      'ACTIVATE_RESOURCE',
+      'DEACTIVATE_RESOURCE',
+      'MAP_RESOURCE_USER',
+      'PROCESS_RESOURCE_WORKFLOW',
+      'PROCESS_RESOURCE_ROW_WORKFLOW',
+      'IMPORT_CLIENT_RESOURCES',
+      'IMPORT_RESOURCES',
+      'IMPORT_RESOURCES_BATCH',
     ].includes(task.taskType);
+
 
     if (isMutationTask) {
       if (task.executionMode === 'HEADLESS_SYNC' || task.options?.isHeaded === false) {
@@ -476,26 +503,30 @@ export class AutomationWorker {
     const maxAttempts = 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      let mutationContext: BrowserContext | null = null;
+      let lease: any = null;
       let contextClosed = false;
 
       try {
         onProgress?.(`Launching isolated visible Chrome mutation context (attempt ${attempt}/${maxAttempts})...`);
         
-        mutationContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: true,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'mutation', // Isolated worker-owned mutation profile
+          isHeaded: true,
           slowMo: 50,
         });
 
-        mutationContext.on('close', () => {
+        lease.context.on('close', () => {
           contextClosed = true;
         });
 
-        const mutationPage = mutationContext.pages()[0] || (await mutationContext.newPage());
+        const mutationPage = lease.primaryPage;
         await mutationPage.bringToFront().catch(() => {});
+
 
         mutationPhase = 'PRE_ACTION';
 
@@ -1026,8 +1057,8 @@ export class AutomationWorker {
         if (isTargetClosed) {
           if (mutationPhase === 'PRE_ACTION' && attempt < maxAttempts) {
             onProgress?.(`! Browser context closed before mutation dispatch. Retrying mutation (attempt ${attempt + 1}/${maxAttempts})...`);
-            if (mutationContext) {
-              try { await mutationContext.close(); } catch {}
+            if (lease) {
+              try { await lease.close({ reason: 'RETRY_PRE_ACTION' }); } catch {}
             }
             await new Promise((r) => setTimeout(r, 600));
             continue; // Retry once
@@ -1094,16 +1125,17 @@ export class AutomationWorker {
         });
         return;
       } finally {
-        if (mutationContext) {
+        if (lease) {
           try {
             await new Promise((r) => setTimeout(r, 400));
-            await mutationContext.close();
+            await lease.close({ reason: 'MUTATION_FINISHED' });
             onProgress?.(`Visible Chrome mutation window closed safely.`);
           } catch {}
         }
       }
     }
   }
+
 
   /**
    * Performs read-only remote reconciliation using an isolated headless sync context.
@@ -1114,15 +1146,18 @@ export class AutomationWorker {
     usersListUrl: string,
     loginUrl: string
   ): Promise<{ reconciled: boolean; result?: any }> {
-    let syncContext: BrowserContext | null = null;
+    let lease: any = null;
     try {
-      syncContext = await BrowserProfileManager.launchPersistentContext({
+      lease = await this.browserLifecycleManager.acquireLease({
+        taskId: 'RECONCILIATION',
+        runId: `${task.runId}_reconcile`,
         clientId: task.clientId,
         userId: effectiveUserId,
-        isHeaded: false,
+        ownerType: 'AUTOMATION_OWNED',
         namespace: 'sync',
+        isHeaded: false,
       });
-      const page = syncContext.pages()[0] || (await syncContext.newPage());
+      const page = lease.primaryPage;
       const syncRes = await UserManagementExecutor.syncUsersHeadless(page, {
         usersUrl: usersListUrl,
         loginUrl,
@@ -1167,11 +1202,12 @@ export class AutomationWorker {
     } catch {
       // Reconciliation scrape failed
     } finally {
-      if (syncContext) {
-        try { await syncContext.close(); } catch {}
+      if (lease) {
+        try { await lease.close({ reason: 'RECONCILIATION_COMPLETED' }); } catch {}
       }
     }
     return { reconciled: false };
+
   }
 
   /**
@@ -1186,70 +1222,63 @@ export class AutomationWorker {
     const profileKey = `${task.clientId}_${effectiveUserId}`;
     let context: BrowserContext | null = null;
     let page: Page | null = null;
+    let isOperatorOwned = false;
+    let lease: any = null;
 
     try {
-      // Check if an active operator context already exists for this client
-      const existingContext = this.activeOperatorContexts.get(profileKey);
+      // Check if an active pre-existing operator context already exists for this client
+      let existingContext = this.activeOperatorContexts.get(profileKey);
       if (existingContext) {
         try {
-          const pages = existingContext.pages();
-          if (pages.length > 0) {
-            context = existingContext;
-            page = pages[0];
-            await page.bringToFront().catch(() => {});
-            onProgress?.(`Existing client window focused.`);
-          } else {
-            context = existingContext;
-            page = await existingContext.newPage();
-            await page.bringToFront().catch(() => {});
-            onProgress?.(`Client window reopened and authenticated.`);
-          }
+          existingContext.pages();
         } catch {
           try { await existingContext.close(); } catch {}
           this.activeOperatorContexts.delete(profileKey);
-          context = null;
-          page = null;
+          existingContext = undefined;
         }
       }
 
-      // If no valid context is open, launch persistent interactive context
-      if (!context) {
-        onProgress?.(`Opening selected client…`);
-        try {
-          context = await BrowserProfileManager.launchPersistentContext({
-            clientId: task.clientId,
-            userId: effectiveUserId,
-            isHeaded: task.options?.isHeaded ?? true,
-            namespace: 'interactive',
-            slowMo: 0,
-          });
-        } catch (err: any) {
-          const isLockErr = err.message && (err.message.includes('lock') || err.message.includes('EBUSY') || err.message.includes('Process singleton'));
-          const errCode = isLockErr ? 'PROFILE_ALREADY_IN_USE' : 'CLIENT_WINDOW_LAUNCH_FAILED';
-          const safeMsg = sanitizeErrorMessage(err.message || errCode);
-          onProgress?.(`✗ Window launch failed: ${errCode}`);
-          await this.agentClient.sendTelemetry(task.runId, {
-            status: 'FAILED',
-            errorMessage: safeMsg,
-            totalDurationMs: Date.now() - startTime,
-            resultData: { success: false, errorCode: errCode, errorMessage: safeMsg },
-          });
-          return;
-        }
+      // Pre-existing operator browser only = OPERATOR_OWNED, or explicit operator session with leaveBrowserOpen === true.
+      // Every browser launched by User/Resource automation, headed or headless = AUTOMATION_OWNED.
+      const isExplicitOperatorSession = (task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION' || task.taskType === 'INTERACTIVE_LOGIN') && task.options?.leaveBrowserOpen === true;
+      isOperatorOwned = Boolean(existingContext) || isExplicitOperatorSession;
 
+      try {
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: isOperatorOwned ? 'OPERATOR_OWNED' : 'AUTOMATION_OWNED',
+          namespace: 'interactive',
+          isHeaded: task.options?.isHeaded ?? true,
+          slowMo: 0,
+          existingContext,
+        });
+      } catch (err: any) {
+        const isLockErr = err.message && (err.message.includes('lock') || err.message.includes('EBUSY') || err.message.includes('Process singleton'));
+        const errCode = isLockErr ? 'PROFILE_ALREADY_IN_USE' : 'CLIENT_WINDOW_LAUNCH_FAILED';
+        const safeMsg = sanitizeErrorMessage(err.message || errCode);
+        onProgress?.(`✗ Window launch failed: ${errCode}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs: Date.now() - startTime,
+          resultData: { success: false, errorCode: errCode, errorMessage: safeMsg },
+        });
+        return;
+      }
+
+      context = lease.context;
+      page = lease.primaryPage;
+      if (!context || !page) return;
+      await page.bringToFront().catch(() => {});
+
+      if (isOperatorOwned) {
         this.activeOperatorContexts.set(profileKey, context);
         context.on('close', () => {
           this.activeOperatorContexts.delete(profileKey);
         });
-      }
-
-      if (!context) {
-        throw new Error('CLIENT_WINDOW_LAUNCH_FAILED');
-      }
-
-      if (!page) {
-        page = context.pages()[0] || (await context.newPage());
-        await page.bringToFront().catch(() => {});
       }
 
       const resolvedLoginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
@@ -1304,8 +1333,8 @@ export class AutomationWorker {
           resultData: { success: true, status: 'REAUTHENTICATED' },
         });
 
-        if (task.options?.leaveBrowserOpen === false) {
-          await context.close();
+        if (!isOperatorOwned) {
+          await lease.close({ reason: 'COMPLETED' });
           this.activeOperatorContexts.delete(profileKey);
         }
       } else if (result.status === 'REQUIRES_MANUAL_INTERVENTION') {
@@ -1333,7 +1362,12 @@ export class AutomationWorker {
           totalDurationMs,
           resultData: { success: false, errorCode: mappedCode, errorMessage: safeError },
         });
+        if (!isOperatorOwned) {
+          await lease.close({ reason: 'FAILED' });
+          this.activeOperatorContexts.delete(profileKey);
+        }
       }
+
     } catch (err: any) {
       const totalDurationMs = Date.now() - startTime;
       const safeMsg = sanitizeErrorMessage(err.message || 'Worker runtime error');
@@ -1343,10 +1377,19 @@ export class AutomationWorker {
         errorMessage: safeMsg,
         totalDurationMs,
       });
+    } finally {
+      if (!isOperatorOwned && lease && !lease.isClosed) {
+        await lease.close({ reason: 'AUTOMATION_OWNED_AUTO_CLOSE' }).catch(() => {});
+        this.activeOperatorContexts.delete(profileKey);
+      }
     }
   }
 
   public getActiveContextCount(): number {
     return this.activeOperatorContexts.size;
+  }
+
+  public async shutdown(): Promise<void> {
+    await this.browserLifecycleManager.closeAllAutomationOwned('AGENT_SHUTDOWN');
   }
 }

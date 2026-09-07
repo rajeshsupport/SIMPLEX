@@ -81,6 +81,7 @@ export const ResourcesPage: React.FC = () => {
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [isLinkUserModalOpen, setIsLinkUserModalOpen] = useState<boolean>(false);
   const [selectedResourceForLink, setSelectedResourceForLink] = useState<ResourceItem | null>(null);
+  const [togglingResourceId, setTogglingResourceId] = useState<string | null>(null);
 
   // Create Form State
   const [createForm, setCreateForm] = useState({
@@ -215,7 +216,8 @@ export const ResourcesPage: React.FC = () => {
 
   // Toggle status
   const handleToggleStatus = async (resource: ResourceItem) => {
-    if (!selectedClientId) return;
+    if (!selectedClientId || togglingResourceId !== null) return;
+    setTogglingResourceId(resource.remoteResourceId);
     const targetStatus = resource.remoteStatus === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     try {
       await clientResourcesApi.setResourceStatus({
@@ -227,6 +229,8 @@ export const ResourcesPage: React.FC = () => {
       fetchResources();
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to update resource status.');
+    } finally {
+      setTogglingResourceId(null);
     }
   };
 
@@ -668,13 +672,16 @@ export const ResourcesPage: React.FC = () => {
                         {hasPermission(PERMISSIONS.CLIENT_RESOURCES_STATUS_CHANGE) && (
                           <button
                             onClick={() => handleToggleStatus(item)}
+                            disabled={togglingResourceId !== null}
                             className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors ${
+                              togglingResourceId !== null ? 'opacity-50 cursor-not-allowed ' : ''
+                            }${
                               item.remoteStatus === 'ACTIVE'
                                 ? 'bg-slate-800 hover:bg-rose-900/30 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-800/40'
                                 : 'bg-slate-800 hover:bg-emerald-900/30 text-slate-400 hover:text-emerald-400 border border-slate-700 hover:border-emerald-800/40'
                             }`}
                           >
-                            {item.remoteStatus === 'ACTIVE' ? 'Deactivate' : 'Activate'}
+                            {togglingResourceId === item.remoteResourceId ? 'Updating...' : item.remoteStatus === 'ACTIVE' ? 'Deactivate' : 'Activate'}
                           </button>
                         )}
                       </div>

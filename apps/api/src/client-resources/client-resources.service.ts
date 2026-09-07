@@ -88,6 +88,58 @@ export class ClientResourcesService {
     }
   }
 
+  private static activeMutationLocks = new Map<
+    string,
+    { ownerToken: string; acquiredAt: number; lastHeartbeatAt: number; timer?: NodeJS.Timeout }
+  >();
+  private static readonly MUTATION_LOCK_STALE_TTL_MS = 60000;
+
+  private acquireMutationLock(clientId: string, targetKey: string, action: string): () => void {
+    const key = `${clientId}:${action}:${targetKey.trim().toLowerCase()}`;
+    const now = Date.now();
+    const existing = ClientResourcesService.activeMutationLocks.get(key);
+
+    if (existing) {
+      if (now - existing.lastHeartbeatAt < ClientResourcesService.MUTATION_LOCK_STALE_TTL_MS) {
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'OPERATION_IN_PROGRESS',
+          message: `Another operation (${action}) is already in progress for '${targetKey}'.`,
+        });
+      }
+      // Recover stale lock from dead process/unhandled crash
+      if (existing.timer) clearInterval(existing.timer);
+    }
+
+    const ownerToken = crypto.randomUUID();
+    const lockEntry = {
+      ownerToken,
+      acquiredAt: now,
+      lastHeartbeatAt: now,
+      timer: undefined as NodeJS.Timeout | undefined,
+    };
+
+    // Lifecycle heartbeat renewal: holds the lock until task terminal state calls release
+    lockEntry.timer = setInterval(() => {
+      const current = ClientResourcesService.activeMutationLocks.get(key);
+      if (current && current.ownerToken === ownerToken) {
+        current.lastHeartbeatAt = Date.now();
+      } else {
+        clearInterval(lockEntry.timer);
+      }
+    }, 15000);
+
+    ClientResourcesService.activeMutationLocks.set(key, lockEntry);
+
+    return () => {
+      if (lockEntry.timer) clearInterval(lockEntry.timer);
+      const current = ClientResourcesService.activeMutationLocks.get(key);
+      if (current && current.ownerToken === ownerToken) {
+        ClientResourcesService.activeMutationLocks.delete(key);
+      }
+    };
+  }
+
   private ensureNotProduction(client: Client, operationName: string): void {
     if (client.environment?.toUpperCase() === 'PRODUCTION') {
       throw new ForbiddenException(
@@ -95,6 +147,7 @@ export class ClientResourcesService {
       );
     }
   }
+
 
   /**
    * Retrieves paginated resources with filters and client isolation.
@@ -658,42 +711,47 @@ export class ClientResourcesService {
 
     this.ensureNotProduction(client, 'Create Resource');
 
-    const remoteResourceId = `RES-${Date.now().toString().slice(-6)}`;
-    const snapshot = this.resourceSnapshotRepo.create({
-      id: crypto.randomUUID(),
-      clientId,
-      clientCode: client.clientCode,
-      remoteResourceId,
-      resourceName: dto.resourceName,
-      isResourceHuman: dto.isResourceHuman ?? true,
-      resourceTypeName: dto.resourceType,
-      specialtyName: dto.specialty,
-      colorIdentificationCode: dto.colorIdentificationCode || 'FFFFFF',
-      operatingFrom: dto.operatingFrom || '00:00',
-      operatingTo: dto.operatingTo || '23:55',
-      selectAllDepartments: dto.departments === 'ALL',
-      selectAllServices: dto.services === 'ALL',
-      remoteStatus: 'ACTIVE',
-      isPresentRemotely: true,
-      lastVerifiedAt: new Date(),
-      lastSyncedAt: new Date(),
-    });
+    const releaseLock = this.acquireMutationLock(clientId, dto.resourceName, 'CREATE_RESOURCE');
+    try {
+      const remoteResourceId = `RES-${Date.now().toString().slice(-6)}`;
+      const snapshot = this.resourceSnapshotRepo.create({
+        id: crypto.randomUUID(),
+        clientId,
+        clientCode: client.clientCode,
+        remoteResourceId,
+        resourceName: dto.resourceName,
+        isResourceHuman: dto.isResourceHuman ?? true,
+        resourceTypeName: dto.resourceType,
+        specialtyName: dto.specialty,
+        colorIdentificationCode: dto.colorIdentificationCode || 'FFFFFF',
+        operatingFrom: dto.operatingFrom || '00:00',
+        operatingTo: dto.operatingTo || '23:55',
+        selectAllDepartments: dto.departments === 'ALL',
+        selectAllServices: dto.services === 'ALL',
+        remoteStatus: 'ACTIVE',
+        isPresentRemotely: true,
+        lastVerifiedAt: new Date(),
+        lastSyncedAt: new Date(),
+      });
 
-    await this.resourceSnapshotRepo.save(snapshot);
+      await this.resourceSnapshotRepo.save(snapshot);
 
-    await this.writeAuditLog({
-      clientId,
-      actorUsername: user.username,
-      action: 'CREATE_CLIENT_RESOURCE',
-      entityType: 'CLIENT_RESOURCE',
-      entityId: snapshot.id,
-      details: { remoteResourceId, resourceName: snapshot.resourceName },
-    });
+      await this.writeAuditLog({
+        clientId,
+        actorUsername: user.username,
+        action: 'CREATE_CLIENT_RESOURCE',
+        entityType: 'CLIENT_RESOURCE',
+        entityId: snapshot.id,
+        details: { remoteResourceId, resourceName: snapshot.resourceName },
+      });
 
-    return {
-      success: true,
-      resource: snapshot,
-    };
+      return {
+        success: true,
+        resource: snapshot,
+      };
+    } finally {
+      releaseLock();
+    }
   }
 
   /**
@@ -711,23 +769,28 @@ export class ClientResourcesService {
 
     this.ensureNotProduction(client, 'Set Resource Status');
 
-    const snapshot = await this.resourceSnapshotRepo.findOne({ where: { clientId, remoteResourceId } });
-    if (!snapshot) throw new NotFoundException(`Resource '${remoteResourceId}' not found`);
+    const releaseLock = this.acquireMutationLock(clientId, remoteResourceId, 'SET_RESOURCE_STATUS');
+    try {
+      const snapshot = await this.resourceSnapshotRepo.findOne({ where: { clientId, remoteResourceId } });
+      if (!snapshot) throw new NotFoundException(`Resource '${remoteResourceId}' not found`);
 
-    snapshot.remoteStatus = status;
-    snapshot.lastVerifiedAt = new Date();
-    await this.resourceSnapshotRepo.save(snapshot);
+      snapshot.remoteStatus = status;
+      snapshot.lastVerifiedAt = new Date();
+      await this.resourceSnapshotRepo.save(snapshot);
 
-    await this.writeAuditLog({
-      clientId,
-      actorUsername: user?.username || 'system',
-      action: 'SET_CLIENT_RESOURCE_STATUS',
-      entityType: 'CLIENT_RESOURCE',
-      entityId: snapshot.id,
-      details: { remoteResourceId, status, reason },
-    });
+      await this.writeAuditLog({
+        clientId,
+        actorUsername: user?.username || 'system',
+        action: 'SET_CLIENT_RESOURCE_STATUS',
+        entityType: 'CLIENT_RESOURCE',
+        entityId: snapshot.id,
+        details: { remoteResourceId, status, reason },
+      });
 
-    return { success: true, remoteResourceId, status };
+      return { success: true, remoteResourceId, status };
+    } finally {
+      releaseLock();
+    }
   }
 
   /**
@@ -744,24 +807,30 @@ export class ClientResourcesService {
 
     this.ensureNotProduction(client, 'Map Resource to User');
 
-    const snapshot = await this.resourceSnapshotRepo.findOne({ where: { clientId, remoteResourceId } });
-    if (!snapshot) throw new NotFoundException(`Resource '${remoteResourceId}' not found`);
+    const releaseLock = this.acquireMutationLock(clientId, `${remoteResourceId}:${username}`, 'MAP_RESOURCE_USER');
+    try {
+      const snapshot = await this.resourceSnapshotRepo.findOne({ where: { clientId, remoteResourceId } });
+      if (!snapshot) throw new NotFoundException(`Resource '${remoteResourceId}' not found`);
 
-    snapshot.linkedUsername = username;
-    snapshot.lastVerifiedAt = new Date();
-    await this.resourceSnapshotRepo.save(snapshot);
+      snapshot.linkedUsername = username;
+      snapshot.lastVerifiedAt = new Date();
+      await this.resourceSnapshotRepo.save(snapshot);
 
-    await this.writeAuditLog({
-      clientId,
-      actorUsername: user?.username || 'system',
-      action: 'MAP_RESOURCE_USER',
-      entityType: 'CLIENT_RESOURCE',
-      entityId: snapshot.id,
-      details: { remoteResourceId, username },
-    });
+      await this.writeAuditLog({
+        clientId,
+        actorUsername: user?.username || 'system',
+        action: 'MAP_RESOURCE_USER',
+        entityType: 'CLIENT_RESOURCE',
+        entityId: snapshot.id,
+        details: { remoteResourceId, username },
+      });
 
-    return { success: true, remoteResourceId, username };
+      return { success: true, remoteResourceId, username };
+    } finally {
+      releaseLock();
+    }
   }
+
 
   /**
    * Headless resource sync or gated discovery notification.
