@@ -3,6 +3,9 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
+  UnauthorizedException,
+  BadGatewayException,
   Logger,
   OnModuleInit,
 } from '@nestjs/common';
@@ -1360,6 +1363,10 @@ export class ClientUsersService implements OnModuleInit {
       });
     }
 
+    if (snapshot.status === targetStatus) {
+      return this.mapToDto(snapshot, client);
+    }
+
     const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
 
     try {
@@ -1444,23 +1451,81 @@ export class ClientUsersService implements OnModuleInit {
         });
       }
 
+      if (snapshot.status === targetStatus) {
+        return this.mapToDto(snapshot, client);
+      }
+
       if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
         let errorCode = 'REMOTE_STATUS_VERIFICATION_FAILED';
         let errorMsg = completedRun?.errorMessage || 'Remote status verification failed on client portal.';
+        let actionTaken: string | undefined = undefined;
+        let retryStartingPoint: string | undefined = undefined;
         try {
           const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
           if (parsed.errorCode) errorCode = parsed.errorCode;
           if (parsed.errorMessage) errorMsg = parsed.errorMessage;
+          if (parsed.actionTaken) actionTaken = parsed.actionTaken;
+          if (parsed.retryStartingPoint) retryStartingPoint = parsed.retryStartingPoint;
         } catch {}
+
+        if (actionTaken === 'NO_CHANGE_REQUIRED') {
+          return this.mapToDto(snapshot, client);
+        }
+
         if (errorCode === 'REMOTE_USER_NOT_FOUND') {
           snapshot.isPresentRemotely = false;
           await this.snapshotRepo.save(snapshot).catch(() => {});
         }
+
+        // Error Mapping per spec:
+        // HTTP 401/403 for confirmed auth failures only
+        if (errorCode === 'CLIENT_AUTO_LOGIN_FAILED' || errorCode === 'INVALID_CREDENTIALS' || errorCode === 'CLIENT_AUTHENTICATION_FAILED') {
+          throw new UnauthorizedException({
+            code: 'CLIENT_AUTHENTICATION_FAILED',
+            message: errorMsg,
+            retryStartingPoint: retryStartingPoint || 'LOGIN',
+          });
+        }
+
+        if (errorCode === 'CLIENT_AUTHORIZATION_DENIED' || errorCode === 'ACCESS_DENIED') {
+          throw new ForbiddenException({
+            code: 'CLIENT_AUTHORIZATION_DENIED',
+            message: errorMsg,
+          });
+        }
+
+        // HTTP 409 for verification unknown (mutation submitted, remote status unknown)
+        if (errorCode === 'REMOTE_STATUS_VERIFICATION_UNKNOWN' || errorCode === 'MUTATION_SUBMITTED_VERIFICATION_PENDING') {
+          throw new ConflictException({
+            code: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+            message: 'Status action may have completed, but verification is pending. No automatic second click was performed. Use Refresh Current Status before retrying.',
+            retryStartingPoint: 'STATUS_VERIFICATION',
+            diagnostics: errorMsg,
+          });
+        }
+
+        // HTTP 502 for pre-mutation indeterminate page/auth state and browser/portal errors
+        if (errorCode === 'AUTH_STATE_INDETERMINATE' || errorCode === 'PAGE_CRASH' || errorCode === 'BROWSER_UNAVAILABLE' || errorCode === 'REMOTE_NAVIGATION_FAILED' || errorCode === 'TARGET_ELEMENT_NOT_FOUND') {
+          throw new BadGatewayException({
+            code: errorCode,
+            message: errorMsg,
+          });
+        }
+
         throw new BadRequestException({
           code: errorCode,
           message: errorMsg,
+          retryStartingPoint,
         });
       }
+
+      // Check if actionTaken was NO_CHANGE_REQUIRED on completed run
+      try {
+        const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
+        if (parsed.actionTaken === 'NO_CHANGE_REQUIRED') {
+          return this.mapToDto(snapshot, client);
+        }
+      } catch {}
 
       // Remote verification succeeded -> Update Central snapshot immediately with verified remote status
       snapshot.status = targetStatus;

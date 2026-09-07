@@ -102,6 +102,17 @@ export interface MutationResult {
   pendingReconciliation?: boolean;
   errorCode?: string;
   errorMessage?: string;
+  overallStatus?: 'COMPLETED' | 'PARTIAL_FAILED' | 'FAILED';
+  statusChangeState?:
+    | 'PRECHECK'
+    | 'MUTATION_SUBMITTED'
+    | 'REMOTE_RESPONSE_RECEIVED'
+    | 'VERIFICATION_STARTED'
+    | 'VERIFIED'
+    | 'MUTATION_SUBMITTED_VERIFICATION_PENDING';
+  retryStartingPoint?: 'STATUS_VERIFICATION' | 'USER_CREATION' | 'ROLE_MAPPING' | 'VALIDATION' | 'NONE';
+  actionTaken?: 'MUTATED' | 'NO_CHANGE_REQUIRED' | 'NONE';
+  diagnostics?: any;
 }
 
 export interface RoleMappingResult {
@@ -1768,7 +1779,7 @@ export class UserManagementExecutor {
     await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
     await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-    const metadata = await page.evaluate(
+    const metadata: ClientCreateFormMetadata = await page.evaluate(
       ({ clientId, applicationVersion, addUsersUrl }) => {
         const getOptions = (selectSelector: string, dependency?: string, labelPattern?: string) => {
           let selectEl = document.querySelector(selectSelector) as HTMLSelectElement | null;
@@ -1869,6 +1880,42 @@ export class UserManagementExecutor {
       },
       { clientId, applicationVersion, addUsersUrl }
     );
+
+    if ((!metadata.nationalities || metadata.nationalities.length === 0) && (!metadata.roles || metadata.roles.length === 0)) {
+      const diagnosis = await page.evaluate(() => {
+        const curUrl = window.location.href;
+        if (curUrl.includes('/login') || document.querySelector('#btnLogin, input[type="password"]')) {
+          return 'AUTHENTICATION_NOT_CONFIRMED' as const;
+        }
+
+        const customSelects = document.querySelectorAll(
+          '.ui-autocomplete, [role="combobox"], .select2, .custom-select, .dropdown-menu, div.select, ul.dropdown'
+        );
+        const nativeSelects = document.querySelectorAll('select');
+
+        if (customSelects.length > 0 && nativeSelects.length === 0) {
+          return 'CUSTOM_CONTROL_NOT_NATIVE_SELECT' as const;
+        }
+
+        const spinners = document.querySelectorAll('.loading, .spinner, .loader, .page-loader');
+        const emptySelects = Array.from(nativeSelects).filter((s) => s.options.length <= 1);
+        if (spinners.length > 0 || (emptySelects.length > 0 && emptySelects.length === nativeSelects.length && nativeSelects.length > 0)) {
+          return 'OPTIONS_LAZY_LOADED' as const;
+        }
+
+        if (nativeSelects.length > 0) {
+          const hasOptionData = Array.from(nativeSelects).some((s) => s.options.length > 1);
+          if (hasOptionData) {
+            return 'SELECTOR_PROFILE_MISMATCH' as const;
+          }
+          return 'NO_OPTIONS_AVAILABLE' as const;
+        }
+
+        return 'NO_OPTIONS_AVAILABLE' as const;
+      }).catch(() => 'NO_OPTIONS_AVAILABLE' as const);
+
+      metadata.diagnosisCode = diagnosis;
+    }
 
     return metadata;
   }
@@ -3361,8 +3408,34 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Helper to sanitize URL diagnostics, stripping query parameters, tokens, and fragments.
+   */
+  public static sanitizeUrlForDiagnostics(rawUrl: string): string {
+    if (!rawUrl || rawUrl === 'about:blank') return rawUrl || '';
+    try {
+      const parsed = new URL(rawUrl);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return rawUrl.split('?')[0].split('#')[0];
+    }
+  }
+
+  /**
    * Helper to ensure the browser session is authenticated before performing user mutations.
-   * Returns CLIENT_AUTO_LOGIN_FAILED if authentication fails rather than obscuring with downstream errors.
+   * Authentication handling has three explicit outcomes:
+   * A. Already Authenticated:
+   *    - Current URL is not login route
+   *    - Protected application layout is present
+   *    - Login form controls are absent
+   *    Returns: { authenticated: true, action: 'CONTINUE_EXISTING_SESSION', loginAttempted: false }
+   * B. Login Required:
+   *    - Current URL is configured login route or redirect to it
+   *    - Login controls (username/password) exist
+   *    - Submit control exists
+   *    - Protected application layout is absent
+   * C. Authentication State Indeterminate:
+   *    - Neither valid protected layout nor complete login form proven
+   *    Returns: { authenticated: false, errorCode: 'AUTH_STATE_INDETERMINATE', ... }
    */
   public static async ensureAuthenticated(
     page: Page,
@@ -3371,7 +3444,14 @@ export class UserManagementExecutor {
       loginUrl?: string;
       credentials?: { username: string; password?: string };
     }
-  ): Promise<{ authenticated: boolean; errorCode?: string; errorMessage?: string }> {
+  ): Promise<{
+    authenticated: boolean;
+    action?: 'CONTINUE_EXISTING_SESSION' | 'AUTHENTICATED_VIA_LOGIN';
+    loginAttempted?: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+    diagnostics?: any;
+  }> {
     const { targetUrl, loginUrl, credentials } = options;
 
     if (page.isClosed()) {
@@ -3385,56 +3465,72 @@ export class UserManagementExecutor {
     const targetLoginUrl =
       loginUrl || (targetUrl ? targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login').replace(/\/addUserRole.*$/i, '/login').replace(/\/userRole.*$/i, '/login') : '/login');
 
-    // 1. If page is already open and not on about:blank / login, check if existing session is already valid
+    const protectedLayoutSelector =
+      '.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], #usersTable, table tbody tr, .header, .nav, a[href*="logout" i], button:has-text("Logout"), a:has-text("Logout"), a[href*="signout" i], button:has-text("Sign Out"), form#addUserForm, form#addRoleForm, #addUserForm, .btn-save, [data-testid="input-firstname"]';
+
     const currentUrl = page.url();
-    const isAlreadyOnApplication = currentUrl && currentUrl !== 'about:blank' && !currentUrl.includes('/login');
+    const isAlreadyOnApplication = Boolean(currentUrl && currentUrl !== 'about:blank' && !currentUrl.includes('/login'));
 
-    if (isAlreadyOnApplication) {
-      // If targetUrl is requested and different from currentUrl, attempt direct navigation within existing session
-      if (targetUrl && currentUrl !== targetUrl) {
-        try {
-          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch {
-          // Downstream check verifies if destination rendered or redirected
-        }
-      }
+    // 1. Navigation handling:
+    // Case A: Fresh/blank page with credentials provided -> navigate to login URL to authenticate
+    // Case B: Already on application and targetUrl requested -> navigate to targetUrl within existing session
+    // Case C: Fresh/blank page without credentials -> navigate directly to targetUrl (let remote app redirect to login if protected)
+    // Case D: Current page at targetUrl lacks both protected layout and login controls (e.g. dirty POST-back error response) -> reload targetUrl
+    const initialProtected = (await page.locator(protectedLayoutSelector).count().catch(() => 0)) > 0;
+    const initialLogin = (await page.locator('#loginForm, input[type="password"]').count().catch(() => 0)) > 0;
 
-      // Check if session remains valid after navigating to targetUrl (no redirect to /login and no login button)
-      const postNavUrl = page.url();
-      const isRedirectedToLogin = postNavUrl.includes('/login') || (await page.locator('#btnLogin, [data-testid="btn-login"], input[type="password"]').count().catch(() => 0)) > 0;
-
-      if (!isRedirectedToLogin) {
-        const hasAuthIndicator = await page
-          .locator('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, a[href*="logout" i]')
-          .first()
-          .isVisible()
-          .catch(() => false);
-
-        if (hasAuthIndicator || !postNavUrl.includes('/login')) {
-          return { authenticated: true };
-        }
-      }
+    if (currentUrl === 'about:blank') {
+      const destination = (credentials && credentials.username && credentials.password) ? targetLoginUrl : (targetUrl || targetLoginUrl);
+      try {
+        await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
+    } else if (isAlreadyOnApplication && targetUrl && currentUrl !== targetUrl) {
+      try {
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
+    } else if (targetUrl && currentUrl === targetUrl && !initialProtected && !initialLogin) {
+      try {
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
     }
 
-    // 2. If session is not authenticated or was redirected to /login, perform authentication
-    if (credentials && credentials.username && credentials.password) {
-      if (!page.url().includes('/login')) {
-        try {
-          await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch (err: any) {
-          return {
-            authenticated: false,
-            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: `Failed to navigate to login route: ${err.message}`,
-          };
-        }
-      }
+    const activeUrl = page.url();
+    const isLoginRoute = Boolean(activeUrl.includes('/login') || (targetLoginUrl && activeUrl.startsWith(targetLoginUrl)));
+    const protectedCount = await page.locator(protectedLayoutSelector).count().catch(() => 0);
+    const protectedLayoutPresent = protectedCount > 0;
+    const protectedLayoutAbsent = !protectedLayoutPresent;
 
-      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
-      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
-      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
+    const usernameLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 1000).catch(() => null);
+    const passwordLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 1000).catch(() => null);
+    const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 1000).catch(() => null);
 
-      if (!userLoc || !passLoc || !submitLoc) {
+    const loginControlsExist = Boolean(usernameLoc && passwordLoc);
+    const submitControlExists = Boolean(submitLoc);
+    const loginFormControlsAbsent = !loginControlsExist;
+
+    // =========================================================================
+    // Outcome A: Already Authenticated
+    // =========================================================================
+    if (!isLoginRoute && protectedLayoutPresent && loginFormControlsAbsent) {
+      return {
+        authenticated: true,
+        action: 'CONTINUE_EXISTING_SESSION',
+        loginAttempted: false,
+      };
+    }
+
+    // =========================================================================
+    // Outcome B: Login Required (All 4 conditions strictly true)
+    // 1. Current URL is configured login route or navigation redirected to it
+    // 2. Login username/password controls exist
+    // 3. Login submit control exists
+    // 4. Protected application layout is absent
+    // =========================================================================
+    const loginRequired = isLoginRoute && loginControlsExist && submitControlExists && protectedLayoutAbsent;
+
+    if (!loginRequired) {
+      // If on login route but missing controls -> definitive login failure
+      if (isLoginRoute && (!loginControlsExist || !submitControlExists)) {
         return {
           authenticated: false,
           errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
@@ -3442,9 +3538,36 @@ export class UserManagementExecutor {
         };
       }
 
-      await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
-      await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
-      await submitLoc.locator.click();
+      // If protected layout is present despite minor form artifacts
+      if (!isLoginRoute && protectedLayoutPresent) {
+        return {
+          authenticated: true,
+          action: 'CONTINUE_EXISTING_SESSION',
+          loginAttempted: false,
+        };
+      }
+
+      // Outcome C: Authentication State Indeterminate
+      const pageTitle = await page.title().catch(() => '');
+      return {
+        authenticated: false,
+        errorCode: 'AUTH_STATE_INDETERMINATE',
+        errorMessage: 'Session authentication state indeterminate: neither valid protected layout nor complete login form can be proven.',
+        diagnostics: {
+          currentUrl: this.sanitizeUrlForDiagnostics(activeUrl),
+          pageTitle,
+          redirectChain: [this.sanitizeUrlForDiagnostics(currentUrl), this.sanitizeUrlForDiagnostics(activeUrl)],
+          protectedLayoutCounts: protectedCount,
+          loginControlCounts: (usernameLoc ? 1 : 0) + (passwordLoc ? 1 : 0) + (submitLoc ? 1 : 0),
+        },
+      };
+    }
+
+    // 3. Perform authentication when all 4 conditions are proven
+    if (credentials && credentials.username && credentials.password) {
+      await SelectorResolver.fillInputReliably(usernameLoc!.locator, credentials.username);
+      await SelectorResolver.fillInputReliably(passwordLoc!.locator, credentials.password);
+      await submitLoc!.locator.click();
 
       try {
         await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
@@ -3456,7 +3579,7 @@ export class UserManagementExecutor {
           return {
             authenticated: false,
             errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: `Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING. (${errMsg.trim()})`,
+            errorMessage: `Client administrator authentication failed: ${errMsg.trim()}`,
           };
         }
 
@@ -3466,7 +3589,7 @@ export class UserManagementExecutor {
           return {
             authenticated: false,
             errorCode: 'AUTH_SESSION_EXPIRED',
-            errorMessage: 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.',
+            errorMessage: 'Client administrator authentication failed. Session redirected to login.',
           };
         }
       }
@@ -3476,7 +3599,7 @@ export class UserManagementExecutor {
         return {
           authenticated: false,
           errorCode: 'AUTH_SESSION_EXPIRED',
-          errorMessage: 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.',
+          errorMessage: 'Client administrator authentication failed. Session remained on login.',
         };
       }
 
@@ -3495,16 +3618,16 @@ export class UserManagementExecutor {
       if (targetUrl && page.url() !== targetUrl) {
         try {
           await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch (targetNavErr: any) {
-          return {
-            authenticated: false,
-            errorCode: 'CLIENT_USERS_SCREEN_FAILED',
-            errorMessage: `Failed to open client application after login: ${targetNavErr.message}`,
-          };
+        } catch (e: any) {
+          console.warn(`Navigation to targetUrl '${targetUrl}' warning: ${e.message}`);
         }
       }
 
-      return { authenticated: true };
+      return {
+        authenticated: true,
+        action: 'AUTHENTICATED_VIA_LOGIN',
+        loginAttempted: true,
+      };
     } else {
       // No credentials provided: check if targetUrl is accessible directly or if session expired
       if (targetUrl) {
@@ -4159,6 +4282,8 @@ export class UserManagementExecutor {
           loginUrl?: string;
           credentials?: { username: string; password?: string };
           onProgress?: (msg: string) => void;
+          onMutationDispatched?: () => void;
+          retryStartingPoint?: 'PRECHECK' | 'STATUS_VERIFICATION';
         },
     arg2?: string | ClientUserStatus,
     arg3?: ClientUserStatus
@@ -4171,6 +4296,13 @@ export class UserManagementExecutor {
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
     const onProgress = isObj ? arg1.onProgress : undefined;
+    const retryStartingPoint = isObj ? (arg1 as any).retryStartingPoint : undefined;
+
+    // =========================================================================
+    // STAGE 1: PRECHECK
+    // =========================================================================
+    let statusChangeState: MutationResult['statusChangeState'] = 'PRECHECK';
+    let mutationSubmitted = false;
 
     // 1. Ensure authenticated
     onProgress?.(`Logging in to selected Simplex client…`);
@@ -4179,8 +4311,11 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
         errorMessage: authRes.errorMessage || 'Automatic authentication to client failed.',
+        diagnostics: authRes.diagnostics,
       };
     }
 
@@ -4192,6 +4327,8 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: 'CLIENT_USERS_SCREEN_FAILED',
         errorMessage: `Failed to open users screen: ${navErr.message}`,
       };
@@ -4214,6 +4351,8 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: lookupRes.errorCode || 'REMOTE_USER_NOT_FOUND',
         errorMessage: lookupRes.errorMessage || `Target user '${username}' not found on client users list after searching all pages.`,
       };
@@ -4229,6 +4368,8 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
         errorMessage: 'Browser page was closed before status mutation could be executed.',
       };
@@ -4236,11 +4377,15 @@ export class UserManagementExecutor {
 
     const initialStatus = currentRemoteStatus || 'ACTIVE';
 
+    // Idempotent check: If status already matches targetStatus, return NO_CHANGE_REQUIRED without clicking
     if (initialStatus === targetStatus) {
       return {
         success: true,
         username,
         status: targetStatus,
+        overallStatus: 'COMPLETED',
+        statusChangeState: 'VERIFIED',
+        actionTaken: 'NO_CHANGE_REQUIRED',
         message: `User '${username}' is already ${targetStatus} on remote client.`,
       };
     }
@@ -4265,6 +4410,8 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: 'UNSAFE_REMOTE_ACTION_BLOCKED',
         errorMessage: `Unsafe action control detected in status cell for user '${username}'. Aborting.`,
       };
@@ -4286,11 +4433,16 @@ export class UserManagementExecutor {
     page.on('dialog', dialogHandler);
 
     try {
+      // =========================================================================
+      // STAGE 2: MUTATION_SUBMITTED (Single Click, Double-Click Prevention)
+      // =========================================================================
+      statusChangeState = 'MUTATION_SUBMITTED';
+      mutationSubmitted = true;
+
       if (isObj && (arg1 as any).onMutationDispatched) {
         (arg1 as any).onMutationDispatched();
       }
 
-      // Click the status icon once
       onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
       try {
         if ((await clickTarget.count().catch(() => 0)) > 0) {
@@ -4305,6 +4457,8 @@ export class UserManagementExecutor {
           return {
             success: false,
             username,
+            overallStatus: 'FAILED',
+            statusChangeState: 'PRECHECK',
             errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
             errorMessage: 'Browser page was closed during or immediately after clicking status toggle.',
           };
@@ -4312,10 +4466,17 @@ export class UserManagementExecutor {
         throw clickErr;
       }
 
+      // =========================================================================
+      // STAGE 3: REMOTE_RESPONSE_RECEIVED
+      // =========================================================================
+      statusChangeState = 'REMOTE_RESPONSE_RECEIVED';
       await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
       await page.waitForTimeout(800);
 
-      // 4. Polling post-mutation status verification with reload fallback (up to 8s)
+      // =========================================================================
+      // STAGE 4: VERIFICATION_STARTED (Same BrowserContext & Page Preserved)
+      // =========================================================================
+      statusChangeState = 'VERIFICATION_STARTED';
       onProgress?.(`Verifying remote status change…`);
       let verified = false;
       let lastObservedStatus: ClientUserStatus | undefined = undefined;
@@ -4327,11 +4488,15 @@ export class UserManagementExecutor {
           return {
             success: false,
             username,
-            errorCode: 'REMOTE_OUTCOME_UNKNOWN',
+            overallStatus: 'PARTIAL_FAILED',
+            statusChangeState: 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+            errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
             errorMessage: 'Browser closed during post-mutation status verification.',
+            retryStartingPoint: 'STATUS_VERIFICATION',
           };
         }
 
+        // Re-read user row in same browser context without invoking login
         const checkRes = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
         if (checkRes.success && checkRes.currentRemoteStatus === targetStatus) {
           verified = true;
@@ -4341,7 +4506,7 @@ export class UserManagementExecutor {
           lastObservedStatus = checkRes.currentRemoteStatus;
         }
 
-        // If 2.5s elapsed without verified status change, trigger a fresh reload to clear any stale client DOM
+        // If 2.5s elapsed without verified status change, trigger a fresh reload without re-authenticating
         if (Date.now() - verifyStartTime > 2500 && !reloadedOnce) {
           reloadedOnce = true;
           await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
@@ -4355,15 +4520,22 @@ export class UserManagementExecutor {
           success: true,
           username,
           status: targetStatus,
+          overallStatus: 'COMPLETED',
+          statusChangeState: 'VERIFIED',
+          actionTaken: 'MUTATED',
           message: `User '${username}' status verified as ${targetStatus} on remote client.`,
         };
       }
 
+      // Final status cannot be confirmed -> PARTIAL_FAILED with REMOTE_STATUS_VERIFICATION_UNKNOWN
       return {
         success: false,
         username,
-        errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-        errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Expected ${targetStatus}, but found ${lastObservedStatus || 'UNKNOWN'}.`,
+        overallStatus: 'PARTIAL_FAILED',
+        statusChangeState: 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+        errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+        errorMessage: `Remote status action submitted for '${username}', but final status verification was inconclusive. Expected ${targetStatus}, but observed ${lastObservedStatus || 'UNKNOWN'}.`,
+        retryStartingPoint: 'STATUS_VERIFICATION',
       };
     } finally {
       page.off('dialog', dialogHandler);

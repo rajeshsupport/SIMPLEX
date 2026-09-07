@@ -74,6 +74,12 @@ export interface ClientCreateFormMetadata {
   roles: FormDropdownOption[];
   profileRoles: FormDropdownOption[];
   fieldMappings?: Record<string, string>;
+  diagnosisCode?:
+    | 'AUTHENTICATION_NOT_CONFIRMED'
+    | 'CUSTOM_CONTROL_NOT_NATIVE_SELECT'
+    | 'OPTIONS_LAZY_LOADED'
+    | 'SELECTOR_PROFILE_MISMATCH'
+    | 'NO_OPTIONS_AVAILABLE';
 }
 
 export interface ClientUserSyncSummary {

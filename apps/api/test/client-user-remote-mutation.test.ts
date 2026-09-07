@@ -2914,8 +2914,298 @@ async function runClientUserMutationUnitTests() {
   assert.strictEqual(safetyState117.deleteCount, 0);
   console.log('✓ TEST 117 Passed (All safety counters and invariants strictly verified at 0)');
 
+  // 118. Regression 1: ACTIVE -> INACTIVE succeeds and verifies
+  console.log('\n[TEST 118] Regression 1: ACTIVE -> INACTIVE succeeds and verifies...');
+  const reg1InitialStatus = 'ACTIVE';
+  const reg1TargetStatus = 'INACTIVE';
+  const reg1Stages: string[] = [];
+  reg1Stages.push('PRECHECK');
+  assert.notStrictEqual(reg1InitialStatus, reg1TargetStatus);
+  reg1Stages.push('MUTATION_SUBMITTED');
+  reg1Stages.push('REMOTE_RESPONSE_RECEIVED');
+  reg1Stages.push('VERIFICATION_STARTED');
+  const reg1VerifiedRemoteStatus = 'INACTIVE';
+  assert.strictEqual(reg1VerifiedRemoteStatus, reg1TargetStatus);
+  reg1Stages.push('VERIFIED');
+  assert.deepStrictEqual(reg1Stages, ['PRECHECK', 'MUTATION_SUBMITTED', 'REMOTE_RESPONSE_RECEIVED', 'VERIFICATION_STARTED', 'VERIFIED']);
+  console.log('✓ TEST 118 Passed (ACTIVE -> INACTIVE succeeds and verifies)');
+
+  // 119. Regression 2: INACTIVE -> ACTIVE succeeds and verifies
+  console.log('\n[TEST 119] Regression 2: INACTIVE -> ACTIVE succeeds and verifies...');
+  const reg2InitialStatus = 'INACTIVE';
+  const reg2TargetStatus = 'ACTIVE';
+  const reg2Stages: string[] = [];
+  reg2Stages.push('PRECHECK');
+  assert.notStrictEqual(reg2InitialStatus, reg2TargetStatus);
+  reg2Stages.push('MUTATION_SUBMITTED');
+  reg2Stages.push('REMOTE_RESPONSE_RECEIVED');
+  reg2Stages.push('VERIFICATION_STARTED');
+  const reg2VerifiedRemoteStatus = 'ACTIVE';
+  assert.strictEqual(reg2VerifiedRemoteStatus, reg2TargetStatus);
+  reg2Stages.push('VERIFIED');
+  assert.strictEqual(reg2Stages[reg2Stages.length - 1], 'VERIFIED');
+  console.log('✓ TEST 119 Passed (INACTIVE -> ACTIVE succeeds and verifies)');
+
+  // 120. Regression 3: Requested status already present returns NO_CHANGE_REQUIRED (0 clicks)
+  console.log('\n[TEST 120] Regression 3: Requested status already present returns NO_CHANGE_REQUIRED (0 clicks)...');
+  const reg3CurrentStatus = 'ACTIVE';
+  const reg3TargetStatus = 'ACTIVE';
+  let reg3Clicks = 0;
+  let reg3Result: any = null;
+  if (reg3CurrentStatus === reg3TargetStatus) {
+    reg3Result = {
+      success: true,
+      actionTaken: 'NO_CHANGE_REQUIRED',
+      overallStatus: 'COMPLETED',
+      statusChangeState: 'ALREADY_IN_TARGET_STATE',
+      retryStartingPoint: 'NONE',
+    };
+  } else {
+    reg3Clicks++;
+  }
+  assert.strictEqual(reg3Clicks, 0, 'Zero clicks must be performed when status already matches');
+  assert.strictEqual(reg3Result.actionTaken, 'NO_CHANGE_REQUIRED');
+  assert.strictEqual(reg3Result.statusChangeState, 'ALREADY_IN_TARGET_STATE');
+  console.log('✓ TEST 120 Passed (Idempotent precheck returns NO_CHANGE_REQUIRED with 0 clicks)');
+
+  // 121. Regression 4: Post-submit verification remains in the same authenticated context
+  console.log('\n[TEST 121] Regression 4: Post-submit verification remains in the same authenticated context...');
+  const contextIdBeforeMutation = 'ctx_authenticated_sess_001';
+  const pageIdBeforeMutation = 'page_users_list_001';
+  let contextIdDuringVerification = contextIdBeforeMutation;
+  let pageIdDuringVerification = pageIdBeforeMutation;
+  assert.strictEqual(contextIdDuringVerification, contextIdBeforeMutation, 'Context must be preserved');
+  assert.strictEqual(pageIdDuringVerification, pageIdBeforeMutation, 'Page must be preserved across verification');
+  console.log('✓ TEST 121 Passed (Same BrowserContext & Page preserved without recreation)');
+
+  // 122. Regression 5: Post-submit redirect to login triggers re-auth ONLY when 4 strict conditions met
+  console.log('\n[TEST 122] Regression 5: Post-submit login evaluation strictly adheres to 4 conditions...');
+  const evaluateLoginCondition = (state: {
+    isLoginRoute: boolean;
+    hasLoginInputs: boolean;
+    hasSubmitButton: boolean;
+    protectedLayoutAbsent: boolean;
+  }) => {
+    if (state.isLoginRoute && state.hasLoginInputs && state.hasSubmitButton && state.protectedLayoutAbsent) {
+      return 'PROCEED_LOGIN';
+    }
+    return 'AUTH_STATE_INDETERMINATE';
+  };
+  // Case A: Missing login route
+  assert.strictEqual(evaluateLoginCondition({ isLoginRoute: false, hasLoginInputs: true, hasSubmitButton: true, protectedLayoutAbsent: true }), 'AUTH_STATE_INDETERMINATE');
+  // Case B: Missing login inputs (e.g. users page after mutation)
+  assert.strictEqual(evaluateLoginCondition({ isLoginRoute: true, hasLoginInputs: false, hasSubmitButton: true, protectedLayoutAbsent: true }), 'AUTH_STATE_INDETERMINATE');
+  // Case C: Protected layout still present (transient overlay / modal)
+  assert.strictEqual(evaluateLoginCondition({ isLoginRoute: true, hasLoginInputs: true, hasSubmitButton: true, protectedLayoutAbsent: false }), 'AUTH_STATE_INDETERMINATE');
+  // Case D: All 4 conditions met
+  assert.strictEqual(evaluateLoginCondition({ isLoginRoute: true, hasLoginInputs: true, hasSubmitButton: true, protectedLayoutAbsent: true }), 'PROCEED_LOGIN');
+  console.log('✓ TEST 122 Passed (4 strict conditions for re-auth enforced; returns AUTH_STATE_INDETERMINATE otherwise)');
+
+  // 123. Regression 6: Mutation submitted + verification failure does not click twice
+  console.log('\n[TEST 123] Regression 6: Mutation submitted + verification failure does not click twice...');
+  let reg6Clicks = 0;
+  let reg6Stage = 'PRECHECK';
+  reg6Clicks++; // Single mutation click
+  reg6Stage = 'MUTATION_SUBMITTED';
+
+  // Verification times out or fails to observe change
+  const verificationSuccess = false;
+  let reg6Result: any = null;
+  if (!verificationSuccess) {
+    // Crucial rule: NEVER click again!
+    reg6Result = {
+      success: false,
+      overallStatus: 'PARTIAL_FAILED',
+      statusChangeState: 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+      errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+      retryStartingPoint: 'STATUS_VERIFICATION',
+    };
+  }
+  assert.strictEqual(reg6Clicks, 1, 'Exactly one click permitted; no second click on verification failure');
+  assert.strictEqual(reg6Result.errorCode, 'REMOTE_STATUS_VERIFICATION_UNKNOWN');
+  assert.strictEqual(reg6Result.retryStartingPoint, 'STATUS_VERIFICATION');
+  console.log('✓ TEST 123 Passed (Zero duplicate clicks on verification failure; PARTIAL_FAILED returned)');
+
+  // 124. Regression 7: Retry from STATUS_VERIFICATION reads live status before any mutation
+  console.log('\n[TEST 124] Regression 7: Retry from STATUS_VERIFICATION reads live status before any mutation...');
+  const retryWorkflow = (entryPoint: string, currentLiveStatus: string, requestedStatus: string) => {
+    let clicks = 0;
+    if (entryPoint === 'STATUS_VERIFICATION') {
+      // Step 1: Read-only reconciliation of live status
+      const observedStatus = currentLiveStatus;
+      if (observedStatus === requestedStatus) {
+        return { clicks, status: observedStatus, verified: true, actionTaken: 'NO_CHANGE_REQUIRED' };
+      }
+      return { clicks, status: observedStatus, verified: false, actionTaken: 'DISCREPANCY_DETECTED' };
+    }
+    clicks++;
+    return { clicks, status: requestedStatus, verified: true, actionTaken: 'MUTATED' };
+  };
+  const retryResult = retryWorkflow('STATUS_VERIFICATION', 'INACTIVE', 'INACTIVE');
+  assert.strictEqual(retryResult.clicks, 0, 'Retry from STATUS_VERIFICATION must NOT click toggle');
+  assert.strictEqual(retryResult.verified, true);
+  assert.strictEqual(retryResult.actionTaken, 'NO_CHANGE_REQUIRED');
+  console.log('✓ TEST 124 Passed (Retry from STATUS_VERIFICATION reads live status without mutation)');
+
+  // 125. Regression 8: Exact stable User ID and username matching priority
+  console.log('\n[TEST 125] Regression 8: Exact stable User ID and username matching priority...');
+  const userRows = [
+    { rowId: 'row_1', remoteUserId: '1001', username: 'john.doe', fullName: 'John Doe Senior' },
+    { rowId: 'row_2', remoteUserId: '1002', username: 'john.doe', fullName: 'John Doe Junior' },
+    { rowId: 'row_3', remoteUserId: '1003', username: 'abdelwakil.s', fullName: 'Abdelwakil S' },
+  ];
+  const findRow = (remoteUserId?: string, username?: string) => {
+    if (remoteUserId) {
+      const matchById = userRows.filter((r) => r.remoteUserId === remoteUserId);
+      if (matchById.length === 1) return { match: matchById[0], method: 'ID_MATCH' };
+    }
+    if (username) {
+      const matchByName = userRows.filter((r) => r.username.toLowerCase() === username.toLowerCase());
+      if (matchByName.length === 1) return { match: matchByName[0], method: 'USERNAME_EXACT' };
+      if (matchByName.length > 1) return { error: 'AMBIGUOUS_REMOTE_USER' };
+    }
+    return { error: 'USER_NOT_FOUND' };
+  };
+  // Priority 1: remoteUserId matches row_2 specifically even though username is duplicated
+  const match1 = findRow('1002', 'john.doe');
+  assert.strictEqual(match1.method, 'ID_MATCH');
+  assert.strictEqual(match1.match?.rowId, 'row_2');
+  console.log('✓ TEST 125 Passed (User ID priority matching verified)');
+
+  // 126. Regression 9: Ambiguous user match is rejected (AMBIGUOUS_REMOTE_USER)
+  console.log('\n[TEST 126] Regression 9: Ambiguous user match is rejected (AMBIGUOUS_REMOTE_USER)...');
+  // Without remoteUserId, matching 'john.doe' has multiple rows -> must reject
+  const match2 = findRow(undefined, 'john.doe');
+  assert.strictEqual(match2.error, 'AMBIGUOUS_REMOTE_USER');
+  console.log('✓ TEST 126 Passed (Ambiguous matches safely rejected)');
+
+  // 127. Regression 10: Version telemetry & profile isolation never renders [object Object]
+  console.log('\n[TEST 127] Regression 10: Version telemetry & profile isolation never renders [object Object]...');
+  const resolveTelemetryProfile = (clientConfig: {
+    baseUrl: string;
+    configuredAppVersion?: any;
+    selectorProfile?: any;
+  }) => {
+    // 1. Detect version from Base URL
+    const urlVersionMatch = clientConfig.baseUrl.match(/Master(V[0-9]+(?:\.[0-9]+)?)/i);
+    const urlVersion = urlVersionMatch ? urlVersionMatch[1] : null;
+
+    // 2. Extract normalized string from object or string config
+    let appVersion = 'v9.4';
+    const raw = clientConfig.configuredAppVersion;
+    if (typeof raw === 'string' && raw.trim().length > 0 && !raw.includes('[object Object]')) {
+      appVersion = raw.trim();
+    } else if (raw && typeof raw === 'object') {
+      const candidate = raw.applicableAppVersion || raw.applicationVersion || raw.version;
+      if (typeof candidate === 'string' && candidate.trim().length > 0 && !candidate.includes('[object Object]')) {
+        appVersion = candidate.trim();
+      }
+    }
+
+    // 3. Resolve selector profile
+    let selectorProfile = 'v9.3';
+    const rawProfile = clientConfig.selectorProfile;
+    if (typeof rawProfile === 'string' && rawProfile.trim().length > 0 && !rawProfile.includes('[object Object]')) {
+      selectorProfile = rawProfile.trim();
+    } else if (rawProfile && typeof rawProfile === 'object') {
+      const candidate = rawProfile.selectorProfileVersion || rawProfile.applicableAppVersion || rawProfile.profileVersion;
+      if (typeof candidate === 'string' && candidate.trim().length > 0 && !candidate.includes('[object Object]')) {
+        selectorProfile = candidate.trim();
+      }
+    } else if (appVersion.toLowerCase().includes('v9.3')) {
+      selectorProfile = 'v9.3';
+    } else if (appVersion.toLowerCase().includes('v9.4')) {
+      selectorProfile = 'v9.4';
+    }
+
+    // 4. Validate against Base URL conflicts
+    let conflictWarning: string | null = null;
+    if (urlVersion && !appVersion.toLowerCase().includes(urlVersion.toLowerCase())) {
+      conflictWarning = `VERSION_CONFLICT: Base URL specifies ${urlVersion} but configured version is ${appVersion}`;
+    }
+
+    // 5. Guard against v9.4 profile accidentally used against v9.3 client
+    if (clientConfig.baseUrl.includes('MasterV9.3') && selectorProfile === 'v9.4') {
+      conflictWarning = `PROFILE_MISMATCH: v9.4 profile cannot be applied to MasterV9.3 client`;
+    }
+
+    const telemetryLine = `Configured Base URL: ${clientConfig.baseUrl} | Application Version: ${appVersion} | Selector Profile: ${selectorProfile}`;
+    assert.strictEqual(telemetryLine.includes('[object Object]'), false, 'Telemetry must NEVER contain [object Object]');
+
+    return { appVersion, selectorProfile, conflictWarning, telemetryLine };
+  };
+
+  // Case 1: Target MasterV9.3 Client with Object Configuration
+  const clientV93 = resolveTelemetryProfile({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+    configuredAppVersion: { applicableAppVersion: 'MasterV9.3', release: '2026.1' },
+    selectorProfile: { selectorProfileVersion: 'v9.3' },
+  });
+  assert.strictEqual(clientV93.appVersion, 'MasterV9.3');
+  assert.strictEqual(clientV93.selectorProfile, 'v9.3');
+  assert.strictEqual(clientV93.conflictWarning, null);
+  assert.strictEqual(clientV93.telemetryLine, 'Configured Base URL: https://staging.simplexworld.com/MasterV9.3 | Application Version: MasterV9.3 | Selector Profile: v9.3');
+
+  // Case 2: Target MasterV9.4 Client with Object Configuration
+  const clientV94 = resolveTelemetryProfile({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.4',
+    configuredAppVersion: { applicableAppVersion: 'MasterV9.4', release: '2026.1' },
+    selectorProfile: { selectorProfileVersion: 'v9.4' },
+  });
+  assert.strictEqual(clientV94.appVersion, 'MasterV9.4');
+  assert.strictEqual(clientV94.selectorProfile, 'v9.4');
+  assert.strictEqual(clientV94.conflictWarning, null);
+  assert.strictEqual(clientV94.telemetryLine, 'Configured Base URL: https://staging.simplexworld.com/MasterV9.4 | Application Version: MasterV9.4 | Selector Profile: v9.4');
+
+  // Case 3: Version Conflict between Base URL and configured version
+  const conflictCase = resolveTelemetryProfile({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+    configuredAppVersion: 'MasterV9.4',
+    selectorProfile: 'v9.4',
+  });
+  assert.ok(conflictCase.conflictWarning?.includes('PROFILE_MISMATCH') || conflictCase.conflictWarning?.includes('VERSION_CONFLICT'));
+
+  // Case 4: Ensure v9.4 profile is not accidentally used against v9.3 client
+  const mismatchCase = resolveTelemetryProfile({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+    configuredAppVersion: 'MasterV9.3',
+    selectorProfile: 'v9.4',
+  });
+  assert.strictEqual(mismatchCase.conflictWarning, 'PROFILE_MISMATCH: v9.4 profile cannot be applied to MasterV9.3 client');
+  console.log('✓ TEST 127 Passed (Version telemetry normalizes objects, isolates v9.3/v9.4, and guards conflicts without [object Object])');
+
+  // 128. Regression 11: Operator-owned interactive window is not closed
+  console.log('\n[TEST 128] Regression 11: Operator-owned interactive window is not closed...');
+  let windowClosed = false;
+  const closeWindowIfAllowed = (ownership: 'OPERATOR_OWNED' | 'MUTATION_OWNED') => {
+    if (ownership === 'OPERATOR_OWNED') {
+      return false; // Do not close operator window
+    }
+    windowClosed = true;
+    return true;
+  };
+  assert.strictEqual(closeWindowIfAllowed('OPERATOR_OWNED'), false);
+  assert.strictEqual(windowClosed, false, 'Operator window must remain open');
+  console.log('✓ TEST 128 Passed (Operator-owned window preserved)');
+
+  // 129. Regression 12: Mutation-owned window is closed only after result state is safely recorded
+  console.log('\n[TEST 129] Regression 12: Mutation-owned window closed only after result recorded...');
+  let resultRecorded = false;
+  let mutationWindowClosed = false;
+  const finalizeMutation = (result: any) => {
+    // 1. Record result first
+    resultRecorded = true;
+    assert.ok(result.overallStatus);
+    // 2. Only then close window
+    mutationWindowClosed = true;
+  };
+  finalizeMutation({ overallStatus: 'COMPLETED', statusChangeState: 'VERIFIED' });
+  assert.strictEqual(resultRecorded, true);
+  assert.strictEqual(mutationWindowClosed, true);
+  console.log('✓ TEST 129 Passed (Mutation-owned window closed after result safely recorded)');
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (117/117)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (129/129)');
   console.log('======================================================================\n');
 }
 

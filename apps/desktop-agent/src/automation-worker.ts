@@ -1,5 +1,5 @@
 import { BrowserContext, Page } from 'playwright';
-import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
+import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, SyncProgressUpdate, SelectorResolver } from '@hmc/automation';
 import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, normalizeClientBaseUrl } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
@@ -91,7 +91,14 @@ export class AutomationWorker {
   ): Promise<void> {
     const startTime = Date.now();
     const clientName = task.payload?.clientName || task.payload?.clientCode || 'Simplex Client';
-    const version = task.payload?.applicationVersion || task.workflowVersion || 'v9.4';
+    const version = SelectorResolver.normalizeVersionString(
+      task.payload?.applicationVersion || (typeof task.workflowVersion === 'object' ? (task.workflowVersion as any)?.applicableAppVersion : task.workflowVersion),
+      'v9.4'
+    );
+    const selectorProfile = SelectorResolver.normalizeSelectorProfile(
+      task.payload?.selectorProfileVersion || (typeof task.workflowVersion === 'object' ? (task.workflowVersion as any)?.applicableAppVersion : undefined),
+      'v9.3'
+    );
     let resolvedRoleUrl = 'UNKNOWN';
     try {
       resolvedRoleUrl = resolveClientRoleUrl({
@@ -104,7 +111,7 @@ export class AutomationWorker {
     }
 
     onProgress?.(`Starting task [${task.taskType}] for client [${task.clientId}] (namespace: ${namespace})...`);
-    onProgress?.(`[AUTOMATION TELEMETRY] Client ID: ${task.clientId} | Client Name: ${clientName} | Configured Base URL: ${task.clientBaseUrl} | Resolved addUserRole URL: ${resolvedRoleUrl} | Version: ${version} | Status: INITIALIZING`);
+    onProgress?.(`[AUTOMATION TELEMETRY] Client ID: ${task.clientId} | Client Name: ${clientName} | Configured Base URL: ${task.clientBaseUrl} | Resolved addUserRole URL: ${resolvedRoleUrl} | Version: ${version} | Selector Profile: ${selectorProfile} | Status: INITIALIZING`);
 
     // =========================================================================
     // 1. DEDICATED HEADLESS BACKGROUND SYNC HANDLER (namespace: 'sync')
@@ -497,7 +504,11 @@ export class AutomationWorker {
 
           if (statusRes.success) {
             reportProgress(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
-            await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: serializableResult });
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
           } else {
             const safeError = sanitizeErrorMessage(statusRes.errorMessage || statusRes.message || 'Remote status verification failed');
             onProgress?.(`✗ Remote status verification failed: ${safeError}`);
@@ -505,7 +516,14 @@ export class AutomationWorker {
               status: 'FAILED',
               errorMessage: safeError,
               totalDurationMs,
-              resultData: { ...serializableResult, errorMessage: safeError },
+              resultData: {
+                ...serializableResult,
+                overallStatus: statusRes.overallStatus || 'PARTIAL_FAILED',
+                statusChangeState: statusRes.statusChangeState || 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+                retryStartingPoint: statusRes.retryStartingPoint || 'STATUS_VERIFICATION',
+                errorCode: statusRes.errorCode || 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+                errorMessage: safeError,
+              },
             });
           }
           return;
@@ -722,11 +740,14 @@ export class AutomationWorker {
               onProgress?.(`✗ Remote mutation outcome unknown after browser closure.`);
               await this.agentClient.sendTelemetry(task.runId, {
                 status: 'FAILED',
-                errorMessage: 'REMOTE_OUTCOME_UNKNOWN: Browser closed after action was sent. Mutation could not be verified in remote snapshot.',
+                errorMessage: 'REMOTE_STATUS_VERIFICATION_UNKNOWN: Browser closed after action was sent. Mutation could not be verified in remote snapshot.',
                 totalDurationMs,
                 resultData: {
                   success: false,
-                  errorCode: 'REMOTE_OUTCOME_UNKNOWN',
+                  overallStatus: 'PARTIAL_FAILED',
+                  statusChangeState: 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+                  errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+                  retryStartingPoint: 'STATUS_VERIFICATION',
                   errorMessage: 'Browser closed after action was sent. Mutation could not be verified in remote snapshot.',
                 },
               });
