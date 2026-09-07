@@ -2020,8 +2020,184 @@ async function runClientUsersTests() {
     assert.strictEqual(retryUserC_res.mappedRoles?.length, 2);
     console.log('✓ TEST 96 Passed (Complete 11-step sequential user creation, multi-role mapping, and continuation verified)');
 
+    // 97. Direct Fixture-Browser Test: Manual Create User Multi-Role Mapping
+    console.log('\n[TEST 97] Direct Fixture-Browser Test: Manual Create User Multi-Role Mapping...');
+    const manualTestUsername = `manual_doc_${Date.now()}`;
+    const manualContext = await browser!.newContext();
+    const manualPage = await manualContext.newPage();
+    try {
+      let submitButtonClickCount = 0;
+      await manualPage.route('**/addUserRole', async (route) => {
+        if (route.request().method() === 'POST') {
+          submitButtonClickCount++;
+        }
+        await route.continue();
+      });
+
+      const manualResult = await UserManagementExecutor.processUserFullWorkflow(manualPage, {
+        clientId: 'client-manual',
+        initiatingOperatorId: 'op-audit',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+        userDto: {
+          clientId: 'client-manual',
+          username: manualTestUsername,
+          firstName: 'Manual',
+          lastName: 'Physician',
+          mobileNumber: '0509988111',
+          nationality: 'Saudi Arabia',
+          role: 'DOCTOR',
+          roles: ['DOCTOR', 'BILLING SUPER USER'],
+          status: 'ACTIVE',
+        },
+      });
+
+      assert.strictEqual(manualResult.success, true, 'Manual Create User with multi-role must succeed');
+      assert.strictEqual(manualResult.overallStatus, 'COMPLETED');
+      assert.strictEqual(submitButtonClickCount, 1, 'Exactly one role update submit button must be clicked');
+
+      // Verify actual checkboxes and persistence on reload
+      await manualPage.goto(`${BASE_URL}/MasterV9.4/addUserRole?username=${manualTestUsername}`);
+      const checkedRoles = await manualPage.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr'));
+        const checked: string[] = [];
+        for (const r of rows) {
+          const cb = r.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+          const td = r.querySelector('td.checkrole');
+          if (cb && cb.checked && td) {
+            checked.push((td.textContent || '').trim());
+          }
+        }
+        return checked;
+      });
+
+      assert.ok(checkedRoles.includes('DOCTOR'), 'DOCTOR checkbox must be persisted as checked');
+      assert.ok(checkedRoles.includes('BILLING SUPER USER'), 'BILLING SUPER USER checkbox must be persisted as checked');
+      console.log('✓ TEST 97 Passed (Manual Create User multi-role verified on live fixture browser)');
+    } finally {
+      await manualPage.close().catch(() => {});
+      await manualContext.close().catch(() => {});
+    }
+
+    // 98. Direct Fixture-Browser Test: Existing-User Additive Role Mapping
+    console.log('\n[TEST 98] Direct Fixture-Browser Test: Existing-User Additive Role Mapping...');
+    const existingContext = await browser!.newContext();
+    const existingPage = await existingContext.newPage();
+    try {
+      let existingSubmitCount = 0;
+      await existingPage.route('**/addUserRole', async (route) => {
+        if (route.request().method() === 'POST') {
+          existingSubmitCount++;
+        }
+        await route.continue();
+      });
+
+      // User dr_sarah already has Physician
+      const additiveResult = await UserManagementExecutor.mapUserRoles(existingPage, {
+        roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+        username: 'dr_sarah',
+        fullName: 'Sarah Al-Mansoor',
+        requestedRoles: ['Physician', 'BILLING SUPER USER'],
+      });
+
+      assert.strictEqual(additiveResult.success, true, 'Additive role mapping for existing user must succeed');
+      assert.strictEqual(additiveResult.overallStatus, 'COMPLETED');
+      assert.strictEqual(existingSubmitCount, 1, 'Exactly one submit button clicked for existing-user role update');
+
+      // Verify persistence and additive preservation on reload
+      await existingPage.goto(`${BASE_URL}/MasterV9.4/addUserRole?username=dr_sarah`);
+      const postReloadRoles = await existingPage.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr'));
+        const checked: string[] = [];
+        for (const r of rows) {
+          const cb = r.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+          const td = r.querySelector('td.checkrole');
+          if (cb && cb.checked && td) {
+            checked.push((td.textContent || '').trim());
+          }
+        }
+        return checked;
+      });
+
+      assert.ok(postReloadRoles.includes('Physician'), 'Existing role Physician must be preserved');
+      assert.ok(postReloadRoles.includes('BILLING SUPER USER'), 'Newly added role BILLING SUPER USER must be checked');
+      console.log('✓ TEST 98 Passed (Existing-user additive role mapping verified on live fixture browser)');
+    } finally {
+      await existingPage.close().catch(() => {});
+      await existingContext.close().catch(() => {});
+    }
+
+    // 99. Direct Fixture-Browser Test: Excel-Import Multi-Role Mapping
+    console.log('\n[TEST 99] Direct Fixture-Browser Test: Excel-Import Multi-Role Mapping...');
+    const excelContext = await browser!.newContext();
+    const excelPage = await excelContext.newPage();
+    try {
+      const excelUsername = `excel_user_${Date.now()}`;
+      const excelRow = {
+        'User Name': 'Excel Specialist',
+        'Name': excelUsername,
+        'Mobile No': '0505556677',
+        'Role': 'DOCTOR, PHARMACIST',
+      };
+
+      const parsedExcelRoles = ['DOCTOR', 'PHARMACIST'];
+      let excelSubmitCount = 0;
+      await excelPage.route('**/addUserRole', async (route) => {
+        if (route.request().method() === 'POST') {
+          excelSubmitCount++;
+        }
+        await route.continue();
+      });
+
+      const excelResult = await UserManagementExecutor.processUserFullWorkflow(excelPage, {
+        clientId: 'client-excel',
+        initiatingOperatorId: 'op-excel-audit',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
+        userDto: {
+          clientId: 'client-excel',
+          username: excelUsername,
+          firstName: 'Excel',
+          lastName: 'Specialist',
+          mobileNumber: '0505556677',
+          nationality: 'Saudi Arabia',
+          role: 'DOCTOR',
+          roles: parsedExcelRoles,
+          status: 'ACTIVE',
+        },
+      });
+
+      assert.strictEqual(excelResult.success, true, 'Excel-import multi-role workflow must succeed');
+      assert.strictEqual(excelResult.overallStatus, 'COMPLETED');
+      assert.strictEqual(excelSubmitCount, 1, 'Exactly one submit clicked for Excel user role mapping');
+
+      // Verify persistence on reload
+      await excelPage.goto(`${BASE_URL}/MasterV9.4/addUserRole?username=${excelUsername}`);
+      const excelPersistedRoles = await excelPage.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr'));
+        const checked: string[] = [];
+        for (const r of rows) {
+          const cb = r.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+          const td = r.querySelector('td.checkrole');
+          if (cb && cb.checked && td) {
+            checked.push((td.textContent || '').trim());
+          }
+        }
+        return checked;
+      });
+
+      assert.ok(excelPersistedRoles.includes('DOCTOR'), 'DOCTOR must be persisted from Excel import');
+      assert.ok(excelPersistedRoles.includes('PHARMACIST'), 'PHARMACIST must be persisted from Excel import');
+      console.log('✓ TEST 99 Passed (Excel-import multi-role mapping verified on live fixture browser)');
+    } finally {
+      await excelPage.close().catch(() => {});
+      await excelContext.close().catch(() => {});
+    }
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (96/96)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (99/99)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});

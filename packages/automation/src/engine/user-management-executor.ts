@@ -1201,79 +1201,179 @@ export class UserManagementExecutor {
     const mappedRoles: string[] = [];
     const missingRoles: string[] = [];
 
-    // Locate all role checkboxes / controls on the page
+    // Locate all role checkboxes / controls on the page using exact canonical catalog resolution,
+    // stable ID lookup, and label re-verification (strictly preventing raw/substring collisions like BILL matching BILLPRINT).
     const selectionResult = await page.evaluate((rolesToSelect) => {
-      const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tr'));
-      const inputs = Array.from(document.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      interface CatalogEntry {
+        canonicalName: string;
+        stableId: string;
+        sourceAttr: 'data-role-id' | 'id' | 'data-chckrole' | 'data-role' | 'value';
+        cb: HTMLInputElement;
+        label: string;
+        row?: HTMLElement;
+      }
+
+      const escapeCss = (val: string): string => {
+        if (typeof (window as any).CSS !== 'undefined' && typeof (window as any).CSS.escape === 'function') {
+          return (window as any).CSS.escape(val);
+        }
+        return val.replace(/([!"#$%&'()*+,.\/:;<=>?@[\\\]^`{|}~])/g, '\\$1');
+      };
+
+      const extractStableIdentifier = (
+        cb: HTMLInputElement
+      ): { stableId: string; sourceAttr: 'data-role-id' | 'id' | 'data-chckrole' | 'data-role' | 'value' } => {
+        if (cb.getAttribute('data-role-id')) {
+          return { stableId: cb.getAttribute('data-role-id')!.trim(), sourceAttr: 'data-role-id' };
+        }
+        if (cb.id) {
+          return { stableId: cb.id.trim(), sourceAttr: 'id' };
+        }
+        if (cb.getAttribute('data-chckrole')) {
+          return { stableId: cb.getAttribute('data-chckrole')!.trim(), sourceAttr: 'data-chckrole' };
+        }
+        if (cb.getAttribute('data-role')) {
+          return { stableId: cb.getAttribute('data-role')!.trim(), sourceAttr: 'data-role' };
+        }
+        if (cb.value) {
+          return { stableId: cb.value.trim(), sourceAttr: 'value' };
+        }
+        return { stableId: '', sourceAttr: 'value' };
+      };
+
+      const catalog: CatalogEntry[] = [];
+      const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tr')) as HTMLElement[];
+
+      // 1. Extract from table#adduserrole rows
+      for (const row of rows) {
+        const checkRoleTd = row.querySelector('td.checkrole');
+        const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+        if (cb) {
+          const label = (checkRoleTd ? checkRoleTd.textContent : (cb.closest('label')?.textContent || cb.parentElement?.textContent))?.trim() || '';
+          const { stableId, sourceAttr } = extractStableIdentifier(cb);
+          // Canonical name is strictly from the DOM label (or stableId if no label exists)
+          // Remote control code (e.g. BILL) must NEVER overwrite the canonical role name!
+          const canonicalName = label || stableId;
+          if (canonicalName && stableId) {
+            catalog.push({ canonicalName, stableId, sourceAttr, cb, label, row });
+          }
+        }
+      }
+
+      // 2. Extract any standalone role checkboxes not in the table
+      const standaloneInputs = Array.from(document.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      for (const inp of standaloneInputs) {
+        if (!catalog.some((c) => c.cb === inp)) {
+          const label = (inp.closest('label')?.textContent || inp.parentElement?.textContent || '').trim();
+          const { stableId, sourceAttr } = extractStableIdentifier(inp);
+          const canonicalName = label || stableId;
+          if (canonicalName && stableId) {
+            catalog.push({ canonicalName, stableId, sourceAttr, cb: inp, label });
+          }
+        }
+      }
+
       const foundRoles: string[] = [];
       const notFoundRoles: string[] = [];
 
       for (const reqRole of rolesToSelect) {
         const normReq = reqRole.toLowerCase().trim();
-        let matched = false;
 
-        // 1. Match in table#adduserrole rows
-        for (const row of rows) {
-          const checkRoleTd = row.querySelector('td.checkrole');
-          const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
-          const rowText = (row.textContent || '').toLowerCase();
-          const optionsText = Array.from(row.querySelectorAll('option')).map((o) => (o.textContent || '').toLowerCase()).join(' ');
-          const label = checkRoleTd ? (checkRoleTd.textContent || '').toLowerCase().trim() : '';
-          const val = cb ? (cb.getAttribute('data-chckrole') || cb.value || '').toLowerCase().trim() : '';
-          const isExactMatch = label === normReq || val === normReq ||
-            (normReq === 'billing super user' && (val === 'bill' || label === 'billing super user')) ||
-            (normReq === 'accumed' && (val === 'accumed' || label === 'accumed')) ||
-            (normReq === 'reports' && (val === 'reports' || label === 'reports'));
+        // Step A: Resolve requested role by exact canonical catalog name
+        // Strict exact equality matching only: NO substring, NO prefix matching!
+        const catalogEntry = catalog.find((c) => c.canonicalName.toLowerCase().trim() === normReq);
 
-          if (cb && isExactMatch) {
-            if (!cb.checked) {
-              cb.checked = true;
-              cb.dispatchEvent(new Event('change', { bubbles: true }));
-              cb.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-            // Set valid default page option
-            const sel = row.querySelector('select') as HTMLSelectElement | null;
-            if (sel && sel.options.length > 1) {
-              const opt = Array.from(sel.options).find((o) => (o.textContent || '').toLowerCase().includes(normReq) || o.value.toLowerCase().includes(normReq));
-              if (opt && opt.value) {
-                sel.value = opt.value;
-              } else {
-                for (let i = 0; i < sel.options.length; i++) {
-                  if (sel.options[i].value && !sel.options[i].disabled) {
-                    sel.selectedIndex = i;
-                    break;
-                  }
+        if (!catalogEntry) {
+          notFoundRoles.push(reqRole);
+          continue;
+        }
+
+        // Step B: Obtain its stable role ID and source attribute
+        const { stableId, sourceAttr } = catalogEntry;
+
+        // Step C: Locate the DOM checkbox by stable ID and source attribute
+        let targetCheckbox: HTMLInputElement | null = null;
+
+        // Priority 1: getElementById if source attribute is id (handles IDs starting with digits and special chars)
+        if (sourceAttr === 'id' && stableId) {
+          targetCheckbox = document.getElementById(stableId) as HTMLInputElement | null;
+        }
+
+        // Priority 2: Escaped locator using preserved source attribute
+        if (!targetCheckbox && stableId && sourceAttr) {
+          try {
+            const sel = `input[${sourceAttr}="${escapeCss(stableId)}"]`;
+            targetCheckbox = document.querySelector(sel) as HTMLInputElement | null;
+          } catch {}
+        }
+
+        // Priority 3: Fallback across all supported attributes with escaping:
+        // id, data-role-id, data-chckrole, data-role, and value
+        if (!targetCheckbox && stableId) {
+          const supportedAttrs = ['id', 'data-role-id', 'data-chckrole', 'data-role', 'value'];
+          for (const attr of supportedAttrs) {
+            try {
+              const sel = `input[${attr}="${escapeCss(stableId)}"]`;
+              const el = document.querySelector(sel) as HTMLInputElement | null;
+              if (el) {
+                targetCheckbox = el;
+                break;
+              }
+            } catch {}
+          }
+        }
+
+        if (!targetCheckbox) {
+          targetCheckbox = catalogEntry.cb;
+        }
+
+        if (!targetCheckbox) {
+          notFoundRoles.push(reqRole);
+          continue;
+        }
+
+        // Step D: Re-verify its canonical label before clicking
+        const associatedLabel = (
+          catalogEntry.label ||
+          targetCheckbox.closest('tr')?.querySelector('td.checkrole')?.textContent ||
+          targetCheckbox.closest('label')?.textContent ||
+          targetCheckbox.parentElement?.textContent ||
+          ''
+        ).trim().toLowerCase();
+
+        if (associatedLabel !== normReq && catalogEntry.canonicalName.toLowerCase().trim() !== normReq) {
+          notFoundRoles.push(reqRole);
+          continue;
+        }
+
+        // Strictly additive: if already checked, preserve it. If unchecked, check it.
+        if (!targetCheckbox.checked) {
+          targetCheckbox.checked = true;
+          targetCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+          targetCheckbox.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // Set valid default page option in the row if present
+        if (catalogEntry.row) {
+          const sel = catalogEntry.row.querySelector('select') as HTMLSelectElement | null;
+          if (sel && sel.options.length > 1) {
+            const opt = Array.from(sel.options).find((o) => (o.textContent || '').toLowerCase().trim() === normReq);
+            if (opt && opt.value) {
+              sel.value = opt.value;
+            } else {
+              for (let i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value && !sel.options[i].disabled) {
+                  sel.selectedIndex = i;
+                  break;
                 }
               }
-              sel.dispatchEvent(new Event('change', { bubbles: true }));
-              sel.dispatchEvent(new Event('input', { bubbles: true }));
             }
-            matched = true;
-            break;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            sel.dispatchEvent(new Event('input', { bubbles: true }));
           }
         }
 
-        // 2. Match standard checkbox inputs
-        if (!matched) {
-          for (const inp of inputs) {
-            const val = (inp.value || inp.getAttribute('data-role') || inp.getAttribute('data-chckrole') || '').toLowerCase().trim();
-            const label = (inp.closest('label')?.textContent || inp.parentElement?.textContent || '').toLowerCase().trim();
-            if (val === normReq || label.includes(normReq)) {
-              if (!inp.checked) {
-                inp.checked = true;
-                inp.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              matched = true;
-              break;
-            }
-          }
-        }
-
-        if (matched) {
-          foundRoles.push(reqRole);
-        } else {
-          notFoundRoles.push(reqRole);
-        }
+        foundRoles.push(catalogEntry.canonicalName);
       }
 
       return { foundRoles, notFoundRoles };
@@ -1370,77 +1470,77 @@ export class UserManagementExecutor {
 
     // 4. Reload or Reselect User to Verify Saved Roles
     onProgress?.('Verifying saved roles');
-    const verificationRes = await page.evaluate((args: { reqRoles: string[]; uname: string; fName?: string }) => {
-      const { reqRoles, uname, fName } = args;
-      const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tbody tr, table tbody tr'));
-      const inputs = Array.from(document.querySelectorAll('table#adduserrole input[type="checkbox"], input[type="checkbox"]')) as HTMLInputElement[];
-      const checkedRoles: string[] = [];
+    let verificationRes: {
+      checkedRoles: string[];
+      verifiedCount: number;
+      allVerified: boolean;
+      verifiedRoles: string[];
+    } = { checkedRoles: [], verifiedCount: 0, allVerified: false, verifiedRoles: [] };
 
-      for (const row of rows) {
-        const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
-        const checkRoleTd = row.querySelector('td.checkrole');
-        const tds = Array.from(row.querySelectorAll('td')).map((td) => (td.textContent || '').trim());
-        const rowText = (row.textContent || '').trim();
-        const optionsText = Array.from(row.querySelectorAll('option')).map((o) => (o.textContent || '').trim()).join(' ');
-        const label = checkRoleTd ? (checkRoleTd.textContent || '').trim() : '';
-        const val = cb ? (cb.getAttribute('data-chckrole') || cb.value || '').trim() : '';
+    let verificationInconclusive = false;
+    let verificationErrorDetails = '';
 
-        if (cb && cb.checked) {
-          checkedRoles.push(label || val || rowText);
-          for (const r of reqRoles) {
-            const rNorm = r.toLowerCase().trim();
-            if ((label && label.toLowerCase().includes(rNorm)) || (val && val.toLowerCase() === rNorm) || rowText.toLowerCase().includes(rNorm) || optionsText.toLowerCase().includes(rNorm)) {
-              if (!checkedRoles.includes(r)) checkedRoles.push(r);
+    try {
+      verificationRes = await page.evaluate((args: { reqRoles: string[]; uname: string; fName?: string }) => {
+        const { reqRoles, uname, fName } = args;
+        const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tbody tr, table tbody tr'));
+        const inputs = Array.from(document.querySelectorAll('table#adduserrole input[type="checkbox"], input[type="checkbox"]')) as HTMLInputElement[];
+        const checkedRoles: string[] = [];
+
+        for (const row of rows) {
+          const cb = row.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+          const checkRoleTd = row.querySelector('td.checkrole');
+          const tds = Array.from(row.querySelectorAll('td')).map((td) => (td.textContent || '').trim());
+          const label = checkRoleTd ? (checkRoleTd.textContent || '').trim() : '';
+          const val = cb ? (cb.getAttribute('data-chckrole') || cb.value || '').trim() : '';
+
+          if (cb && cb.checked) {
+            const canonicalLabel = label || (cb.getAttribute('data-chckrole') || cb.value || '').trim();
+            if (canonicalLabel && !checkedRoles.includes(canonicalLabel)) {
+              checkedRoles.push(canonicalLabel);
+            }
+          }
+
+          // Check if on /userRole registry table (Columns: S.NO(0), User Name(1), User Id(2), Role(3))
+          if (tds.length >= 4) {
+            const rowUserName = tds[1]?.toLowerCase() || '';
+            const rowUserId = tds[2]?.toLowerCase() || '';
+            const rowRole = tds[3]?.trim() || '';
+            const cleanUname = uname.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const cleanRowUser = rowUserId.replace(/[^a-z0-9]/g, '');
+            const matchesTarget = rowUserId === uname.toLowerCase() || rowUserName === uname.toLowerCase() || (cleanUname && cleanRowUser === cleanUname) || (fName && rowUserName.includes(fName.toLowerCase()));
+            if (matchesTarget && rowRole && !checkedRoles.includes(rowRole)) {
+              checkedRoles.push(rowRole);
             }
           }
         }
 
-        // Check if on /userRole registry table (Columns: S.NO(0), User Name(1), User Id(2), Role(3))
-        if (tds.length >= 4) {
-          const rowUserName = tds[1]?.toLowerCase() || '';
-          const rowUserId = tds[2]?.toLowerCase() || '';
-          const rowRole = tds[3]?.toUpperCase() || '';
-          const cleanUname = uname.toLowerCase().replace(/[^a-z0-9]/g, '');
-          const cleanRowUser = rowUserId.replace(/[^a-z0-9]/g, '');
-          const matchesTarget = rowUserId === uname.toLowerCase() || rowUserName === uname.toLowerCase() || (cleanUname && cleanRowUser === cleanUname) || (fName && rowUserName.includes(fName.toLowerCase()));
-          if (matchesTarget && rowRole) {
-            checkedRoles.push(rowRole);
-            for (const r of reqRoles) {
-              const rNorm = r.toUpperCase().trim();
-              if (rowRole === rNorm || rowRole.includes(rNorm) || (rNorm.includes('BILL') && rowRole.includes('BILL'))) {
-                if (!checkedRoles.includes(r)) checkedRoles.push(r);
-              }
-            }
+        for (const inp of inputs) {
+          if (inp.checked) {
+            const label = (inp.closest('label')?.textContent || inp.parentElement?.textContent || inp.getAttribute('data-chckrole') || inp.getAttribute('data-role') || inp.value || '').trim();
+            if (label && !checkedRoles.includes(label)) checkedRoles.push(label);
           }
         }
-      }
 
-      for (const inp of inputs) {
-        if (inp.checked) {
-          const val = inp.getAttribute('data-chckrole') || inp.getAttribute('data-role') || inp.value || '';
-          const label = inp.closest('label')?.textContent || inp.parentElement?.textContent || '';
-          if (val && !checkedRoles.includes(val)) checkedRoles.push(val);
-          if (label && !checkedRoles.includes(label)) checkedRoles.push(label);
-        }
-      }
-
-      const verifiedRoles = reqRoles.filter((r) =>
-        checkedRoles.some((c) => {
-          const cNorm = c.toLowerCase().trim();
+        // Strict exact matching (case-insensitive)
+        const verifiedRoles = reqRoles.filter((r) => {
           const rNorm = r.toLowerCase().trim();
-          return cNorm === rNorm || cNorm.includes(rNorm) || (rNorm.includes('bill') && cNorm.includes('bill'));
-        })
-      );
+          return checkedRoles.some((c) => c.toLowerCase().trim() === rNorm);
+        });
 
-      return {
-        checkedRoles,
-        verifiedCount: verifiedRoles.length,
-        allVerified: verifiedRoles.length === reqRoles.length || checkedRoles.length >= reqRoles.length,
-        verifiedRoles,
-      };
-    }, { reqRoles: rolesArray, uname: username, fName: fullName || firstName });
+        return {
+          checkedRoles,
+          verifiedCount: verifiedRoles.length,
+          allVerified: verifiedRoles.length === reqRoles.length,
+          verifiedRoles,
+        };
+      }, { reqRoles: rolesArray, uname: username, fName: fullName || firstName });
+    } catch (e: any) {
+      verificationInconclusive = true;
+      verificationErrorDetails = e?.message || 'Exception during in-page role verification';
+    }
 
-    if (!verificationRes.allVerified) {
+    if (!verificationRes.allVerified && !verificationInconclusive) {
       // Navigate to /userRole registry screen to inspect persisted user roles in the live registry table
       const userRoleListUrl = roleUrl.replace(/\/addUserRole\b/i, '/userRole');
       try {
@@ -1458,21 +1558,18 @@ export class UserManagementExecutor {
             if (tds.length >= 4) {
               const rowUserName = tds[1]?.toLowerCase() || '';
               const rowUserId = tds[2]?.toLowerCase() || '';
-              const rowRole = tds[3]?.toUpperCase() || '';
+              const rowRole = tds[3]?.trim() || '';
               const cleanRowUser = rowUserId.replace(/[^a-z0-9]/g, '');
               const matchesTarget = rowUserId === uname.toLowerCase() || rowUserName === uname.toLowerCase() || (cleanUname && cleanRowUser === cleanUname) || (fName && rowUserName.includes(fName.toLowerCase()));
-              if (matchesTarget && rowRole) {
+              if (matchesTarget && rowRole && !foundRoles.includes(rowRole)) {
                 foundRoles.push(rowRole);
               }
             }
           }
-          const verifiedRoles = reqRoles.filter((r) =>
-            foundRoles.some((c) => {
-              const cNorm = c.toLowerCase().trim();
-              const rNorm = r.toLowerCase().trim();
-              return cNorm === rNorm || cNorm.includes(rNorm) || (rNorm.includes('bill') && cNorm.includes('bill'));
-            })
-          );
+          const verifiedRoles = reqRoles.filter((r) => {
+            const rNorm = r.toLowerCase().trim();
+            return foundRoles.some((c) => c.toLowerCase().trim() === rNorm);
+          });
           return {
             foundRoles,
             verifiedCount: verifiedRoles.length,
@@ -1486,7 +1583,33 @@ export class UserManagementExecutor {
           verificationRes.verifiedRoles = registryRes.verifiedRoles;
           verificationRes.verifiedCount = registryRes.verifiedCount;
         }
-      } catch {}
+      } catch (err: any) {
+        // If navigation or query fails after submit, verification is inconclusive
+        verificationInconclusive = true;
+        verificationErrorDetails = err?.message || 'Registry verification navigation failed';
+      }
+    }
+
+    if (verificationInconclusive) {
+      const failureReason = `Role verification inconclusive: ${verificationErrorDetails || 'Unable to confirm saved roles on remote portal'}`;
+      onProgress?.(failureReason);
+      return {
+        success: false,
+        username,
+        userSearchState: 'EXACT_MATCH_FOUND',
+        roleSelectionState: 'SELECTED',
+        roleUpdateState: 'COMPLETED',
+        roleVerificationState: 'FAILED',
+        overallStatus: 'PARTIAL_FAILED',
+        requestedRoles: rolesArray,
+        mappedRoles: verificationRes.verifiedRoles || [],
+        missingRoles: rolesArray.filter((r) => !(verificationRes.verifiedRoles || []).includes(r)),
+        roleSelectionProgress,
+        failureReason,
+        errorCode: 'ROLE_VERIFICATION_UNKNOWN',
+        errorMessage: failureReason,
+        retryStartingPoint: 'ROLE_MAPPING',
+      };
     }
 
     if (!verificationRes.allVerified) {

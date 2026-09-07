@@ -26,8 +26,9 @@ import {
   Clock,
   UserCheck,
   UserX,
-  ExternalLink,
   RotateCcw,
+  X,
+  Check,
 } from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { Modal } from '../components/Modal.js';
@@ -42,6 +43,7 @@ import {
   ExcelUserImportExecutionSummary,
   ClientCreateFormMetadata,
   PERMISSIONS,
+  computeRoleDiff,
 } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
 
@@ -130,6 +132,25 @@ export const UsersPage: React.FC = () => {
     barcodeNumber: '',
     status: 'ACTIVE',
   });
+
+  // Multi-Role State for Create User Modal
+  const [selectedCreateRoles, setSelectedCreateRoles] = useState<string[]>([]);
+  const [createRoleSearch, setCreateRoleSearch] = useState<string>('');
+
+  // Manage Roles Modal State (Additive role action for existing users)
+  const [isManageRolesModalOpen, setIsManageRolesModalOpen] = useState<boolean>(false);
+  const [manageRolesUser, setManageRolesUser] = useState<ClientUser | null>(null);
+  const [manageRolesLoading, setManageRolesLoading] = useState<boolean>(false);
+  const [manageRolesSubmitting, setManageRolesSubmitting] = useState<boolean>(false);
+  const [manageRolesError, setManageRolesError] = useState<string | null>(null);
+  const [manageRolesSuccess, setManageRolesSuccess] = useState<string | null>(null);
+  const [manageRolesDataSource, setManageRolesDataSource] = useState<'SNAPSHOT' | 'REMOTE_LIVE' | null>(null);
+  const [manageRolesLastSyncedAt, setManageRolesLastSyncedAt] = useState<string | null>(null);
+  const [manageRolesRefreshing, setManageRolesRefreshing] = useState<boolean>(false);
+  const [userExistingRoles, setUserExistingRoles] = useState<string[]>([]);
+  const [availableClientRoles, setAvailableClientRoles] = useState<string[]>([]);
+  const [selectedRolesToAdd, setSelectedRolesToAdd] = useState<string[]>([]);
+  const [manageRoleSearch, setManageRoleSearch] = useState<string>('');
 
   const [createError, setCreateError] = useState<string | null>(null);
   const [potentialDuplicate, setPotentialDuplicate] = useState<{
@@ -553,6 +574,8 @@ export const UsersPage: React.FC = () => {
     setPage(1);
     setActionMessage(null);
     setSelectedClientId(newClientId);
+    setSelectedCreateRoles([]);
+    setCreateRoleSearch('');
   };
 
   // Load users when client or filters change
@@ -796,6 +819,7 @@ export const UsersPage: React.FC = () => {
       mobileNumber: '',
       nationality: '',
       role: '',
+      roles: [],
       profileRole: '',
       barcodeNumber: '',
       signatureBase64: '',
@@ -807,6 +831,8 @@ export const UsersPage: React.FC = () => {
       status: 'ACTIVE',
       overrideDuplicateName: false,
     });
+    setSelectedCreateRoles([]);
+    setCreateRoleSearch('');
     setIsCreateModalOpen(true);
     await loadFormOptions(selectedClientId);
   };
@@ -823,13 +849,14 @@ export const UsersPage: React.FC = () => {
         body: JSON.stringify({ clientId: selectedClientId, username: uname }),
       });
       setIsCreateModalOpen(false);
-      setCreateError(null);
-      setPotentialDuplicate(null);
-      setIsConfirmingCreate(false);
-      setActionMessage({ type: 'success', text: `✓ ${res.message || `User '${uname}' reconciled and verified successfully.`}` });
+      setActionMessage({
+        type: 'success',
+        text: `✓ User '${uname}' was already created remotely. Synchronized to Central Console.`,
+      });
       await loadUsers();
     } catch (err: any) {
-      setCreateError(err.message || `Could not reconcile user '${uname}'.`);
+      const msg = err.message || 'Verification check failed.';
+      setActionMessage({ type: 'error', text: msg });
     } finally {
       setIsReconciling(false);
     }
@@ -842,6 +869,10 @@ export const UsersPage: React.FC = () => {
       setCreateError('Client ID is required.');
       return;
     }
+    if (selectedCreateRoles.length === 0) {
+      setCreateError('At least one role must be selected.');
+      return;
+    }
     if (!isConfirmingCreate) {
       setIsConfirmingCreate(true);
       return;
@@ -851,9 +882,12 @@ export const UsersPage: React.FC = () => {
     setPotentialDuplicate(null);
 
     try {
+      const canonicalRolesString = selectedCreateRoles.join(', ');
       const payload: CreateClientUserDto = {
         ...createForm,
         clientId: selectedClientId,
+        role: canonicalRolesString,
+        roles: selectedCreateRoles,
       };
 
       const res = await ApiClient.request<ClientUser>('/client-users', {
@@ -894,6 +928,7 @@ export const UsersPage: React.FC = () => {
         mobileNumber: '',
         nationality: '',
         role: '',
+        roles: [],
         profileRole: '',
         barcodeNumber: '',
         signatureBase64: '',
@@ -905,6 +940,8 @@ export const UsersPage: React.FC = () => {
         status: 'ACTIVE',
         overrideDuplicateName: false,
       });
+      setSelectedCreateRoles([]);
+      setCreateRoleSearch('');
 
       await loadUsers();
     } catch (err: any) {
@@ -1098,6 +1135,129 @@ export const UsersPage: React.FC = () => {
       setActionMessage({ type: 'error', text: `Password reset failed: ${cleanError}` });
     } finally {
       setIsMutatingReset(false);
+    }
+  };
+
+  // Manage Roles Modal Handlers (Additive action for existing users)
+  const handleOpenManageRoles = async (user: ClientUser) => {
+    setManageRolesUser(user);
+    setManageRolesError(null);
+    setManageRolesSuccess(null);
+    setSelectedRolesToAdd([]);
+    setManageRoleSearch('');
+    setIsManageRolesModalOpen(true);
+    setManageRolesLoading(true);
+
+    try {
+      // Fetch user's current roles and client's live available roles strictly from central snapshot
+      const res = await ApiClient.request<{
+        username: string;
+        fullName: string;
+        currentRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        availableRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        dataSource: 'SNAPSHOT' | 'REMOTE_LIVE';
+        lastSyncedAt: string | null;
+        isSnapshotData: boolean;
+      }>(`/client-users/${user.id}/roles`);
+
+      const toNames = (arr: any[]) =>
+        (arr || []).map((r) => (typeof r === 'string' ? r : r?.canonicalRoleName || r?.roleName || r?.roleId || '')).filter(Boolean);
+
+      setUserExistingRoles(toNames(res.currentRoles));
+      setAvailableClientRoles(toNames(res.availableRoles));
+      setManageRolesDataSource(res.dataSource || 'SNAPSHOT');
+      setManageRolesLastSyncedAt(res.lastSyncedAt || null);
+    } catch (err: any) {
+      const msg = err.message || 'Failed to load user roles';
+      setManageRolesError(msg);
+      // Fallback: parse user.role from table
+      const fallbackCurrent = (user.role || '').split(',').map((r) => r.trim()).filter(Boolean);
+      setUserExistingRoles(fallbackCurrent);
+      setAvailableClientRoles(clientOptions.roles || []);
+      setManageRolesDataSource('SNAPSHOT');
+      setManageRolesLastSyncedAt(user.lastSyncedAt ? String(user.lastSyncedAt) : null);
+    } finally {
+      setManageRolesLoading(false);
+    }
+  };
+
+  const handleRefreshManageRoles = async () => {
+    if (!manageRolesUser || manageRolesRefreshing) return;
+    setManageRolesRefreshing(true);
+    setManageRolesError(null);
+    try {
+      const res = await ApiClient.request<{
+        username: string;
+        fullName: string;
+        currentRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        availableRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        dataSource: 'SNAPSHOT' | 'REMOTE_LIVE';
+        lastSyncedAt: string | null;
+        isSnapshotData: boolean;
+      }>(`/client-users/${manageRolesUser.id}/roles/refresh`, {
+        method: 'POST',
+      });
+
+      const toNames = (arr: any[]) =>
+        (arr || []).map((r) => (typeof r === 'string' ? r : r?.canonicalRoleName || r?.roleName || r?.roleId || '')).filter(Boolean);
+
+      setUserExistingRoles(toNames(res.currentRoles));
+      setAvailableClientRoles(toNames(res.availableRoles));
+      setManageRolesDataSource(res.dataSource || 'REMOTE_LIVE');
+      setManageRolesLastSyncedAt(res.lastSyncedAt || null);
+    } catch (err: any) {
+      setManageRolesError(err.message || 'Read-only remote refresh failed');
+    } finally {
+      setManageRolesRefreshing(false);
+    }
+  };
+
+  const handleManageRolesSubmit = async () => {
+    if (!manageRolesUser || selectedRolesToAdd.length === 0 || manageRolesSubmitting) return;
+
+    setManageRolesSubmitting(true);
+    setManageRolesError(null);
+    setManageRolesSuccess(null);
+
+    try {
+      const res = await ApiClient.request<{
+        success: boolean;
+        username: string;
+        rolesAdded: string[];
+        existingRoles: string[];
+        currentRoles: string[];
+        message: string;
+      }>(`/client-users/${manageRolesUser.id}/roles`, {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId: manageRolesUser.clientId || selectedClientId,
+          roles: selectedRolesToAdd,
+        }),
+      });
+
+      setManageRolesSuccess(res.message || 'Roles updated successfully.');
+      setUserExistingRoles(res.currentRoles || []);
+      setSelectedRolesToAdd([]);
+
+      // Update local table snapshot
+      setUsers((prev) =>
+        prev.map((u) => (u.id === manageRolesUser.id ? { ...u, role: (res.currentRoles || []).join(', ') } : u))
+      );
+
+      setActionMessage({
+        type: 'success',
+        text: `✓ Successfully mapped new roles for ${manageRolesUser.username}.`,
+      });
+
+      setTimeout(() => {
+        setIsManageRolesModalOpen(false);
+        setManageRolesSuccess(null);
+      }, 1200);
+    } catch (err: any) {
+      const msg = err.message || 'Failed to update roles in Simplex';
+      setManageRolesError(msg);
+    } finally {
+      setManageRolesSubmitting(false);
     }
   };
 
@@ -1932,6 +2092,25 @@ export const UsersPage: React.FC = () => {
                             );
                           })()}
 
+                          {/* Manage Roles in Simplex */}
+                          {canEdit && (() => {
+                            const mutation = getMutationState('Manage Roles', u);
+                            return (
+                              <button
+                                disabled={mutation.disabled}
+                                onClick={() => {
+                                  if (mutation.disabled) return;
+                                  handleOpenManageRoles(u);
+                                }}
+                                title={mutation.title}
+                                aria-label={`Manage Roles for ${u.username}`}
+                                className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              >
+                                <Shield className="w-3.5 h-3.5" />
+                              </button>
+                            );
+                          })()}
+
                           {/* Reset Password in Simplex */}
                           {canResetPassword && (() => {
                             const mutation = getMutationState('Reset Password in Simplex', u);
@@ -2273,24 +2452,91 @@ export const UsersPage: React.FC = () => {
               </select>
             </div>
             <div>
-              <label className="block text-slate-400 mb-1">Role</label>
-              <select
-                disabled={isLoadingOptions || !!optionsError || !formMetadata}
-                value={createForm.role}
-                onChange={(e) => setCreateForm({ ...createForm, role: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <option value="">{isLoadingOptions ? 'Loading roles…' : '-- Select Role --'}</option>
-                {formMetadata?.roles?.map((r: any) => {
-                  const val = typeof r === 'string' ? r : (r?.value || r?.label || '');
-                  const lbl = typeof r === 'string' ? r : (r?.label || r?.value || '');
-                  return (
-                    <option key={val} value={val}>
-                      {lbl}
-                    </option>
-                  );
-                })}
-              </select>
+              <label className="block text-slate-400 mb-1">
+                Roles * <span className="text-slate-500 font-normal text-[10px]">({selectedCreateRoles.length} selected)</span>
+              </label>
+
+              {/* Selected Role Chips */}
+              <div className="flex flex-wrap gap-1.5 mb-2 min-h-[28px] p-1.5 bg-slate-950/80 border border-slate-800 rounded-lg">
+                {selectedCreateRoles.length === 0 ? (
+                  <span className="text-[11px] text-slate-500 italic p-1">No roles selected — select one or more below</span>
+                ) : (
+                  selectedCreateRoles.map((role) => (
+                    <span
+                      key={role}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-sky-950/80 text-sky-300 border border-sky-800/80 rounded-md text-[11px] font-medium"
+                    >
+                      <span>{role}</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCreateRoles((prev) => prev.filter((r) => r !== role))}
+                        className="hover:text-red-400 p-0.5 rounded transition-colors"
+                        title={`Remove ${role}`}
+                        aria-label={`Remove role ${role}`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
+
+              {/* Role Search & Selection Dropdown / List */}
+              <div className="space-y-1">
+                <input
+                  type="text"
+                  placeholder="Filter available client roles…"
+                  value={createRoleSearch}
+                  onChange={(e) => setCreateRoleSearch(e.target.value)}
+                  disabled={isLoadingOptions || !!optionsError || !formMetadata}
+                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-white text-xs focus:outline-none focus:border-sky-500 disabled:opacity-50"
+                />
+
+                <div className="max-h-32 overflow-y-auto bg-slate-950 border border-slate-800 rounded-lg divide-y divide-slate-800/50">
+                  {isLoadingOptions ? (
+                    <div className="p-2 text-[11px] text-slate-500 italic">Loading roles…</div>
+                  ) : optionsError ? (
+                    <div className="p-2 text-[11px] text-red-400 italic">Options unavailable</div>
+                  ) : (
+                    (() => {
+                      const allRoles: string[] = (formMetadata?.roles || []).map((r: any) =>
+                        typeof r === 'string' ? r : (r?.roleName || r?.label || r?.value || '')
+                      ).filter(Boolean);
+
+                      const filtered = allRoles.filter((r) =>
+                        !createRoleSearch || r.toLowerCase().includes(createRoleSearch.toLowerCase())
+                      );
+
+                      if (filtered.length === 0) {
+                        return <div className="p-2 text-[11px] text-slate-500 italic">No matching roles found</div>;
+                      }
+
+                      return filtered.map((role) => {
+                        const isSelected = selectedCreateRoles.includes(role);
+                        return (
+                          <button
+                            key={role}
+                            type="button"
+                            onClick={() => {
+                              setSelectedCreateRoles((prev) =>
+                                isSelected ? prev.filter((r) => r !== role) : [...prev, role]
+                              );
+                            }}
+                            className={`w-full px-2.5 py-1.5 text-left text-[11px] flex items-center justify-between transition-colors ${
+                              isSelected
+                                ? 'bg-sky-950/60 text-sky-200 font-medium'
+                                : 'hover:bg-slate-900 text-slate-300'
+                            }`}
+                          >
+                            <span>{role}</span>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-sky-400" />}
+                          </button>
+                        );
+                      });
+                    })()
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -2346,7 +2592,9 @@ export const UsersPage: React.FC = () => {
                 <div>Full Name: <strong className="text-white">{createForm.firstName} {createForm.lastName}</strong></div>
                 <div>Mobile: <strong className="text-white">{createForm.mobileNumber}</strong></div>
                 <div>Nationality: <strong className="text-white">{createForm.nationality}</strong></div>
-                <div>Role: <strong className="text-white">{createForm.role}</strong></div>
+                <div className="col-span-2">
+                  Roles: <strong className="text-white">{selectedCreateRoles.join(', ')}</strong>
+                </div>
               </div>
               <p className="mt-2 text-[11px] text-slate-300">
                 This action will submit and verify the user directly on the selected Simplex client portal, then pull the updated directory.
@@ -2366,7 +2614,7 @@ export const UsersPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isLoadingOptions || !!optionsError || !formMetadata}
+                  disabled={isLoadingOptions || !!optionsError || !formMetadata || selectedCreateRoles.length === 0}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-emerald-950/50"
                 >
                   Confirm & Create on Client
@@ -2383,7 +2631,17 @@ export const UsersPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isLoadingOptions || !!optionsError || !formMetadata || !createForm.username || !createForm.firstName || !createForm.lastName || !createForm.mobileNumber || !createForm.nationality}
+                  disabled={
+                    isLoadingOptions ||
+                    !!optionsError ||
+                    !formMetadata ||
+                    !createForm.username ||
+                    !createForm.firstName ||
+                    !createForm.lastName ||
+                    !createForm.mobileNumber ||
+                    !createForm.nationality ||
+                    selectedCreateRoles.length === 0
+                  }
                   className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-sky-950/50"
                 >
                   Review & Create User
@@ -2833,6 +3091,249 @@ export const UsersPage: React.FC = () => {
                 {isMutatingReset ? 'Resetting in Simplex…' : 'Reset Password in Simplex'}
               </button>
             </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Manage Roles in Simplex (Additive role mapping for existing users) */}
+      <Modal
+        isOpen={isManageRolesModalOpen}
+        onClose={() => !manageRolesSubmitting && setIsManageRolesModalOpen(false)}
+        title="Manage User Roles in Simplex"
+      >
+        {manageRolesUser && (
+          <div className="space-y-4 text-xs">
+            {/* Header info */}
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div>
+                <span className="text-slate-400 text-[11px] block">Target User</span>
+                <span className="font-semibold text-white text-sm font-mono">{manageRolesUser.username}</span>
+                {manageRolesUser.fullName && (
+                  <span className="text-slate-400 text-xs block">({manageRolesUser.fullName})</span>
+                )}
+              </div>
+              <div className="text-right">
+                <span className="text-slate-400 text-[11px] block">Target Client</span>
+                <span className="font-semibold text-white font-mono text-xs">
+                  {selectedClient?.clientCode || manageRolesUser.clientName || 'N/A'}
+                </span>
+              </div>
+            </div>
+
+            {/* Data Source & Read-Only Refresh Control */}
+            <div className="flex items-center justify-between text-xs bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400 text-[11px]">Role Data Source:</span>
+                <span
+                  className={`font-semibold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider ${
+                    manageRolesDataSource === 'REMOTE_LIVE'
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                      : 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
+                  }`}
+                >
+                  {manageRolesDataSource === 'REMOTE_LIVE' ? 'Live Remote Verified' : 'Central Snapshot'}
+                </span>
+                {manageRolesLastSyncedAt && (
+                  <span className="text-slate-500 text-[10px]">
+                    (Synced: {new Date(manageRolesLastSyncedAt).toLocaleTimeString()})
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleRefreshManageRoles}
+                disabled={manageRolesRefreshing || manageRolesSubmitting || manageRolesLoading}
+                className="flex items-center gap-1.5 text-[11px] text-sky-400 hover:text-sky-300 font-medium px-2 py-1 rounded bg-sky-950/40 hover:bg-sky-900/50 border border-sky-800/50 transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${manageRolesRefreshing ? 'animate-spin' : ''}`} />
+                {manageRolesRefreshing ? 'Refreshing…' : 'Refresh from Portal'}
+              </button>
+            </div>
+
+            {/* Error & Success Banners */}
+            {manageRolesError && (
+              <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span className="text-[11px]">{manageRolesError}</span>
+              </div>
+            )}
+
+            {manageRolesSuccess && (
+              <div className="p-3 bg-emerald-950/80 border border-emerald-800 rounded-lg text-emerald-200 flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <span className="text-[11px]">{manageRolesSuccess}</span>
+              </div>
+            )}
+
+            {manageRolesLoading ? (
+              <div className="p-6 flex flex-col items-center justify-center gap-2 text-slate-400">
+                <Loader2 className="w-6 h-6 animate-spin text-sky-400" />
+                <span>Loading roles from Simplex portal…</span>
+              </div>
+            ) : (
+              <>
+                {/* Role Diff Summary Card */}
+                {(() => {
+                  const diff = computeRoleDiff(userExistingRoles, selectedRolesToAdd);
+                  return (
+                    <div className="p-3 bg-slate-950/90 rounded-lg border border-slate-800 space-y-2">
+                      <div className="font-bold text-slate-300 text-xs flex items-center justify-between">
+                        <span>Role Update Preview</span>
+                        <span className="text-[10px] text-sky-400 font-normal">Strictly Additive</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <span className="text-slate-500 block">Existing Roles ({diff.existingRoles.length}):</span>
+                          <span className="text-slate-300 font-medium">
+                            {diff.existingRoles.length > 0 ? diff.existingRoles.join(', ') : 'None'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-emerald-400 block">Roles to Add ({diff.rolesToAdd.length}):</span>
+                          <span className="text-emerald-300 font-semibold font-mono">
+                            {diff.rolesToAdd.length > 0 ? diff.rolesToAdd.join(', ') : 'None'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">Roles Unchanged ({diff.rolesUnchanged.length}):</span>
+                          <span className="text-slate-400">
+                            {diff.rolesUnchanged.length > 0 ? diff.rolesUnchanged.join(', ') : 'None'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">Roles Removed:</span>
+                          <span className="text-slate-400 italic">None (Protected)</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Existing Assigned Roles (Checked & Protected) */}
+                <div>
+                  <label className="block text-slate-400 mb-1.5 font-medium">
+                    Current Assigned Roles <span className="text-slate-500 font-normal text-[10px]">(Protected — cannot be removed)</span>
+                  </label>
+                  <div className="flex flex-wrap gap-1.5 p-2 bg-slate-950/60 border border-slate-800 rounded-lg">
+                    {userExistingRoles.length === 0 ? (
+                      <span className="text-[11px] text-slate-500 italic">No existing roles recorded</span>
+                    ) : (
+                      userExistingRoles.map((role) => (
+                        <span
+                          key={role}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 text-slate-300 border border-slate-700 rounded-md text-xs font-medium cursor-not-allowed opacity-80"
+                          title="Existing assigned role is preserved"
+                        >
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>{role}</span>
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Select Additional Roles */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-slate-400 font-medium">
+                      Select Additional Roles to Add
+                    </label>
+                    <span className="text-[11px] text-sky-400 font-semibold">
+                      {selectedRolesToAdd.length} selected to add
+                    </span>
+                  </div>
+
+                  <input
+                    type="text"
+                    placeholder="Search available client roles…"
+                    value={manageRoleSearch}
+                    onChange={(e) => setManageRoleSearch(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-white text-xs focus:outline-none focus:border-sky-500"
+                  />
+
+                  <div className="max-h-40 overflow-y-auto bg-slate-950 border border-slate-800 rounded-lg divide-y divide-slate-800/50">
+                    {(() => {
+                      const existingNormSet = new Set(userExistingRoles.map((r) => r.toLowerCase().trim()));
+                      const filtered = availableClientRoles.filter((r) => {
+                        if (existingNormSet.has(r.toLowerCase().trim())) return false;
+                        if (!manageRoleSearch) return true;
+                        return r.toLowerCase().includes(manageRoleSearch.toLowerCase());
+                      });
+
+                      if (filtered.length === 0) {
+                        return (
+                          <div className="p-3 text-[11px] text-slate-500 italic text-center">
+                            {availableClientRoles.length === 0
+                              ? 'No roles available for this client'
+                              : 'All available roles are already assigned to this user'}
+                          </div>
+                        );
+                      }
+
+                      return filtered.map((role) => {
+                        const isSelected = selectedRolesToAdd.includes(role);
+                        return (
+                          <button
+                            key={role}
+                            type="button"
+                            onClick={() => {
+                              setSelectedRolesToAdd((prev) =>
+                                isSelected ? prev.filter((r) => r !== role) : [...prev, role]
+                              );
+                            }}
+                            className={`w-full px-3 py-2 text-left text-xs flex items-center justify-between transition-colors ${
+                              isSelected
+                                ? 'bg-sky-950/60 text-sky-200 font-medium'
+                                : 'hover:bg-slate-900 text-slate-300'
+                            }`}
+                          >
+                            <span>{role}</span>
+                            <div className="flex items-center gap-2">
+                              {isSelected ? (
+                                <span className="flex items-center gap-1 text-[10px] text-sky-400 font-semibold bg-sky-950 px-1.5 py-0.5 rounded border border-sky-800">
+                                  <Check className="w-3 h-3" /> Will Add
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-500 hover:text-slate-300">
+                                  + Add
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
+
+                {/* Footer Buttons */}
+                <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+                  <button
+                    type="button"
+                    disabled={manageRolesSubmitting}
+                    onClick={() => setIsManageRolesModalOpen(false)}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={manageRolesSubmitting || selectedRolesToAdd.length === 0}
+                    onClick={handleManageRolesSubmit}
+                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded font-semibold shadow-lg shadow-sky-950/50 flex items-center gap-1.5"
+                  >
+                    {manageRolesSubmitting ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Updating Roles in Simplex…</span>
+                      </>
+                    ) : (
+                      <span>Update Roles in Simplex ({selectedRolesToAdd.length})</span>
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </Modal>

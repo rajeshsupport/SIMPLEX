@@ -52,6 +52,10 @@ import {
   isValidOneTimeEventId,
   computeOneTimeEventIdHash,
   SHA256_EMPTY_DIGEST,
+  MapExistingUserRolesDto,
+  computeRoleDiff,
+  toRoleItems,
+  ClientUserRoleItem,
 } from '@hmc/shared';
 import { AgentsService } from '../agents/agents.service.js';
 
@@ -915,6 +919,12 @@ export class ClientUsersService implements OnModuleInit {
       throw new ForbiddenException('Not authorized for this client');
     }
 
+    // Normalize roles using shared role engine
+    const rawRoles = (dto.roles && dto.roles.length > 0) ? dto.roles : (dto.role ? [dto.role] : []);
+    const roleValidation = parseAndValidateRoles(rawRoles);
+    const normalizedRoles = roleValidation.parsedRoles;
+    const canonicalRoleString = roleValidation.canonicalRoleString || normalizedRoles.join(', ') || null;
+
     // Securely discard any password-related properties from older clients/requests
     const sanitizedDto: CreateClientUserDto = {
       clientId: dto.clientId,
@@ -926,8 +936,8 @@ export class ClientUsersService implements OnModuleInit {
       email: dto.email,
       mobileNumber: dto.mobileNumber,
       nationality: dto.nationality,
-      role: dto.role,
-      roles: dto.roles,
+      role: canonicalRoleString || dto.role,
+      roles: normalizedRoles,
       profileRole: dto.profileRole,
       barcodeNumber: dto.barcodeNumber,
       signatureBase64: dto.signatureBase64,
@@ -1131,7 +1141,7 @@ export class ClientUsersService implements OnModuleInit {
           email: dto.email?.trim() || null,
           mobileNumber: dto.mobileNumber.trim(),
           nationality: dto.nationality,
-          role: dto.role || null,
+          role: canonicalRoleString || dto.role || null,
           profileRole: dto.profileRole || null,
           status: dto.status || 'ACTIVE',
           barcodeNumber: dto.barcodeNumber || null,
@@ -1710,6 +1720,341 @@ export class ClientUsersService implements OnModuleInit {
     } finally {
       releaseLock();
     }
+  }
+
+  /**
+   * Existing User Role Action:
+   * Maps additive roles to an existing client user.
+   * Enforces single-flight mutation locking (HTTP 409 if locked),
+   * strict additive semantics (existing roles remain checked and protected),
+   * exact role matching, and snapshot updates upon verification.
+   */
+  async mapExistingUserRoles(
+    id: string,
+    dto: MapExistingUserRolesDto,
+    user: JwtPayload
+  ): Promise<{
+    success: boolean;
+    username: string;
+    rolesAdded: string[];
+    existingRoles: string[];
+    currentRoles: string[];
+    message: string;
+  }> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id } });
+    if (!snapshot) throw new NotFoundException('Client user not found');
+
+    const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(client.id)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
+      });
+    }
+
+    const rawRoles = (Array.isArray(dto.roles) ? dto.roles : (dto.roles ? [dto.roles] : [])).map((r) =>
+      typeof r === 'string' ? r : (r as ClientUserRoleItem).canonicalRoleName
+    );
+    const normalizedInputRoles = parseAndValidateRoles(rawRoles).parsedRoles;
+
+    // Compute additive diff based on snapshot's existing roles
+    const currentRolesList = parseAndValidateRoles(snapshot.role || '').parsedRoles;
+    const diff = computeRoleDiff(currentRolesList, normalizedInputRoles);
+
+    if (diff.rolesToAdd.length === 0) {
+      return {
+        success: true,
+        username: snapshot.username,
+        rolesAdded: [],
+        existingRoles: diff.existingRoles,
+        currentRoles: diff.resultingRoles,
+        message: 'No new roles to add. All requested roles are already assigned.',
+      };
+    }
+
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
+
+    try {
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException({
+          code: 'DESKTOP_AGENT_OFFLINE',
+          message: 'Role mapping failed: Automation agent is offline.',
+        });
+      }
+
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
+
+      const routes = this.resolveClientUserRoutes(client);
+      const correlationId = crypto.randomUUID();
+
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'MAP_CLIENT_USER_ROLES' as any,
+        status: 'PENDING',
+        parametersJson: JSON.stringify({
+          taskType: 'MAP_CLIENT_USER_ROLES',
+          userId: user.sub,
+          username: snapshot.username,
+          fullName: snapshot.fullName,
+          clientBaseUrl: client.baseUrl,
+          clientAppPath: client.applicationPath,
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: routes.resolvedUsersUrl,
+          roleUrl: routes.resolvedRoleUrl,
+          credentials,
+          payload: {
+            username: snapshot.username,
+            fullName: snapshot.fullName,
+            requestedRoles: diff.resultingRoles, // Full additive set to verify and ensure checked
+            rolesToAdd: diff.rolesToAdd,
+            existingRoles: diff.existingRoles,
+          },
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      });
+
+      const savedRun = await this.runRepo.save(run);
+
+      // Wait for agent completion and remote verification (up to 30s)
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+      while (Date.now() - startTime < 30000) {
+        await new Promise((r) => setTimeout(r, 250));
+        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+          completedRun = r;
+          break;
+        }
+      }
+
+      if (!completedRun) {
+        savedRun.status = 'TIMED_OUT';
+        savedRun.errorMessage = 'Role mapping timed out: Automation agent did not respond within 30 seconds.';
+        await this.runRepo.save(savedRun).catch(() => {});
+        throw new BadRequestException({
+          code: 'CLIENT_MUTATION_TIMEOUT',
+          message: 'Role mapping timed out: Automation agent did not respond within 30 seconds.',
+        });
+      }
+
+      let parsedResult: any = {};
+      try {
+        parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+      } catch {}
+
+      if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+        const errorCode = parsedResult.errorCode || 'REMOTE_ROLE_MAPPING_FAILED';
+        const errorMsg = parsedResult.errorMessage || completedRun?.errorMessage || 'Role mapping failed on remote client portal.';
+        throw new BadRequestException({
+          code: errorCode,
+          message: errorMsg,
+        });
+      }
+
+      // Update local snapshot with resulting roles upon verified success
+      const newCanonicalRoles = diff.resultingRoles.join(', ');
+      snapshot.role = newCanonicalRoles;
+      snapshot.lastSyncedAt = new Date();
+      await this.snapshotRepo.save(snapshot);
+
+      // Record Audit
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USER_ROLES_UPDATED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: id,
+          result: 'SUCCESS',
+          correlationId,
+          detailsJson: JSON.stringify({
+            clientCode: client.clientCode,
+            username: snapshot.username,
+            runId: savedRun.id,
+            rolesAdded: diff.rolesToAdd,
+            existingRoles: diff.existingRoles,
+            resultingRoles: diff.resultingRoles,
+          }),
+        })
+      );
+
+      // Trigger background sync to refresh any portal details
+      this.syncClientUsers(client.id, user).catch((syncErr) => {
+        this.logger.warn(`Post-role-update background sync failed: ${syncErr.message}`);
+      });
+
+      return {
+        success: true,
+        username: snapshot.username,
+        rolesAdded: diff.rolesToAdd,
+        existingRoles: diff.existingRoles,
+        currentRoles: diff.resultingRoles,
+        message: `Successfully mapped ${diff.rolesToAdd.length} new role(s) to ${snapshot.username}.`,
+      };
+    } finally {
+      releaseLock();
+    }
+  }
+
+  /**
+   * Returns current roles and available client roles for an existing user strictly from central snapshot.
+   */
+  async getUserRoles(
+    id: string,
+    user: JwtPayload
+  ): Promise<{
+    username: string;
+    fullName: string;
+    currentRoles: ClientUserRoleItem[];
+    availableRoles: ClientUserRoleItem[];
+    dataSource: 'SNAPSHOT';
+    lastSyncedAt: string | null;
+    isSnapshotData: true;
+  }> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id } });
+    if (!snapshot) throw new NotFoundException('Client user not found');
+
+    const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(client.id)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    const currentRolesParsed = parseAndValidateRoles(snapshot.role || '').parsedRoles;
+
+    // Get live available roles for this client
+    let availableRaw: any[] = [];
+    try {
+      const formMeta = await this.getLiveFormOptions(client.id, user, false).catch(() => null);
+      if (formMeta && Array.isArray(formMeta.roles)) {
+        availableRaw = formMeta.roles;
+      }
+    } catch {}
+
+    const availableRoles = toRoleItems(availableRaw);
+    const currentRoles = toRoleItems(currentRolesParsed, availableRoles);
+
+    return {
+      username: snapshot.username,
+      fullName: snapshot.fullName,
+      currentRoles,
+      availableRoles,
+      dataSource: 'SNAPSHOT',
+      lastSyncedAt: snapshot.lastSyncedAt ? new Date(snapshot.lastSyncedAt).toISOString() : null,
+      isSnapshotData: true,
+    };
+  }
+
+  /**
+   * Performs read-only remote refresh of roles for an existing user.
+   * Protected with RBAC, single-flight locking, browser auto-close, and non-sensitive audit metadata.
+   */
+  async refreshUserRolesRemote(
+    id: string,
+    user: JwtPayload
+  ): Promise<{
+    username: string;
+    fullName: string;
+    currentRoles: ClientUserRoleItem[];
+    availableRoles: ClientUserRoleItem[];
+    dataSource: 'REMOTE_LIVE';
+    lastSyncedAt: string | null;
+    isSnapshotData: false;
+  }> {
+    let snapshot = await this.snapshotRepo.findOne({ where: { id } });
+    if (!snapshot) throw new NotFoundException('Client user not found');
+
+    const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(client.id)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    // Single-flight locking protection: prevents concurrent refresh collisions
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
+
+    try {
+      // 1. Trigger read-only pull sync with guaranteed browser context cleanup
+      await this.syncClientUsers(client.id, user);
+
+      // 2. Reload updated central snapshot
+      const reloaded = await this.snapshotRepo.findOne({ where: { id } });
+      if (reloaded) {
+        snapshot = reloaded;
+      }
+
+      // 3. Record non-sensitive audit metadata (no passwords or credentials)
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USER_ROLES_REFRESHED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: id,
+          result: 'SUCCESS',
+          detailsJson: JSON.stringify({
+            clientUserId: id,
+            username: snapshot.username,
+            remoteUserId: snapshot.remoteUserId,
+            refreshedAt: new Date().toISOString(),
+          }),
+        })
+      ).catch(() => {});
+    } finally {
+      // Guaranteed lock release on all outcomes
+      releaseLock();
+    }
+
+    const currentRolesParsed = parseAndValidateRoles(snapshot.role || '').parsedRoles;
+
+    let availableRaw: any[] = [];
+    try {
+      const formMeta = await this.getLiveFormOptions(client.id, user, true).catch(() => null);
+      if (formMeta && Array.isArray(formMeta.roles)) {
+        availableRaw = formMeta.roles;
+      }
+    } catch {}
+
+    const availableRoles = toRoleItems(availableRaw);
+    const currentRoles = toRoleItems(currentRolesParsed, availableRoles);
+
+    return {
+      username: snapshot.username,
+      fullName: snapshot.fullName,
+      currentRoles,
+      availableRoles,
+      dataSource: 'REMOTE_LIVE',
+      lastSyncedAt: snapshot.lastSyncedAt ? new Date(snapshot.lastSyncedAt).toISOString() : new Date().toISOString(),
+      isSnapshotData: false,
+    };
   }
 
   private static formOptionsCache = new Map<string, { timestamp: number; data: ClientCreateFormMetadata }>();

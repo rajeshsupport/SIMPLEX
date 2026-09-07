@@ -33,6 +33,7 @@ import {
   ExcelUserImportExecutionSummary,
   ClaimEphemeralCredentialDto,
   AckEphemeralCredentialDto,
+  MapExistingUserRolesDto,
 } from '@hmc/shared';
 
 @SkipThrottle()
@@ -179,6 +180,36 @@ export class ClientUsersController {
     @CurrentUser() user: JwtPayload
   ) {
     return this.clientUsersService.resetUserPassword(id, user);
+  }
+
+  @Post(':id/roles')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_EDIT)
+  @HttpCode(HttpStatus.OK)
+  async mapExistingUserRoles(
+    @Param('id') id: string,
+    @Body() dto: MapExistingUserRolesDto,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.mapExistingUserRoles(id, dto, user);
+  }
+
+  @Get(':id/roles')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getUserRoles(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.getUserRoles(id, user);
+  }
+
+  @Post(':id/roles/refresh')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @HttpCode(HttpStatus.OK)
+  async refreshUserRoles(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.refreshUserRolesRemote(id, user);
   }
 
   @Get('export-excel')

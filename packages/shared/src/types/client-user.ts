@@ -150,6 +150,24 @@ export interface UpdateClientUserDto {
   status?: ClientUserStatus;
 }
 
+export interface ClientUserRoleItem {
+  roleId: string;
+  canonicalRoleName: string;
+}
+
+export interface MapExistingUserRolesDto {
+  clientId: string;
+  roles: (string | ClientUserRoleItem)[];
+}
+
+export interface UserRoleDiff {
+  existingRoles: string[];
+  rolesToAdd: string[];
+  rolesUnchanged: string[];
+  rolesRemoved: string[];
+  resultingRoles: string[];
+}
+
 export type UserImportAction = 'CREATE' | 'UPDATE' | 'ACTIVATE' | 'DEACTIVATE';
 
 export type UserImportClassification =
