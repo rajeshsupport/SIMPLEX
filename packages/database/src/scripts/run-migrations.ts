@@ -4,6 +4,7 @@ import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialS
 import { AddUserDisableFields1700000000001 } from '../migrations/1700000000001-AddUserDisableFields.js';
 import { AddClientUserRoleRoute1700000000002 } from '../migrations/1700000000002-AddClientUserRoleRoute.js';
 import { AddClientResources1700000000003 } from '../migrations/1700000000003-AddClientResources.js';
+import { AlignClientResourceSnapshotsSchema1700000000004 } from '../migrations/1700000000004-AlignClientResourceSnapshotsSchema.js';
 
 export async function runMigrations(): Promise<void> {
   console.log('[MIGRATION] Initializing DataSource for migrations...');
@@ -19,6 +20,7 @@ export async function runMigrations(): Promise<void> {
     { timestamp: 1700000000001, name: 'AddUserDisableFields1700000000001', instance: new AddUserDisableFields1700000000001() },
     { timestamp: 1700000000002, name: 'AddClientUserRoleRoute1700000000002', instance: new AddClientUserRoleRoute1700000000002() },
     { timestamp: 1700000000003, name: 'AddClientResources1700000000003', instance: new AddClientResources1700000000003() },
+    { timestamp: 1700000000004, name: 'AlignClientResourceSnapshotsSchema1700000000004', instance: new AlignClientResourceSnapshotsSchema1700000000004() },
   ];
 
   try {

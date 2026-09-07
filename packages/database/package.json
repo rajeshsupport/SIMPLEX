@@ -11,7 +11,7 @@
     "typeorm": "typeorm-ts-node-commonjs",
     "migration:run": "node dist/scripts/run-migrations.js",
     "seed": "node dist/seeds/seed.js",
-    "test": "node dist/tests/envelope-encryption.test.js && node dist/tests/mssql-live.integration.test.js && node dist/tests/admin-bootstrap.test.js && node dist/tests/bootstrap-leak-audit.test.js",
+    "test": "node dist/tests/envelope-encryption.test.js && node dist/tests/mssql-live.integration.test.js && node dist/tests/admin-bootstrap.test.js && node dist/tests/bootstrap-leak-audit.test.js && node dist/tests/resource-schema-alignment.test.js",
     "admin:bootstrap": "node dist/scripts/admin-bootstrap.js",
     "admin:revoke-compromised": "node dist/scripts/revoke-compromised-account.js",
     "admin:mssql-audit": "node dist/scripts/mssql-evidence-audit.js"
