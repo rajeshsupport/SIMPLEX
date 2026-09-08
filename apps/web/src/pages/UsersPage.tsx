@@ -854,10 +854,22 @@ export const UsersPage: React.FC = () => {
         type: 'success',
         text: `✓ User '${uname}' was already created remotely. Synchronized to Central Console.`,
       });
-      await loadUsers();
     } catch (err: any) {
-      const msg = err.message || 'Verification check failed.';
-      setActionMessage({ type: 'error', text: msg });
+      const isNotFound =
+        err.code === 'USER_NOT_FOUND_ON_REMOTE' ||
+        err.status === 404 ||
+        (typeof err.message === 'string' &&
+          (err.message.includes('could not be verified') || err.message.includes('USER_NOT_FOUND_ON_REMOTE')));
+
+      if (isNotFound) {
+        setActionMessage({
+          type: 'info',
+          text: `User '${uname}' does not exist on remote Simplex. You may safely submit Create User.`,
+        });
+      } else {
+        const msg = err.message || 'Verification check failed.';
+        setActionMessage({ type: 'error', text: msg });
+      }
     } finally {
       setIsReconciling(false);
     }

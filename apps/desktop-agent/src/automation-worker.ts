@@ -1,6 +1,6 @@
 import { BrowserContext, Page } from 'playwright';
 import { BrowserProfileManager, BrowserLifecycleManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate, SelectorResolver } from '@hmc/automation';
-import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, normalizeClientBaseUrl } from '@hmc/shared';
+import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, normalizeClientBaseUrl, resolveTaskModePolicy, isMutationTaskType } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
 
@@ -45,45 +45,61 @@ export class AutomationWorker {
   public async executeTask(task: AgentTaskAssignment, onProgress?: (msg: string) => void): Promise<void> {
     const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
     
-    // Determine strict profile namespace
-    const isHeadlessSync =
-      task.taskType === 'SYNC_CLIENT_USERS_HEADLESS' ||
-      task.taskType === 'SYNC_CLIENT_USERS' ||
-      task.taskType === 'SYNC_CLIENT_RESOURCES_HEADLESS' ||
-      task.taskType === 'SYNC_CLIENT_RESOURCES' ||
-      task.taskType === 'SYNC_RESOURCES' ||
-      task.taskType === 'REFRESH_CLIENT_USER_ROLES';
-    const isInspectTask = task.taskType === 'INSPECT_CREATE_FORM_METADATA' || task.taskType === 'INSPECT_FORM_OPTIONS';
-    const isMutationTask = [
-      'CREATE_CLIENT_USER',
-      'CREATE_USER',
-      'EDIT_CLIENT_USER',
-      'EDIT_AND_UPDATE_CLIENT',
-      'SET_CLIENT_USER_STATUS',
-      'CHANGE_CLIENT_USER_STATUS',
-      'RESET_CLIENT_USER_PASSWORD',
-      'MAP_USER_ROLES',
-      'MAP_CLIENT_USER_ROLES',
-      'PROCESS_USER_FULL_WORKFLOW',
-      'CREATE_CLIENT_RESOURCE',
-      'CREATE_RESOURCE',
-      'EDIT_CLIENT_RESOURCE',
-      'SET_CLIENT_RESOURCE_STATUS',
-      'ACTIVATE_RESOURCE',
-      'DEACTIVATE_RESOURCE',
-      'MAP_RESOURCE_USER',
-      'PROCESS_RESOURCE_WORKFLOW',
-      'PROCESS_RESOURCE_ROW_WORKFLOW',
-      'IMPORT_CLIENT_RESOURCES',
-      'IMPORT_RESOURCES',
-      'IMPORT_RESOURCES_BATCH',
-    ].includes(task.taskType);
+    // Resolve immutable task mode policy — fail closed before browser launch on unknown types
+    let policy: any;
+    try {
+      policy = resolveTaskModePolicy(task.taskType, task.options);
+    } catch (policyErr: any) {
+      const errMsg = policyErr.message || `Unknown task type [${task.taskType}] rejected.`;
+      onProgress?.(`✗ Rejected task [${task.taskType}]: ${errMsg}`);
+      await this.agentClient.sendTelemetry(task.runId, {
+        status: 'FAILED',
+        errorMessage: errMsg,
+        totalDurationMs: 0,
+        resultData: {
+          success: false,
+          errorCode: 'UNCLASSIFIED_TASK_TYPE_BLOCKED',
+          errorMessage: errMsg,
+        },
+      });
+      return;
+    }
 
-    const namespace: 'interactive' | 'sync' | 'mutation' = isHeadlessSync || isInspectTask
-      ? 'sync'
-      : isMutationTask
-      ? 'mutation'
-      : 'interactive';
+    // Immutably derive effective execution mode, headedness, and leaveBrowserOpen exclusively from canonical policy
+    const effectiveIsHeaded = policy.isHeaded;
+    const effectiveExecutionMode = policy.executionMode;
+
+    const effectiveLeaveBrowserOpen =
+      policy.namespace === 'interactive'
+        ? task.options?.leaveBrowserOpen === true
+        : false;
+
+    if (policy.namespace === 'mutation') {
+      if (task.executionMode === 'HEADLESS_SYNC' || task.options?.isHeaded === false || process.env.HEADLESS === 'true') {
+        onProgress?.(`[POLICY ENFORCED] Task [${task.taskType}] is a mutation. Overriding requested headless mode to headed visible Chrome.`);
+      }
+    } else if (policy.namespace === 'read_only') {
+      if (task.executionMode === 'HEADED_MUTATION' || task.options?.isHeaded === true || process.env.HEADLESS === 'false') {
+        onProgress?.(`[POLICY ENFORCED] Task [${task.taskType}] is read-only. Enforcing headless mode.`);
+      }
+    }
+
+    const resolvedTask: AgentTaskAssignment = {
+      ...task,
+      executionMode: effectiveExecutionMode,
+      options: {
+        ...(task.options || {}),
+        isHeaded: effectiveIsHeaded,
+        leaveBrowserOpen: effectiveLeaveBrowserOpen,
+      },
+    };
+
+    const namespace: 'interactive' | 'sync' | 'mutation' =
+      policy.namespace === 'mutation'
+        ? 'mutation'
+        : policy.namespace === 'read_only'
+        ? 'sync'
+        : 'interactive';
 
     const profileKey = `${task.clientId}_${effectiveUserId}_${namespace}`;
 
@@ -94,7 +110,7 @@ export class AutomationWorker {
       return inFlight;
     }
 
-    const taskExecutionPromise = this.performTaskExecution(task, profileKey, effectiveUserId, namespace, onProgress);
+    const taskExecutionPromise = this.performTaskExecution(resolvedTask, profileKey, effectiveUserId, namespace, onProgress);
     this.singleFlightTasks.set(profileKey, taskExecutionPromise);
 
     try {
@@ -526,48 +542,7 @@ export class AutomationWorker {
     // =========================================================================
     // 2. REMOTE CLIENT MUTATION WORKFLOWS (VISIBLE CHROME - namespace: 'mutation')
     // =========================================================================
-    const isMutationTask = [
-      'CREATE_CLIENT_USER',
-      'CREATE_USER',
-      'EDIT_CLIENT_USER',
-      'EDIT_AND_UPDATE_CLIENT',
-      'SET_CLIENT_USER_STATUS',
-      'CHANGE_CLIENT_USER_STATUS',
-      'RESET_CLIENT_USER_PASSWORD',
-      'MAP_USER_ROLES',
-      'MAP_CLIENT_USER_ROLES',
-      'PROCESS_USER_FULL_WORKFLOW',
-      'CREATE_CLIENT_RESOURCE',
-      'CREATE_RESOURCE',
-      'EDIT_CLIENT_RESOURCE',
-      'SET_CLIENT_RESOURCE_STATUS',
-      'ACTIVATE_RESOURCE',
-      'DEACTIVATE_RESOURCE',
-      'MAP_RESOURCE_USER',
-      'PROCESS_RESOURCE_WORKFLOW',
-      'PROCESS_RESOURCE_ROW_WORKFLOW',
-      'IMPORT_CLIENT_RESOURCES',
-      'IMPORT_RESOURCES',
-      'IMPORT_RESOURCES_BATCH',
-    ].includes(task.taskType);
-
-
-    if (isMutationTask) {
-      if (task.executionMode === 'HEADLESS_SYNC' || task.options?.isHeaded === false) {
-        onProgress?.(`✗ Rejected task [${task.taskType}]: MUTATION_BROWSER_MODE_MISMATCH`);
-        await this.agentClient.sendTelemetry(task.runId, {
-          status: 'FAILED',
-          errorMessage: 'Mutation tasks cannot run in headless mode. Headed Chrome is required.',
-          totalDurationMs: Date.now() - startTime,
-          resultData: {
-            success: false,
-            errorCode: 'MUTATION_BROWSER_MODE_MISMATCH',
-            errorMessage: 'Mutation tasks cannot run in headless mode. Headed Chrome is required.',
-          },
-        });
-        return;
-      }
-
+    if (isMutationTaskType(task.taskType)) {
       await this.executeMutationWithLifecycle(task, effectiveUserId, startTime, onProgress);
       return;
     }

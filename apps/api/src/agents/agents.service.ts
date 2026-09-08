@@ -24,6 +24,7 @@ import {
   AgentHeartbeatPayload,
   AgentTaskAssignment,
   AutomationRunStepTelemetry,
+  resolveTaskModePolicy,
 } from '@hmc/shared';
 import { ClientsService } from '../clients/clients.service.js';
 
@@ -525,26 +526,11 @@ export class AgentsService {
     };
 
     const params = run.parametersJson ? JSON.parse(run.parametersJson) : {};
-    const isMutation = [
-      'CREATE_CLIENT_USER',
-      'CREATE_USER',
-      'MAP_USER_ROLES',
-      'EDIT_CLIENT_USER',
-      'EDIT_AND_UPDATE_CLIENT',
-      'SET_CLIENT_USER_STATUS',
-      'CHANGE_CLIENT_USER_STATUS',
-      'RESET_CLIENT_USER_PASSWORD',
-    ].includes(run.runType);
-
-    const isInteractive = [
-      'OPEN_INTERACTIVE_CLIENT_SESSION',
-      'INTERACTIVE_LOGIN',
-      'TEST_LOGIN',
-    ].includes(run.runType);
-
-    const isHeaded = isMutation || isInteractive || params.isHeaded === true;
-    const leaveBrowserOpen = params.leaveBrowserOpen === true;
-    const executionMode = (isMutation || isInteractive) ? ('HEADED_MUTATION' as const) : ('HEADLESS_SYNC' as const);
+    const taskPolicy = resolveTaskModePolicy(run.runType, params);
+    const leaveBrowserOpen =
+      taskPolicy.namespace === 'interactive'
+        ? params.leaveBrowserOpen === true
+        : false;
 
     return {
       runId: run.id,
@@ -556,13 +542,13 @@ export class AgentsService {
       targetRoute: params.targetRoute || client.usersRoute || '/users',
       workflowVersion: versionConfig,
       payload: params.payload || params,
-      executionMode,
+      executionMode: taskPolicy.executionMode,
       credentials: params.credentials || {
         username: creds?.username,
         password: creds?.password,
       },
       options: {
-        isHeaded,
+        isHeaded: taskPolicy.isHeaded,
         leaveBrowserOpen,
       },
     };

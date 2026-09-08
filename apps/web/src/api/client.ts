@@ -87,7 +87,11 @@ export class ApiClient {
       } catch {
         errBody = { message: res.statusText };
       }
-      throw new Error(errBody.message || errBody.error || `HTTP error ${res.status}`);
+      const err = new Error(errBody.message || errBody.error || `HTTP error ${res.status}`) as any;
+      err.code = errBody.code;
+      err.status = res.status;
+      err.response = errBody;
+      throw err;
     }
 
     // Handle CSV, Excel, or file blob responses
