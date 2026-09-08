@@ -404,6 +404,7 @@ export const UsersPage: React.FC = () => {
   const [statusMutationStage, setStatusMutationStage] = useState<string>('');
   const [statusMutationElapsed, setStatusMutationElapsed] = useState<number>(0);
   const [statusMutationError, setStatusMutationError] = useState<string | null>(null);
+  const [isStatusVerificationPending, setIsStatusVerificationPending] = useState(false);
   const [statusMutationSuccess, setStatusMutationSuccess] = useState<string | null>(null);
   const statusMutationTimerRef = useRef<any>(null);
 
@@ -1030,6 +1031,7 @@ export const UsersPage: React.FC = () => {
     const nextStatus = selectedUser.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     setIsMutatingStatus(true);
     setStatusMutationError(null);
+    setIsStatusVerificationPending(false);
     setStatusMutationSuccess(null);
     setStatusMutationStage('Preflight: Checking automation agent…');
     setStatusMutationElapsed(0);
@@ -1060,6 +1062,7 @@ export const UsersPage: React.FC = () => {
       setTimeout(() => {
         setIsStatusModalOpen(false);
         setStatusMutationSuccess(null);
+        setIsStatusVerificationPending(false);
         setStatusMutationStage('');
         setActionMessage({
           type: 'success',
@@ -1071,9 +1074,14 @@ export const UsersPage: React.FC = () => {
         clearInterval(statusMutationTimerRef.current);
         statusMutationTimerRef.current = null;
       }
-      const rawCode = err.code || err.errorCode || err.response?.code;
-      const rawMsg = err.message || '';
-      if (rawCode === 'DESKTOP_AGENT_OFFLINE' || rawMsg.toLowerCase().includes('offline')) {
+      const rawCode = err.code || err.errorCode || err.response?.code || err.response?.data?.code;
+      const rawStatus = err.status || err.response?.status;
+      const rawMsg = err.message || err.response?.data?.message || '';
+
+      if (rawStatus === 409 || rawCode === 'REMOTE_STATUS_VERIFICATION_UNKNOWN' || rawCode === 'MUTATION_SUBMITTED_VERIFICATION_PENDING') {
+        setIsStatusVerificationPending(true);
+        setStatusMutationError('Status action may have completed, but verification is pending. No automatic second click was performed. Use Refresh Current Status before retrying.');
+      } else if (rawCode === 'DESKTOP_AGENT_OFFLINE' || rawMsg.toLowerCase().includes('offline')) {
         setStatusMutationError('Automation Agent is offline. Start/reconnect the agent and retry.');
       } else if (rawCode === 'REMOTE_USER_NOT_PRESENT' || rawMsg.includes('REMOTE_USER_NOT_PRESENT')) {
         setStatusMutationError('REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.');
@@ -1098,6 +1106,7 @@ export const UsersPage: React.FC = () => {
     }
     setIsStatusModalOpen(false);
     setStatusMutationError(null);
+    setIsStatusVerificationPending(false);
     setStatusMutationSuccess(null);
     setStatusMutationStage('');
     setStatusMutationElapsed(0);
@@ -2990,13 +2999,35 @@ export const UsersPage: React.FC = () => {
 
             {/* 3. Error State */}
             {statusMutationError && !isMutatingStatus && (
-              <div className="p-4 bg-red-950/70 border border-red-800 rounded-lg space-y-2">
-                <div className="flex items-center gap-2 text-red-300 font-semibold text-sm">
-                  <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
-                  <span>Operation Failed</span>
+              <div className={`p-4 rounded-lg space-y-2 ${
+                isStatusVerificationPending
+                  ? 'bg-amber-950/70 border border-amber-800'
+                  : 'bg-red-950/70 border border-red-800'
+              }`}>
+                <div className={`flex items-center gap-2 font-semibold text-sm ${
+                  isStatusVerificationPending ? 'text-amber-300' : 'text-red-300'
+                }`}>
+                  <AlertCircle className={`w-5 h-5 shrink-0 ${
+                    isStatusVerificationPending ? 'text-amber-400' : 'text-red-400'
+                  }`} />
+                  <span>{isStatusVerificationPending ? 'Verification Pending' : 'Operation Failed'}</span>
                 </div>
-                <p className="text-red-300 text-xs pl-7">{statusMutationError}</p>
-                <div className="flex justify-end gap-2 pt-2 border-t border-red-900/50">
+                <div className={`text-xs pl-7 space-y-1 ${
+                  isStatusVerificationPending ? 'text-amber-200' : 'text-red-300'
+                }`}>
+                  {isStatusVerificationPending ? (
+                    <>
+                      <p className="font-medium">Status action may have completed, but verification is pending.</p>
+                      <p>No automatic second click was performed.</p>
+                      <p className="text-amber-300/80">Use Refresh Current Status before retrying.</p>
+                    </>
+                  ) : (
+                    <p>{statusMutationError}</p>
+                  )}
+                </div>
+                <div className={`flex justify-end gap-2 pt-2 border-t ${
+                  isStatusVerificationPending ? 'border-amber-900/50' : 'border-red-900/50'
+                }`}>
                   <button
                     type="button"
                     onClick={handleCloseStatusModal}
@@ -3004,14 +3035,28 @@ export const UsersPage: React.FC = () => {
                   >
                     Close
                   </button>
-                  <button
-                    type="button"
-                    onClick={handleStatusChange}
-                    className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold text-xs flex items-center gap-1.5"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    Retry
-                  </button>
+                  {isStatusVerificationPending ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        handleCloseStatusModal();
+                        await handleSyncUsers();
+                      }}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-semibold text-xs flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Refresh Current Status
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleStatusChange}
+                      className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold text-xs flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Retry
+                    </button>
+                  )}
                 </div>
               </div>
             )}

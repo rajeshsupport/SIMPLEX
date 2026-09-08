@@ -102,6 +102,17 @@ export interface MutationResult {
   pendingReconciliation?: boolean;
   errorCode?: string;
   errorMessage?: string;
+  overallStatus?: 'COMPLETED' | 'PARTIAL_FAILED' | 'FAILED';
+  statusChangeState?:
+    | 'PRECHECK'
+    | 'MUTATION_SUBMITTED'
+    | 'REMOTE_RESPONSE_RECEIVED'
+    | 'VERIFICATION_STARTED'
+    | 'VERIFIED'
+    | 'MUTATION_SUBMITTED_VERIFICATION_PENDING';
+  retryStartingPoint?: 'PRECHECK' | 'STATUS_VERIFICATION' | 'USER_CREATION' | 'ROLE_MAPPING' | 'VALIDATION' | 'NONE';
+  actionTaken?: 'MUTATED' | 'NO_CHANGE_REQUIRED' | 'NONE';
+  diagnostics?: any;
 }
 
 export interface RoleMappingResult {
@@ -148,6 +159,48 @@ export interface UserWorkflowResult {
 
 export class UserManagementExecutor {
   private static cachedClientDefaultPasswords = new Map<string, string>();
+
+  /**
+   * Strictly normalizes a raw status string or DOM text to 'ACTIVE' or 'INACTIVE'.
+   * Accepts only ACTIVE or INACTIVE (handling whitespace, mixed-case, newlines).
+   * Returns null if missing, blank, unsupported, or unreadable.
+   */
+  public static normalizeRemoteStatus(raw: string | null | undefined): ClientUserStatus | null {
+    if (!raw) return null;
+    const clean = raw.replace(/[\r\n\t]+/g, ' ').trim().toUpperCase();
+    if (!clean) return null;
+
+    if (
+      clean === 'ACTIVE' ||
+      clean === 'ENABLED' ||
+      clean === 'ON' ||
+      clean === 'TRUE' ||
+      clean === '✔' ||
+      clean.startsWith('ACTIVE ') ||
+      clean.endsWith(' ACTIVE')
+    ) {
+      return 'ACTIVE';
+    }
+
+    if (
+      clean === 'INACTIVE' ||
+      clean === 'DISABLED' ||
+      clean === 'OFF' ||
+      clean === 'FALSE' ||
+      clean === 'DEACTIVE' ||
+      clean === 'DEACTIVATED' ||
+      clean === '✖' ||
+      clean === 'BLOCK' ||
+      clean === 'BLOCKED' ||
+      clean === 'LOCKED' ||
+      clean.startsWith('INACTIVE ') ||
+      clean.endsWith(' INACTIVE')
+    ) {
+      return 'INACTIVE';
+    }
+
+    return null;
+  }
 
   public static recordClientDefaultPassword(url: string, password?: string): void {
     if (!password) return;
@@ -1891,7 +1944,7 @@ export class UserManagementExecutor {
     await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
     await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-    const metadata = await page.evaluate(
+    const metadata: ClientCreateFormMetadata = await page.evaluate(
       ({ clientId, applicationVersion, addUsersUrl }) => {
         const getOptions = (selectSelector: string, dependency?: string, labelPattern?: string) => {
           let selectEl = document.querySelector(selectSelector) as HTMLSelectElement | null;
@@ -1992,6 +2045,42 @@ export class UserManagementExecutor {
       },
       { clientId, applicationVersion, addUsersUrl }
     );
+
+    if ((!metadata.nationalities || metadata.nationalities.length === 0) && (!metadata.roles || metadata.roles.length === 0)) {
+      const diagnosis = await page.evaluate(() => {
+        const curUrl = window.location.href;
+        if (curUrl.includes('/login') || document.querySelector('#btnLogin, input[type="password"]')) {
+          return 'AUTHENTICATION_NOT_CONFIRMED' as const;
+        }
+
+        const customSelects = document.querySelectorAll(
+          '.ui-autocomplete, [role="combobox"], .select2, .custom-select, .dropdown-menu, div.select, ul.dropdown'
+        );
+        const nativeSelects = document.querySelectorAll('select');
+
+        if (customSelects.length > 0 && nativeSelects.length === 0) {
+          return 'CUSTOM_CONTROL_NOT_NATIVE_SELECT' as const;
+        }
+
+        const spinners = document.querySelectorAll('.loading, .spinner, .loader, .page-loader');
+        const emptySelects = Array.from(nativeSelects).filter((s) => s.options.length <= 1);
+        if (spinners.length > 0 || (emptySelects.length > 0 && emptySelects.length === nativeSelects.length && nativeSelects.length > 0)) {
+          return 'OPTIONS_LAZY_LOADED' as const;
+        }
+
+        if (nativeSelects.length > 0) {
+          const hasOptionData = Array.from(nativeSelects).some((s) => s.options.length > 1);
+          if (hasOptionData) {
+            return 'SELECTOR_PROFILE_MISMATCH' as const;
+          }
+          return 'NO_OPTIONS_AVAILABLE' as const;
+        }
+
+        return 'NO_OPTIONS_AVAILABLE' as const;
+      }).catch(() => 'NO_OPTIONS_AVAILABLE' as const);
+
+      metadata.diagnosisCode = diagnosis;
+    }
 
     return metadata;
   }
@@ -3484,8 +3573,34 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Helper to sanitize URL diagnostics, stripping query parameters, tokens, and fragments.
+   */
+  public static sanitizeUrlForDiagnostics(rawUrl: string): string {
+    if (!rawUrl || rawUrl === 'about:blank') return rawUrl || '';
+    try {
+      const parsed = new URL(rawUrl);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return rawUrl.split('?')[0].split('#')[0];
+    }
+  }
+
+  /**
    * Helper to ensure the browser session is authenticated before performing user mutations.
-   * Returns CLIENT_AUTO_LOGIN_FAILED if authentication fails rather than obscuring with downstream errors.
+   * Authentication handling has three explicit outcomes:
+   * A. Already Authenticated:
+   *    - Current URL is not login route
+   *    - Protected application layout is present
+   *    - Login form controls are absent
+   *    Returns: { authenticated: true, action: 'CONTINUE_EXISTING_SESSION', loginAttempted: false }
+   * B. Login Required:
+   *    - Current URL is configured login route or redirect to it
+   *    - Login controls (username/password) exist
+   *    - Submit control exists
+   *    - Protected application layout is absent
+   * C. Authentication State Indeterminate:
+   *    - Neither valid protected layout nor complete login form proven
+   *    Returns: { authenticated: false, errorCode: 'AUTH_STATE_INDETERMINATE', ... }
    */
   public static async ensureAuthenticated(
     page: Page,
@@ -3494,7 +3609,14 @@ export class UserManagementExecutor {
       loginUrl?: string;
       credentials?: { username: string; password?: string };
     }
-  ): Promise<{ authenticated: boolean; errorCode?: string; errorMessage?: string }> {
+  ): Promise<{
+    authenticated: boolean;
+    action?: 'CONTINUE_EXISTING_SESSION' | 'AUTHENTICATED_VIA_LOGIN';
+    loginAttempted?: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+    diagnostics?: any;
+  }> {
     const { targetUrl, loginUrl, credentials } = options;
 
     if (page.isClosed()) {
@@ -3508,56 +3630,72 @@ export class UserManagementExecutor {
     const targetLoginUrl =
       loginUrl || (targetUrl ? targetUrl.replace(/\/users.*$/i, '/login').replace(/\/addUsers.*$/i, '/login').replace(/\/addUserRole.*$/i, '/login').replace(/\/userRole.*$/i, '/login') : '/login');
 
-    // 1. If page is already open and not on about:blank / login, check if existing session is already valid
+    const protectedLayoutSelector =
+      '.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], #usersTable, table tbody tr, .header, .nav, a[href*="logout" i], button:has-text("Logout"), a:has-text("Logout"), a[href*="signout" i], button:has-text("Sign Out"), form#addUserForm, form#addRoleForm, #addUserForm, .btn-save, [data-testid="input-firstname"]';
+
     const currentUrl = page.url();
-    const isAlreadyOnApplication = currentUrl && currentUrl !== 'about:blank' && !currentUrl.includes('/login');
+    const isAlreadyOnApplication = Boolean(currentUrl && currentUrl !== 'about:blank' && !currentUrl.includes('/login'));
 
-    if (isAlreadyOnApplication) {
-      // If targetUrl is requested and different from currentUrl, attempt direct navigation within existing session
-      if (targetUrl && currentUrl !== targetUrl) {
-        try {
-          await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch {
-          // Downstream check verifies if destination rendered or redirected
-        }
-      }
+    // 1. Navigation handling:
+    // Case A: Fresh/blank page with credentials provided -> navigate to login URL to authenticate
+    // Case B: Already on application and targetUrl requested -> navigate to targetUrl within existing session
+    // Case C: Fresh/blank page without credentials -> navigate directly to targetUrl (let remote app redirect to login if protected)
+    // Case D: Current page at targetUrl lacks both protected layout and login controls (e.g. dirty POST-back error response) -> reload targetUrl
+    const initialProtected = (await page.locator(protectedLayoutSelector).count().catch(() => 0)) > 0;
+    const initialLogin = (await page.locator('#loginForm, input[type="password"]').count().catch(() => 0)) > 0;
 
-      // Check if session remains valid after navigating to targetUrl (no redirect to /login and no login button)
-      const postNavUrl = page.url();
-      const isRedirectedToLogin = postNavUrl.includes('/login') || (await page.locator('#btnLogin, [data-testid="btn-login"], input[type="password"]').count().catch(() => 0)) > 0;
-
-      if (!isRedirectedToLogin) {
-        const hasAuthIndicator = await page
-          .locator('.header-user-name, #welpag, .header-cus, .header-logo, #page, [data-testid="hmc-app-header"], .hmc-authenticated-layout, [data-testid="hmc-users-screen"], .header, .nav, a[href*="logout" i]')
-          .first()
-          .isVisible()
-          .catch(() => false);
-
-        if (hasAuthIndicator || !postNavUrl.includes('/login')) {
-          return { authenticated: true };
-        }
-      }
+    if (currentUrl === 'about:blank') {
+      const destination = (credentials && credentials.username && credentials.password) ? targetLoginUrl : (targetUrl || targetLoginUrl);
+      try {
+        await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
+    } else if (isAlreadyOnApplication && targetUrl && currentUrl !== targetUrl) {
+      try {
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
+    } else if (targetUrl && currentUrl === targetUrl && !initialProtected && !initialLogin) {
+      try {
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
     }
 
-    // 2. If session is not authenticated or was redirected to /login, perform authentication
-    if (credentials && credentials.username && credentials.password) {
-      if (!page.url().includes('/login')) {
-        try {
-          await page.goto(targetLoginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch (err: any) {
-          return {
-            authenticated: false,
-            errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: `Failed to navigate to login route: ${err.message}`,
-          };
-        }
-      }
+    const activeUrl = page.url();
+    const isLoginRoute = Boolean(activeUrl.includes('/login') || (targetLoginUrl && activeUrl.startsWith(targetLoginUrl)));
+    const protectedCount = await page.locator(protectedLayoutSelector).count().catch(() => 0);
+    const protectedLayoutPresent = protectedCount > 0;
+    const protectedLayoutAbsent = !protectedLayoutPresent;
 
-      const userLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 5000);
-      const passLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 5000);
-      const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 5000);
+    const usernameLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.USERNAME_FALLBACKS, 1000).catch(() => null);
+    const passwordLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.PASSWORD_FALLBACKS, 1000).catch(() => null);
+    const submitLoc = await SelectorResolver.findVisibleLocator(page, undefined, SelectorResolver.SUBMIT_FALLBACKS, 1000).catch(() => null);
 
-      if (!userLoc || !passLoc || !submitLoc) {
+    const loginControlsExist = Boolean(usernameLoc && passwordLoc);
+    const submitControlExists = Boolean(submitLoc);
+    const loginFormControlsAbsent = !loginControlsExist;
+
+    // =========================================================================
+    // Outcome A: Already Authenticated
+    // =========================================================================
+    if (!isLoginRoute && protectedLayoutPresent && loginFormControlsAbsent) {
+      return {
+        authenticated: true,
+        action: 'CONTINUE_EXISTING_SESSION',
+        loginAttempted: false,
+      };
+    }
+
+    // =========================================================================
+    // Outcome B: Login Required (All 4 conditions strictly true)
+    // 1. Current URL is configured login route or navigation redirected to it
+    // 2. Login username/password controls exist
+    // 3. Login submit control exists
+    // 4. Protected application layout is absent
+    // =========================================================================
+    const loginRequired = isLoginRoute && loginControlsExist && submitControlExists && protectedLayoutAbsent;
+
+    if (!loginRequired) {
+      // If on login route but missing controls -> definitive login failure
+      if (isLoginRoute && (!loginControlsExist || !submitControlExists)) {
         return {
           authenticated: false,
           errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
@@ -3565,9 +3703,36 @@ export class UserManagementExecutor {
         };
       }
 
-      await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
-      await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
-      await submitLoc.locator.click();
+      // If protected layout is present despite minor form artifacts
+      if (!isLoginRoute && protectedLayoutPresent) {
+        return {
+          authenticated: true,
+          action: 'CONTINUE_EXISTING_SESSION',
+          loginAttempted: false,
+        };
+      }
+
+      // Outcome C: Authentication State Indeterminate
+      const pageTitle = await page.title().catch(() => '');
+      return {
+        authenticated: false,
+        errorCode: 'AUTH_STATE_INDETERMINATE',
+        errorMessage: 'Session authentication state indeterminate: neither valid protected layout nor complete login form can be proven.',
+        diagnostics: {
+          currentUrl: this.sanitizeUrlForDiagnostics(activeUrl),
+          pageTitle,
+          redirectChain: [this.sanitizeUrlForDiagnostics(currentUrl), this.sanitizeUrlForDiagnostics(activeUrl)],
+          protectedLayoutCounts: protectedCount,
+          loginControlCounts: (usernameLoc ? 1 : 0) + (passwordLoc ? 1 : 0) + (submitLoc ? 1 : 0),
+        },
+      };
+    }
+
+    // 3. Perform authentication when all 4 conditions are proven
+    if (credentials && credentials.username && credentials.password) {
+      await SelectorResolver.fillInputReliably(usernameLoc!.locator, credentials.username);
+      await SelectorResolver.fillInputReliably(passwordLoc!.locator, credentials.password);
+      await submitLoc!.locator.click();
 
       try {
         await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
@@ -3579,7 +3744,7 @@ export class UserManagementExecutor {
           return {
             authenticated: false,
             errorCode: 'CLIENT_AUTO_LOGIN_FAILED',
-            errorMessage: `Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING. (${errMsg.trim()})`,
+            errorMessage: `Client administrator authentication failed: ${errMsg.trim()}`,
           };
         }
 
@@ -3589,7 +3754,7 @@ export class UserManagementExecutor {
           return {
             authenticated: false,
             errorCode: 'AUTH_SESSION_EXPIRED',
-            errorMessage: 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.',
+            errorMessage: 'Client administrator authentication failed. Session redirected to login.',
           };
         }
       }
@@ -3599,7 +3764,7 @@ export class UserManagementExecutor {
         return {
           authenticated: false,
           errorCode: 'AUTH_SESSION_EXPIRED',
-          errorMessage: 'Import paused: Client administrator authentication failed before role mapping. The user was created successfully, but role mapping is pending. Verify the selected client credential/session, then retry from ROLE_MAPPING.',
+          errorMessage: 'Client administrator authentication failed. Session remained on login.',
         };
       }
 
@@ -3618,16 +3783,16 @@ export class UserManagementExecutor {
       if (targetUrl && page.url() !== targetUrl) {
         try {
           await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch (targetNavErr: any) {
-          return {
-            authenticated: false,
-            errorCode: 'CLIENT_USERS_SCREEN_FAILED',
-            errorMessage: `Failed to open client application after login: ${targetNavErr.message}`,
-          };
+        } catch (e: any) {
+          console.warn(`Navigation to targetUrl '${targetUrl}' warning: ${e.message}`);
         }
       }
 
-      return { authenticated: true };
+      return {
+        authenticated: true,
+        action: 'AUTHENTICATED_VIA_LOGIN',
+        loginAttempted: true,
+      };
     } else {
       // No credentials provided: check if targetUrl is accessible directly or if session expired
       if (targetUrl) {
@@ -3767,7 +3932,7 @@ export class UserManagementExecutor {
 
     // Helper to inspect rows on current page in a single in-browser evaluation pass
     const inspectCurrentPageRows = async (): Promise<{
-      matches: { index: number; status: ClientUserStatus }[];
+      matches: { index: number; status?: ClientUserStatus }[];
       rowCount: number;
     }> => {
       if (page.isClosed()) {
@@ -3780,7 +3945,7 @@ export class UserManagementExecutor {
             const rows = Array.from(document.querySelectorAll(selector));
             const results: {
               index: number;
-              status: 'ACTIVE' | 'INACTIVE';
+              status?: 'ACTIVE' | 'INACTIVE';
             }[] = [];
 
             for (let i = 0; i < rows.length; i++) {
@@ -3809,48 +3974,31 @@ export class UserManagementExecutor {
               });
 
               let isMatch = false;
-              const cleanTarget = normTarget.replace(/[._\-]/g, '');
-              const cleanCellUser = cellUsername.replace(/[._\-]/g, '');
-              // Priority 1: exact remoteUserId match
-              if (targetRemoteUserId && dataId && dataId.toLowerCase() === targetRemoteUserId.toLowerCase()) {
-                isMatch = true;
-              }
-              // Priority 2: exact username column match (Column 2 or Name header)
-              if (!isMatch && cellUsername && (cellUsername === normTarget || (cleanTarget.length > 3 && cleanCellUser === cleanTarget))) {
-                isMatch = true;
-              }
-              // Priority 3: exact link / action parameter match (e.g. toggleStatus('sathishtest'), resetPassword('sathishtest'))
-              if (!isMatch) {
-                for (const linkText of links) {
-                  const userParamMatch = linkText.match(/(?:userId|username|toggleStatus|resetPassword|editUser|changeStatus)[=\/('",\s]+([^&'" ),]+)/i);
-                  if (userParamMatch) {
-                    const pUser = userParamMatch[1].trim().toLowerCase();
-                    const cleanPUser = pUser.replace(/[._\-]/g, '');
-                    if (pUser === normTarget || (cleanTarget.length > 3 && cleanPUser === cleanTarget)) {
-                      isMatch = true;
-                      break;
-                    }
-                  }
-                  if (linkText.toLowerCase().includes(`'${normTarget}'`) || linkText.toLowerCase().includes(`"${normTarget}"`)) {
-                    isMatch = true;
-                    break;
-                  }
+
+              // Rule 3: When remoteUserId is supplied and the row exposes a remote ID:
+              // exact match => continue; mismatch => reject immediately (do not fall back to name or broad row text)
+              if (targetRemoteUserId && dataId) {
+                if (dataId.trim().toLowerCase() === targetRemoteUserId.toLowerCase()) {
+                  isMatch = true;
+                } else {
+                  // Explicit mismatch: immediately reject, do NOT fall back to username or broad row text
+                  isMatch = false;
+                  continue;
                 }
-              }
-              // Priority 4: fallback match across non-name/status/action cells only if username column was unmapped
-              if (!isMatch && usernameColIdx === -1) {
-                for (let cIdx = 0; cIdx < cells.length; cIdx++) {
-                  if (cIdx !== fullNameColIdx && cIdx !== statusColIdx && cIdx !== actionColIdx && cIdx !== 0) {
-                    const ct = (cellTexts[cIdx] || '').trim().toLowerCase();
-                    if (ct === normTarget) {
-                      isMatch = true;
-                      break;
-                    }
-                  }
+              } else if (targetRemoteUserId && !dataId) {
+                // If remoteUserId was supplied but the row has no data-id attribute:
+                // allow ONLY exact normalized username match in the known username column
+                if (usernameColIdx >= 0 && cellUsername && cellUsername === normTarget) {
+                  isMatch = true;
+                }
+              } else {
+                // Rule 2: When remoteUserId is not supplied, allow ONLY exact normalized username match in known username column
+                if (usernameColIdx >= 0 && cellUsername && cellUsername === normTarget) {
+                  isMatch = true;
                 }
               }
 
-              let rowStatus: 'ACTIVE' | 'INACTIVE' = 'ACTIVE';
+              let rowStatus: 'ACTIVE' | 'INACTIVE' | undefined = undefined;
               if (statusColIdx >= 0 && statusColIdx < cells.length) {
                 const sc = cells[statusColIdx];
                 const innerText = (sc.textContent || '').toUpperCase();
@@ -3935,7 +4083,7 @@ export class UserManagementExecutor {
     };
 
     // Helper to build return match object
-    const buildMatchResult = async (matchedIndex: number, currentRemoteStatus: ClientUserStatus, matchCount: number) => {
+    const buildMatchResult = async (matchedIndex: number, currentRemoteStatus: ClientUserStatus | undefined, matchCount: number) => {
       const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
       const rowLocator = page.locator(tableSelector).nth(matchedIndex);
       let rowHandle: any = null;
@@ -4282,6 +4430,8 @@ export class UserManagementExecutor {
           loginUrl?: string;
           credentials?: { username: string; password?: string };
           onProgress?: (msg: string) => void;
+          onMutationDispatched?: () => void;
+          retryStartingPoint?: 'PRECHECK' | 'STATUS_VERIFICATION';
         },
     arg2?: string | ClientUserStatus,
     arg3?: ClientUserStatus
@@ -4294,6 +4444,13 @@ export class UserManagementExecutor {
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
     const onProgress = isObj ? arg1.onProgress : undefined;
+    const retryStartingPoint = isObj ? (arg1 as any).retryStartingPoint : undefined;
+
+    // =========================================================================
+    // STAGE 1: PRECHECK
+    // =========================================================================
+    let statusChangeState: MutationResult['statusChangeState'] = 'PRECHECK';
+    let mutationSubmitted = false;
 
     // 1. Ensure authenticated
     onProgress?.(`Logging in to selected Simplex client…`);
@@ -4302,8 +4459,11 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
         errorMessage: authRes.errorMessage || 'Automatic authentication to client failed.',
+        diagnostics: authRes.diagnostics,
       };
     }
 
@@ -4315,6 +4475,8 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: 'CLIENT_USERS_SCREEN_FAILED',
         errorMessage: `Failed to open users screen: ${navErr.message}`,
       };
@@ -4337,33 +4499,235 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: lookupRes.errorCode || 'REMOTE_USER_NOT_FOUND',
         errorMessage: lookupRes.errorMessage || `Target user '${username}' not found on client users list after searching all pages.`,
       };
     }
 
-    const { statusColIdx, currentRemoteStatus } = lookupRes;
-    const rowIndex = lookupRes.rowIndex ?? 0;
-    const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
-    const rowLocator = page.locator(tableSelector).nth(rowIndex);
-    const statusCellLocator = rowLocator.locator('td, [role="gridcell"], .cell').nth(statusColIdx!);
-
     if (page.isClosed()) {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: 'BROWSER_CONTEXT_CLOSED_BEFORE_ACTION',
         errorMessage: 'Browser page was closed before status mutation could be executed.',
       };
     }
 
-    const initialStatus = currentRemoteStatus || 'ACTIVE';
+    // Check for ambiguous match (multiple users matched)
+    if (lookupRes.diagnostics?.matchCount && lookupRes.diagnostics.matchCount > 1) {
+      return {
+        success: false,
+        username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'AMBIGUOUS_REMOTE_USER',
+        errorMessage: `Ambiguous user lookup: ${lookupRes.diagnostics.matchCount} rows matched '${username}'. Aborting to prevent mutating unintended user.`,
+        actionTaken: 'NONE',
+        retryStartingPoint: 'PRECHECK',
+      };
+    }
 
+    // 1. Require a valid exact matched row index - Never default to 0 / first row
+    const rowIndex = lookupRes.rowIndex;
+    if (typeof rowIndex !== 'number' || !Number.isInteger(rowIndex) || rowIndex < 0) {
+      return {
+        success: false,
+        username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+        errorMessage: `Matched row index is undefined or invalid for user '${username}'. First table row was not selected.`,
+        actionTaken: 'NONE',
+        retryStartingPoint: 'PRECHECK',
+      };
+    }
+
+    // 2. Carry exact matched row locator from lookup or re-resolve exact user - Never fall back to nth(rowIndex)
+    let rowLocator = lookupRes.rowLocator;
+    if (!rowLocator) {
+      // Re-resolve the exact user immediately using stable remote ID / exact username
+      const reLookup = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
+      if (reLookup.success && reLookup.rowLocator) {
+        rowLocator = reLookup.rowLocator;
+      } else {
+        return {
+          success: false,
+          username,
+          overallStatus: 'FAILED',
+          statusChangeState: 'PRECHECK',
+          errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+          errorMessage: `Exact row locator missing and re-resolution failed for user '${username}'. Never falling back to nth(rowIndex).`,
+          actionTaken: 'NONE',
+          retryStartingPoint: 'PRECHECK',
+        };
+      }
+    }
+
+    // 3. Validate statusColIdx is an integer >= 0 before creating the cell locator
+    const statusColIdx = lookupRes.statusColIdx;
+    if (typeof statusColIdx !== 'number' || !Number.isInteger(statusColIdx) || statusColIdx < 0) {
+      return {
+        success: false,
+        username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_STATUS_COLUMN_NOT_FOUND',
+        errorMessage: `Status column could not be resolved on users table for user '${username}'.`,
+        actionTaken: 'NONE',
+        retryStartingPoint: 'PRECHECK',
+        diagnostics: {
+          requestedUsername: username,
+          statusColIdx: String(statusColIdx),
+          rowIndex,
+        },
+      };
+    }
+
+    const statusCellLocator = rowLocator.locator('td, [role="gridcell"], [role="cell"], .cell').nth(statusColIdx);
+    if ((await statusCellLocator.count().catch(() => 0)) === 0) {
+      return {
+        success: false,
+        username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_STATUS_COLUMN_NOT_FOUND',
+        errorMessage: `Status cell not found at column index ${statusColIdx} for user '${username}'.`,
+        actionTaken: 'NONE',
+        retryStartingPoint: 'PRECHECK',
+        diagnostics: {
+          requestedUsername: username,
+          statusColIdx: String(statusColIdx),
+          rowIndex,
+        },
+      };
+    }
+
+    // 4. Stable user identity reverification on the matched row
+    // Identity matching allows ONLY exact remote user ID match, or exact normalized username match in known username column
+    const rowIdentity = await rowLocator.evaluate(
+      (el: HTMLElement, args: { normTarget: string; targetRemoteUserId?: string; usernameColIdx?: number }) => {
+        const cells = Array.from(el.querySelectorAll('td, [role="gridcell"], [role="cell"], .cell, .grid-cell'));
+        const cellTexts = cells.map((c) => (c.textContent || '').trim().toLowerCase());
+        const cellUsername = (args.usernameColIdx !== undefined && args.usernameColIdx >= 0 && args.usernameColIdx < cellTexts.length)
+          ? cellTexts[args.usernameColIdx]
+          : '';
+        const dataId = el.getAttribute('data-id') || el.getAttribute('data-user-id') || el.getAttribute('id') || '';
+
+        let matched = false;
+        // Rule 3: When remoteUserId is supplied and the row exposes a remote ID:
+        // exact match => continue; mismatch => reject immediately (do not fall back to name or broad row text)
+        if (args.targetRemoteUserId && dataId) {
+          matched = dataId.trim().toLowerCase() === args.targetRemoteUserId.toLowerCase();
+        } else if (cellUsername && cellUsername === args.normTarget) {
+          // Rule 2: exact normalized username match in known username column
+          matched = true;
+        }
+
+        return { matched, cellUsername, dataId };
+      },
+      { normTarget: username.trim().toLowerCase(), targetRemoteUserId: remoteUserId?.trim(), usernameColIdx: lookupRes.usernameColIdx }
+    ).catch(() => ({ matched: false, cellUsername: '', dataId: '' }));
+
+    if (!rowIdentity.matched) {
+      return {
+        success: false,
+        username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+        errorMessage: `Row identity mismatch at row index ${rowIndex}. Row does not match user '${username}'. First row fallback prevented.`,
+        actionTaken: 'NONE',
+        retryStartingPoint: 'PRECHECK',
+      };
+    }
+
+    // 5. Read live DOM status directly and strictly normalize - Accept ONLY ACTIVE or INACTIVE
+    const rawCellData = await statusCellLocator.evaluate((el: HTMLElement) => {
+      const inner = (el.textContent || '').replace(/[\r\n\t]+/g, ' ').trim();
+      const title = (el.getAttribute('title') || '').trim();
+      const aria = (el.getAttribute('aria-label') || '').trim();
+      const html = el.innerHTML.toLowerCase();
+      return { inner, title, aria, html };
+    }).catch(() => null);
+
+    let initialStatus: ClientUserStatus | null = null;
+    if (rawCellData) {
+      // Direct text normalization (handles mixed-case, whitespace, newlines e.g. "  Active \n", "  iNaCtIvE  ")
+      initialStatus =
+        UserManagementExecutor.normalizeRemoteStatus(rawCellData.inner) ||
+        UserManagementExecutor.normalizeRemoteStatus(rawCellData.title) ||
+        UserManagementExecutor.normalizeRemoteStatus(rawCellData.aria);
+
+      // Visual indicator classes
+      if (!initialStatus) {
+        const html = rawCellData.html;
+        const isInactive =
+          html.includes('status-inactive') ||
+          html.includes('glyphicon-remove') ||
+          html.includes('fa-times') ||
+          html.includes('fa-ban') ||
+          html.includes('badge-inactive') ||
+          html.includes('badge-danger') ||
+          html.includes('color:red') ||
+          html.includes('color: #ef4444') ||
+          html.includes('color:#ef4444');
+
+        const isActive =
+          !isInactive &&
+          (html.includes('status-active') ||
+            html.includes('glyphicon-ok') ||
+            html.includes('fa-check') ||
+            html.includes('badge-active') ||
+            html.includes('badge-success') ||
+            html.includes('color:green') ||
+            html.includes('color: #10b981') ||
+            html.includes('color:#10b981'));
+
+        if (isInactive) {
+          initialStatus = 'INACTIVE';
+        } else if (isActive) {
+          initialStatus = 'ACTIVE';
+        }
+      }
+    }
+
+    // Fallback to lookupRes.currentRemoteStatus only if strictly valid
+    if (!initialStatus && (lookupRes.currentRemoteStatus === 'ACTIVE' || lookupRes.currentRemoteStatus === 'INACTIVE')) {
+      initialStatus = lookupRes.currentRemoteStatus;
+    }
+
+    // If status is missing, blank, unsupported, or unreadable:
+    // - perform 0 clicks
+    // - return REMOTE_STATUS_PRECHECK_UNKNOWN
+    // - mark verification/action as pending or failed safely
+    // - map to HTTP 409
+    // - require read-only Refresh Current Status
+    if (!initialStatus || (initialStatus !== 'ACTIVE' && initialStatus !== 'INACTIVE')) {
+      return {
+        success: false,
+        username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_STATUS_PRECHECK_UNKNOWN',
+        errorMessage: `Remote status for user '${username}' could not be reliably determined from live DOM (status is missing, blank, or unsupported: '${rawCellData?.inner || ''}'). Perform a read-only Refresh Current Status before retrying.`,
+        actionTaken: 'NONE',
+        retryStartingPoint: 'PRECHECK',
+      };
+    }
+
+    // Idempotent check: If status already matches targetStatus, return NO_CHANGE_REQUIRED without clicking
     if (initialStatus === targetStatus) {
       return {
         success: true,
         username,
         status: targetStatus,
+        overallStatus: 'COMPLETED',
+        statusChangeState: 'VERIFIED',
+        actionTaken: 'NO_CHANGE_REQUIRED',
         message: `User '${username}' is already ${targetStatus} on remote client.`,
       };
     }
@@ -4388,6 +4752,8 @@ export class UserManagementExecutor {
       return {
         success: false,
         username,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
         errorCode: 'UNSAFE_REMOTE_ACTION_BLOCKED',
         errorMessage: `Unsafe action control detected in status cell for user '${username}'. Aborting.`,
       };
@@ -4409,11 +4775,147 @@ export class UserManagementExecutor {
     page.on('dialog', dialogHandler);
 
     try {
+      // Reverify exact remote user ID/username and reread current status immediately before click
+      const preClickState = await rowLocator.evaluate(
+        (el: HTMLElement, args: { normTarget: string; targetRemoteUserId?: string; usernameColIdx?: number; statusColIdx: number }) => {
+          const cells = Array.from(el.querySelectorAll('td, [role="gridcell"], [role="cell"], .cell, .grid-cell'));
+          const cellTexts = cells.map((c) => (c.textContent || '').trim().toLowerCase());
+          const cellUsername = (args.usernameColIdx !== undefined && args.usernameColIdx >= 0 && args.usernameColIdx < cellTexts.length)
+            ? cellTexts[args.usernameColIdx]
+            : '';
+          const dataId = el.getAttribute('data-id') || el.getAttribute('data-user-id') || el.getAttribute('id') || '';
+
+          // Rule 3: When remoteUserId is supplied and row exposes a remote ID:
+          // exact match => continue; mismatch => reject immediately
+          let identityValid = false;
+          if (args.targetRemoteUserId && dataId) {
+            identityValid = dataId.trim().toLowerCase() === args.targetRemoteUserId.toLowerCase();
+          } else if (cellUsername && cellUsername === args.normTarget) {
+            identityValid = true;
+          }
+
+          if (!identityValid) {
+            return { identityValid: false, ambiguous: false, inner: '', title: '', aria: '', html: '' };
+          }
+
+          if (args.statusColIdx < 0 || args.statusColIdx >= cells.length) {
+            return { identityValid: true, ambiguous: true, inner: '', title: '', aria: '', html: '' };
+          }
+
+          const sc = cells[args.statusColIdx];
+          const inner = (sc.textContent || '').replace(/[\r\n\t]+/g, ' ').trim();
+          const title = (sc.getAttribute('title') || '').trim();
+          const aria = (sc.getAttribute('aria-label') || '').trim();
+          const html = sc.innerHTML.toLowerCase();
+          return { identityValid: true, ambiguous: false, inner, title, aria, html };
+        },
+        {
+          normTarget: username.trim().toLowerCase(),
+          targetRemoteUserId: remoteUserId?.trim(),
+          usernameColIdx: lookupRes.usernameColIdx,
+          statusColIdx,
+        }
+      ).catch(() => ({ identityValid: false, ambiguous: true, inner: '', title: '', aria: '', html: '' }));
+
+      if (!preClickState.identityValid) {
+        return {
+          success: false,
+          username,
+          overallStatus: 'FAILED',
+          statusChangeState: 'PRECHECK',
+          errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+          errorMessage: `Pre-click identity reverification failed: Target user '${username}' or remote ID '${remoteUserId}' no longer verified on row immediately before click.`,
+          actionTaken: 'NONE',
+          retryStartingPoint: 'PRECHECK',
+        };
+      }
+
+      if (preClickState.ambiguous) {
+        return {
+          success: false,
+          username,
+          overallStatus: 'FAILED',
+          statusChangeState: 'PRECHECK',
+          errorCode: 'REMOTE_STATUS_COLUMN_NOT_FOUND',
+          errorMessage: `Pre-click status column index ${statusColIdx} invalid on matched row for user '${username}'.`,
+          actionTaken: 'NONE',
+          retryStartingPoint: 'PRECHECK',
+        };
+      }
+
+      // Reread and normalize status from that same exact row
+      let preClickStatus: ClientUserStatus | null =
+        UserManagementExecutor.normalizeRemoteStatus(preClickState.inner) ||
+        UserManagementExecutor.normalizeRemoteStatus(preClickState.title) ||
+        UserManagementExecutor.normalizeRemoteStatus(preClickState.aria);
+
+      if (!preClickStatus && preClickState.html) {
+        const html = preClickState.html;
+        const isInactive =
+          html.includes('status-inactive') ||
+          html.includes('glyphicon-remove') ||
+          html.includes('fa-times') ||
+          html.includes('fa-ban') ||
+          html.includes('badge-inactive') ||
+          html.includes('badge-danger') ||
+          html.includes('color:red') ||
+          html.includes('color: #ef4444') ||
+          html.includes('color:#ef4444');
+
+        const isActive =
+          !isInactive &&
+          (html.includes('status-active') ||
+            html.includes('glyphicon-ok') ||
+            html.includes('fa-check') ||
+            html.includes('badge-active') ||
+            html.includes('badge-success') ||
+            html.includes('color:green') ||
+            html.includes('color: #10b981') ||
+            html.includes('color:#10b981'));
+
+        if (isInactive) {
+          preClickStatus = 'INACTIVE';
+        } else if (isActive) {
+          preClickStatus = 'ACTIVE';
+        }
+      }
+
+      if (!preClickStatus || (preClickStatus !== 'ACTIVE' && preClickStatus !== 'INACTIVE')) {
+        return {
+          success: false,
+          username,
+          overallStatus: 'FAILED',
+          statusChangeState: 'PRECHECK',
+          errorCode: 'REMOTE_STATUS_PRECHECK_UNKNOWN',
+          errorMessage: `Pre-click status rereading for user '${username}' returned ambiguous or unknown status ('${preClickState.inner || ''}'). Aborting with 0 clicks.`,
+          actionTaken: 'NONE',
+          retryStartingPoint: 'PRECHECK',
+        };
+      }
+
+      // If current status already equals target, return NO_CHANGE_REQUIRED with 0 clicks
+      if (preClickStatus === targetStatus) {
+        return {
+          success: true,
+          username,
+          status: targetStatus,
+          overallStatus: 'COMPLETED',
+          statusChangeState: 'VERIFIED',
+          actionTaken: 'NO_CHANGE_REQUIRED',
+          message: `User '${username}' status is already ${targetStatus} on remote client immediately before click.`,
+        };
+      }
+
+      // =========================================================================
+      // STAGE 2: MUTATION_SUBMITTED (Single Click, Double-Click Prevention)
+      // =========================================================================
+      statusChangeState = 'MUTATION_SUBMITTED';
+      mutationSubmitted = true;
+
       if (isObj && (arg1 as any).onMutationDispatched) {
         (arg1 as any).onMutationDispatched();
       }
 
-      // Click the status icon once
       onProgress?.(`Updating remote status to ${targetStatus} in Simplex client…`);
       try {
         if ((await clickTarget.count().catch(() => 0)) > 0) {
@@ -4428,6 +4930,8 @@ export class UserManagementExecutor {
           return {
             success: false,
             username,
+            overallStatus: 'FAILED',
+            statusChangeState: 'PRECHECK',
             errorCode: 'BROWSER_CONTEXT_CLOSED_AFTER_ACTION',
             errorMessage: 'Browser page was closed during or immediately after clicking status toggle.',
           };
@@ -4435,10 +4939,17 @@ export class UserManagementExecutor {
         throw clickErr;
       }
 
+      // =========================================================================
+      // STAGE 3: REMOTE_RESPONSE_RECEIVED
+      // =========================================================================
+      statusChangeState = 'REMOTE_RESPONSE_RECEIVED';
       await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
       await page.waitForTimeout(800);
 
-      // 4. Polling post-mutation status verification with reload fallback (up to 8s)
+      // =========================================================================
+      // STAGE 4: VERIFICATION_STARTED (Same BrowserContext & Page Preserved)
+      // =========================================================================
+      statusChangeState = 'VERIFICATION_STARTED';
       onProgress?.(`Verifying remote status change…`);
       let verified = false;
       let lastObservedStatus: ClientUserStatus | undefined = undefined;
@@ -4450,11 +4961,15 @@ export class UserManagementExecutor {
           return {
             success: false,
             username,
-            errorCode: 'REMOTE_OUTCOME_UNKNOWN',
+            overallStatus: 'PARTIAL_FAILED',
+            statusChangeState: 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+            errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
             errorMessage: 'Browser closed during post-mutation status verification.',
+            retryStartingPoint: 'STATUS_VERIFICATION',
           };
         }
 
+        // Re-read user row in same browser context without invoking login
         const checkRes = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId }).catch(() => ({ success: false } as any));
         if (checkRes.success && checkRes.currentRemoteStatus === targetStatus) {
           verified = true;
@@ -4464,7 +4979,7 @@ export class UserManagementExecutor {
           lastObservedStatus = checkRes.currentRemoteStatus;
         }
 
-        // If 2.5s elapsed without verified status change, trigger a fresh reload to clear any stale client DOM
+        // If 2.5s elapsed without verified status change, trigger a fresh reload without re-authenticating
         if (Date.now() - verifyStartTime > 2500 && !reloadedOnce) {
           reloadedOnce = true;
           await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
@@ -4478,15 +4993,22 @@ export class UserManagementExecutor {
           success: true,
           username,
           status: targetStatus,
+          overallStatus: 'COMPLETED',
+          statusChangeState: 'VERIFIED',
+          actionTaken: 'MUTATED',
           message: `User '${username}' status verified as ${targetStatus} on remote client.`,
         };
       }
 
+      // Final status cannot be confirmed -> PARTIAL_FAILED with REMOTE_STATUS_VERIFICATION_UNKNOWN
       return {
         success: false,
         username,
-        errorCode: 'REMOTE_STATUS_VERIFICATION_FAILED',
-        errorMessage: `Remote status icon for user '${username}' did not change to ${targetStatus}. Expected ${targetStatus}, but found ${lastObservedStatus || 'UNKNOWN'}.`,
+        overallStatus: 'PARTIAL_FAILED',
+        statusChangeState: 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+        errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+        errorMessage: `Remote status action submitted for '${username}', but final status verification was inconclusive. Expected ${targetStatus}, but observed ${lastObservedStatus || 'UNKNOWN'}.`,
+        retryStartingPoint: 'STATUS_VERIFICATION',
       };
     } finally {
       page.off('dialog', dialogHandler);

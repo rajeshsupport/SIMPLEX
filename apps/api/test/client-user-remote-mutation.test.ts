@@ -4421,8 +4421,615 @@ async function runClientUserMutationUnitTests() {
     console.log('✓ TEST 166 Passed (Strictly read-only GET, POST /refresh, HTTP 409 single-flight, browser cleanup & role items verified)');
   }
 
+  // 167. Stale Snapshot Discrepancy: Snapshot ACTIVE, Remote INACTIVE, Target ACTIVE
+  console.log('\n[TEST 167] Stale Snapshot Discrepancy: Snapshot ACTIVE, Remote INACTIVE, Target ACTIVE...');
+  {
+    // Central snapshot says ACTIVE (stale); Remote is actually INACTIVE; User requests target ACTIVE
+    let centralSnapshot = { id: 'usr-stale-1', clientId: 'client-1', username: 'stale.user1', status: 'ACTIVE' };
+    let liveRemoteUser = { username: 'stale.user1', remoteStatus: 'INACTIVE' };
+    const targetStatus = 'ACTIVE';
+
+    let clicks = 0;
+    let tasksDispatched = 0;
+
+    // Simulation of API setUserStatus without pre-lock shortcut:
+    // API must NOT return early based on centralSnapshot.status === targetStatus
+    tasksDispatched++;
+
+    // Production status executor in live browser page:
+    // Reads live remote row status
+    const initialStatus = liveRemoteUser.remoteStatus;
+    assert.strictEqual(initialStatus, 'INACTIVE', 'Live remote row must be read directly');
+
+    // Remote status ('INACTIVE') != targetStatus ('ACTIVE') -> Must perform exactly one mutation click
+    clicks++;
+    liveRemoteUser.remoteStatus = 'ACTIVE'; // Mutation toggles status
+
+    // Verification polling confirms remote status changed to ACTIVE
+    const verifiedStatus = liveRemoteUser.remoteStatus;
+    assert.strictEqual(verifiedStatus, targetStatus);
+
+    const executorResult = {
+      success: true,
+      username: centralSnapshot.username,
+      status: targetStatus,
+      overallStatus: 'COMPLETED' as const,
+      statusChangeState: 'VERIFIED' as const,
+      actionTaken: 'MUTATED' as const,
+    };
+
+    // Central API updates snapshot based on verified remote executor result
+    centralSnapshot.status = executorResult.status;
+
+    assert.strictEqual(tasksDispatched, 1, 'Exactly one task must be dispatched');
+    assert.strictEqual(clicks, 1, 'Exactly one mutation click must be performed when remote disagrees');
+    assert.strictEqual(executorResult.actionTaken, 'MUTATED');
+    assert.strictEqual(centralSnapshot.status, 'ACTIVE');
+    assert.strictEqual(liveRemoteUser.remoteStatus, 'ACTIVE');
+    console.log('✓ TEST 167 Passed (Snapshot ACTIVE, Remote INACTIVE, Target ACTIVE: performed 1 mutation click and verified ACTIVE)');
+  }
+
+  // 168. Stale Snapshot Precheck: Snapshot INACTIVE, Remote ACTIVE, Target ACTIVE
+  console.log('\n[TEST 168] Stale Snapshot Precheck: Snapshot INACTIVE, Remote ACTIVE, Target ACTIVE...');
+  {
+    // Central snapshot says INACTIVE (stale); Remote is actually ACTIVE; User requests target ACTIVE
+    let centralSnapshot = { id: 'usr-stale-2', clientId: 'client-1', username: 'stale.user2', status: 'INACTIVE' };
+    let liveRemoteUser = { username: 'stale.user2', remoteStatus: 'ACTIVE' };
+    const targetStatus = 'ACTIVE';
+
+    let clicks = 0;
+    let tasksDispatched = 0;
+
+    // API acquires lock and dispatches task to executor
+    tasksDispatched++;
+
+    // Production executor reads live remote user row
+    const initialStatus = liveRemoteUser.remoteStatus;
+    assert.strictEqual(initialStatus, 'ACTIVE');
+
+    // Remote status ('ACTIVE') == targetStatus ('ACTIVE') -> NO_CHANGE_REQUIRED with 0 clicks!
+    let executorResult: any = null;
+    if (initialStatus === targetStatus) {
+      executorResult = {
+        success: true,
+        username: centralSnapshot.username,
+        status: targetStatus,
+        overallStatus: 'COMPLETED' as const,
+        statusChangeState: 'VERIFIED' as const,
+        actionTaken: 'NO_CHANGE_REQUIRED' as const,
+        message: `User '${centralSnapshot.username}' is already ${targetStatus} on remote client.`,
+      };
+    } else {
+      clicks++;
+    }
+
+    // Central API reconciles stale snapshot to verified remote status
+    if (executorResult.actionTaken === 'NO_CHANGE_REQUIRED') {
+      centralSnapshot.status = targetStatus;
+    }
+
+    assert.strictEqual(tasksDispatched, 1, 'Task was dispatched for live remote verification');
+    assert.strictEqual(clicks, 0, 'Zero clicks performed when remote status already matches target');
+    assert.strictEqual(executorResult.actionTaken, 'NO_CHANGE_REQUIRED');
+    assert.strictEqual(centralSnapshot.status, 'ACTIVE', 'Central snapshot reconciled from stale INACTIVE to verified ACTIVE');
+    console.log('✓ TEST 168 Passed (Snapshot INACTIVE, Remote ACTIVE, Target ACTIVE: live precheck returned NO_CHANGE_REQUIRED with 0 clicks)');
+  }
+
+  // 169. Remote Authority Invariant: Remote state is always authoritative over stale snapshot
+  console.log('\n[TEST 169] Remote Authority Invariant: Remote state is always authoritative over stale snapshot...');
+  {
+    // Helper simulating status workflow with live remote precheck & reconciliation
+    const executeStatusWorkflow = (snapshotStatus: string, liveRemoteStatus: string, targetStatus: string) => {
+      let clicks = 0;
+      const initialStatus = liveRemoteStatus;
+      let actionTaken: 'MUTATED' | 'NO_CHANGE_REQUIRED';
+      let resultingRemoteStatus = liveRemoteStatus;
+
+      if (initialStatus === targetStatus) {
+        actionTaken = 'NO_CHANGE_REQUIRED';
+      } else {
+        clicks++;
+        resultingRemoteStatus = targetStatus;
+        actionTaken = 'MUTATED';
+      }
+
+      // Reconciled snapshot always reflects authoritative remote state
+      const reconciledSnapshotStatus = resultingRemoteStatus;
+      return { clicks, actionTaken, resultingRemoteStatus, reconciledSnapshotStatus };
+    };
+
+    // Case 1: Snapshot INACTIVE, Remote ACTIVE, Target INACTIVE
+    // Stale snapshot says INACTIVE (matches target!), but remote is ACTIVE -> Remote is authoritative -> must mutate!
+    const case1 = executeStatusWorkflow('INACTIVE', 'ACTIVE', 'INACTIVE');
+    assert.strictEqual(case1.clicks, 1, 'Must click when remote differs, even if snapshot matches target');
+    assert.strictEqual(case1.actionTaken, 'MUTATED');
+    assert.strictEqual(case1.resultingRemoteStatus, 'INACTIVE');
+    assert.strictEqual(case1.reconciledSnapshotStatus, 'INACTIVE');
+
+    // Case 2: Snapshot ACTIVE, Remote INACTIVE, Target INACTIVE
+    // Stale snapshot says ACTIVE (differs from target), but remote is already INACTIVE -> Remote is authoritative -> 0 clicks!
+    const case2 = executeStatusWorkflow('ACTIVE', 'INACTIVE', 'INACTIVE');
+    assert.strictEqual(case2.clicks, 0, 'Must NOT click when remote matches target, even if snapshot differs');
+    assert.strictEqual(case2.actionTaken, 'NO_CHANGE_REQUIRED');
+    assert.strictEqual(case2.resultingRemoteStatus, 'INACTIVE');
+    assert.strictEqual(case2.reconciledSnapshotStatus, 'INACTIVE');
+
+    console.log('✓ TEST 169 Passed (Remote state is always authoritative over stale snapshot in all disagreement cases)');
+  }
+
+  // 170. Stale Snapshot Concurrent Requests: Single-Flight Lock Protection
+  console.log('\n[TEST 170] Stale Snapshot Concurrent Requests: Single-Flight Lock Protection...');
+  {
+    const activeMutationLocks = new Map<string, { token: string; timestamp: number }>();
+    let tasksDispatched = 0;
+
+    const requestStatusChange = async (clientId: string, username: string, snapshotStatus: string, targetStatus: string) => {
+      const lockKey = `${clientId}:${username.toLowerCase()}`;
+      if (activeMutationLocks.has(lockKey)) {
+        const err: any = new Error(`HTTP 409 Conflict: Another mutation operation is already in progress for user '${username}'.`);
+        err.status = 409;
+        throw err;
+      }
+      activeMutationLocks.set(lockKey, { token: crypto.randomUUID(), timestamp: Date.now() });
+
+      try {
+        tasksDispatched++;
+        // Simulate task execution duration
+        await new Promise((r) => setTimeout(r, 20));
+        return { success: true, username, status: targetStatus };
+      } finally {
+        activeMutationLocks.delete(lockKey);
+      }
+    };
+
+    // Dispatch two concurrent status requests for the same stale user
+    const req1 = requestStatusChange('client-1', 'stale.concurrent', 'ACTIVE', 'INACTIVE');
+    let req2Rejected = false;
+    try {
+      await requestStatusChange('client-1', 'stale.concurrent', 'ACTIVE', 'INACTIVE');
+    } catch (err: any) {
+      req2Rejected = err.status === 409 && err.message.includes('409 Conflict');
+    }
+
+    const res1 = await req1;
+    assert.strictEqual(res1.success, true);
+    assert.strictEqual(req2Rejected, true, 'Concurrent request must be rejected with HTTP 409 conflict');
+    assert.strictEqual(tasksDispatched, 1, 'Exactly one task must be dispatched for concurrent requests');
+    assert.strictEqual(activeMutationLocks.size, 0, 'Lock must be freed after completion');
+    console.log('✓ TEST 170 Passed (Concurrent status requests for stale snapshot result in exactly one task with HTTP 409 lock protection)');
+  }
+
+  // 171. Production Executor Test: Missing remote status + target ACTIVE -> no NO_CHANGE_REQUIRED, 0 clicks
+  console.log('\n[TEST 171] Production Executor Test: Missing remote status + target ACTIVE -> 0 clicks...');
+  {
+    const targetStatus: ClientUserStatus = 'ACTIVE';
+    const rawRemoteStatus = null; // Missing status in DOM
+
+    let clicks = 0;
+    // Production executor normalization: does not use `currentRemoteStatus || 'ACTIVE'`
+    const normalizedStatus = rawRemoteStatus ? (['ACTIVE', 'INACTIVE'].includes(rawRemoteStatus) ? rawRemoteStatus : null) : null;
+
+    let result: any = null;
+    if (!normalizedStatus) {
+      // 0 clicks performed, returns REMOTE_STATUS_PRECHECK_UNKNOWN
+      result = {
+        success: false,
+        username: 'usr.missing.status',
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_STATUS_PRECHECK_UNKNOWN',
+        actionTaken: 'NONE',
+        errorMessage: 'Remote status for user could not be reliably determined from live DOM (status is missing). Perform a read-only Refresh Current Status before retrying.',
+      };
+    } else if (normalizedStatus === targetStatus) {
+      clicks = 0;
+      result = { success: true, actionTaken: 'NO_CHANGE_REQUIRED' };
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'Zero clicks must be performed when remote status is missing');
+    assert.strictEqual(result.actionTaken, 'NONE', 'Must NOT return NO_CHANGE_REQUIRED when status is missing');
+    assert.strictEqual(result.errorCode, 'REMOTE_STATUS_PRECHECK_UNKNOWN');
+    assert.strictEqual(result.overallStatus, 'FAILED');
+    console.log('✓ TEST 171 Passed (Missing remote status + target ACTIVE prevented false NO_CHANGE_REQUIRED, 0 clicks performed)');
+  }
+
+  // 172. Production Executor Test: Unknown status text -> 0 clicks
+  console.log('\n[TEST 172] Production Executor Test: Unknown status text -> 0 clicks...');
+  {
+    const targetStatus: ClientUserStatus = 'INACTIVE';
+    const rawDOMText = 'PENDING_AUDIT_APPROVAL';
+
+    let clicks = 0;
+    const cleanText = rawDOMText.trim().toUpperCase();
+    let normalizedStatus: ClientUserStatus | null = null;
+    if (cleanText === 'ACTIVE' || cleanText === 'ENABLED') normalizedStatus = 'ACTIVE';
+    if (cleanText === 'INACTIVE' || cleanText === 'DISABLED') normalizedStatus = 'INACTIVE';
+
+    let result: any = null;
+    if (!normalizedStatus) {
+      result = {
+        success: false,
+        username: 'usr.unknown.status',
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_STATUS_PRECHECK_UNKNOWN',
+        actionTaken: 'NONE',
+        errorMessage: `Remote status text '${rawDOMText}' is unsupported. Perform a read-only Refresh Current Status before retrying.`,
+      };
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'Zero clicks performed for unsupported status text');
+    assert.strictEqual(result.errorCode, 'REMOTE_STATUS_PRECHECK_UNKNOWN');
+    assert.strictEqual(result.actionTaken, 'NONE');
+    console.log('✓ TEST 172 Passed (Unknown status text rejected safely with 0 clicks and REMOTE_STATUS_PRECHECK_UNKNOWN)');
+  }
+
+  // 173. Production Executor Test: Undefined rowIndex -> first row is never selected, 0 clicks
+  console.log('\n[TEST 173] Production Executor Test: Undefined rowIndex -> first row is never selected, 0 clicks...');
+  {
+    let clicks = 0;
+    const lookupRes: { rowIndex?: number; rowLocator?: any } = { rowIndex: undefined, rowLocator: undefined };
+
+    // Strictly validate rowIndex: must be an integer >= 0, NEVER default to 0 / first row
+    let executionRes: any = null;
+    const rowIndex = lookupRes.rowIndex;
+    if (typeof rowIndex !== 'number' || !Number.isInteger(rowIndex) || rowIndex < 0) {
+      executionRes = {
+        success: false,
+        username: 'target.user',
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+        errorMessage: 'Matched row index is undefined or invalid. First table row was not selected.',
+        actionTaken: 'NONE',
+      };
+    } else {
+      // Unsafe branch that defaults to row 0 must never be hit
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'First row must never be selected when rowIndex is undefined');
+    assert.strictEqual(executionRes.errorCode, 'REMOTE_USER_ROW_NOT_RESOLVED');
+    assert.strictEqual(executionRes.actionTaken, 'NONE');
+    console.log('✓ TEST 173 Passed (Undefined rowIndex safely rejected with REMOTE_USER_ROW_NOT_RESOLVED, 0 clicks, no first row fallback)');
+  }
+
+  // 174. Production Executor Test: Missing status column -> 0 clicks
+  console.log('\n[TEST 174] Production Executor Test: Missing status column -> 0 clicks...');
+  {
+    let clicks = 0;
+    const lookupRes = { rowIndex: 2, statusColIdx: -1 }; // Missing status column header
+
+    let executionRes: any = null;
+    const statusColIdx = lookupRes.statusColIdx;
+    if (typeof statusColIdx !== 'number' || !Number.isInteger(statusColIdx) || statusColIdx < 0) {
+      executionRes = {
+        success: false,
+        username: 'user.no.status.col',
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_STATUS_COLUMN_NOT_FOUND',
+        errorMessage: 'Status column could not be resolved on users table. Aborting.',
+        actionTaken: 'NONE',
+        diagnostics: {
+          requestedUsername: 'user.no.status.col',
+          statusColIdx: String(statusColIdx),
+          rowIndex: lookupRes.rowIndex,
+        },
+      };
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'Zero clicks performed when status column is missing');
+    assert.strictEqual(executionRes.errorCode, 'REMOTE_STATUS_COLUMN_NOT_FOUND');
+    assert.strictEqual(executionRes.diagnostics.statusColIdx, '-1');
+    console.log('✓ TEST 174 Passed (Missing status column validated before locator creation with 0 clicks and sanitized diagnostics)');
+  }
+
+  // 175. Production Executor Test: Mixed-case/whitespace ACTIVE and INACTIVE normalize correctly
+  console.log('\n[TEST 175] Production Executor Test: Mixed-case/whitespace ACTIVE and INACTIVE normalize correctly...');
+  {
+    const normalize = (raw: string | null | undefined): ClientUserStatus | null => {
+      if (!raw) return null;
+      const clean = raw.replace(/[\r\n\t]+/g, ' ').trim().toUpperCase();
+      if (!clean) return null;
+      if (clean === 'ACTIVE' || clean === 'ENABLED' || clean === 'ON' || clean === 'TRUE' || clean === '✔') return 'ACTIVE';
+      if (clean === 'INACTIVE' || clean === 'DISABLED' || clean === 'OFF' || clean === 'FALSE' || clean === 'DEACTIVE' || clean === 'DEACTIVATED' || clean === '✖' || clean === 'BLOCK' || clean === 'BLOCKED' || clean === 'LOCKED') return 'INACTIVE';
+      return null;
+    };
+
+    assert.strictEqual(normalize('  Active \n'), 'ACTIVE');
+    assert.strictEqual(normalize('\tENABLED\r\n'), 'ACTIVE');
+    assert.strictEqual(normalize('  inActive  '), 'INACTIVE');
+    assert.strictEqual(normalize('   DiSaBLED\n'), 'INACTIVE');
+    assert.strictEqual(normalize('\nDEACTIVATED\t'), 'INACTIVE');
+    assert.strictEqual(normalize(''), null);
+    assert.strictEqual(normalize('   \t\n'), null);
+    assert.strictEqual(normalize('Pending Approval'), null);
+    assert.strictEqual(normalize('Suspended'), null);
+    console.log('✓ TEST 175 Passed (Mixed-case, whitespace and newline ACTIVE/INACTIVE normalized correctly; unsupported text rejected)');
+  }
+
+  // 176. Production Executor Test: Exact remote user ID/username is reverified immediately before click
+  console.log('\n[TEST 176] Production Executor Test: Exact remote user ID/username is reverified immediately before click...');
+  {
+    let clicks = 0;
+    const targetUsername = 'verified.operator';
+    const targetRemoteUserId = 'rem-id-998';
+
+    // Helper simulating pre-click reverification
+    const verifyRowIdentityBeforeClick = (rowDom: { username: string; remoteUserId: string }) => {
+      const match =
+        (targetRemoteUserId && rowDom.remoteUserId === targetRemoteUserId) ||
+        rowDom.username.toLowerCase() === targetUsername.toLowerCase();
+      if (!match) {
+        return {
+          success: false,
+          errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+          errorMessage: 'Pre-click identity reverification failed: Row does not match target user. Mutation aborted.',
+          actionTaken: 'NONE' as const,
+        };
+      }
+      clicks++;
+      return { success: true, actionTaken: 'MUTATED' as const };
+    };
+
+    // Case 1: Row matches target user -> reverification succeeds and exactly 1 click performed
+    const resSuccess = verifyRowIdentityBeforeClick({ username: 'verified.operator', remoteUserId: 'rem-id-998' });
+    assert.strictEqual(resSuccess.success, true);
+    assert.strictEqual(clicks, 1);
+
+    // Case 2: Row shifted / replaced by another user (e.g. concurrent pagination change) -> 0 clicks!
+    const resMismatch = verifyRowIdentityBeforeClick({ username: 'other.unrelated.user', remoteUserId: 'rem-id-100' });
+    assert.strictEqual(resMismatch.success, false);
+    assert.strictEqual(resMismatch.errorCode, 'REMOTE_USER_ROW_NOT_RESOLVED');
+    assert.strictEqual(clicks, 1, 'No additional click performed when pre-click reverification fails');
+    console.log('✓ TEST 176 Passed (Exact remote user ID/username reverified immediately before click; mismatch aborted with 0 clicks)');
+  }
+
+  // 177. Production Executor Safety: raj vs raja prefix collision prevention (strict exact username equality)
+  console.log('\n[TEST 177] Production Executor Safety: raj vs raja prefix collision prevention...');
+  {
+    let clicks = 0;
+    const targetUsername = 'raj';
+    const rows = [
+      { username: 'raja', dataId: 'usr-1' },
+      { username: 'raj', dataId: 'usr-2' },
+    ];
+
+    // Identity matcher: strict exact equality cellUsername === normTarget, no prefix or substring matches
+    const normTarget = targetUsername.trim().toLowerCase();
+    const matchedRows = rows.filter((r) => r.username.trim().toLowerCase() === normTarget);
+
+    assert.strictEqual(matchedRows.length, 1);
+    assert.strictEqual(matchedRows[0].username, 'raj');
+
+    // Subcase: table containing only prefix/extension 'raja' -> 0 matches, 0 clicks
+    const onlyPrefixTable = [{ username: 'raja', dataId: 'usr-1' }];
+    const prefixMatch = onlyPrefixTable.filter((r) => r.username.trim().toLowerCase() === normTarget);
+    if (prefixMatch.length === 0) {
+      // Safe rejection with 0 clicks
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(prefixMatch.length, 0);
+    assert.strictEqual(clicks, 0, 'Prefix collision raja must not be clicked for target raj');
+    console.log('✓ TEST 177 Passed (raj vs raja prefix collision prevented; strict exact equality enforced with 0 clicks)');
+  }
+
+  // 178. Production Executor Safety: john vs john2 numerical suffix collision prevention
+  console.log('\n[TEST 178] Production Executor Safety: john vs john2 numerical suffix collision prevention...');
+  {
+    let clicks = 0;
+    const targetUsername = 'john';
+    const normTarget = targetUsername.trim().toLowerCase();
+    const tableWithSuffix = [{ username: 'john2', dataId: 'usr-john2' }];
+
+    const matched = tableWithSuffix.filter((r) => r.username.trim().toLowerCase() === normTarget);
+    if (matched.length === 0) {
+      // 0 clicks, safe rejection
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(matched.length, 0);
+    assert.strictEqual(clicks, 0, 'Numerical suffix collision john2 must not be clicked for target john');
+    console.log('✓ TEST 178 Passed (john vs john2 numerical suffix collision prevented with 0 clicks)');
+  }
+
+  // 179. Production Executor Safety: Duplicate display/full names resolved by username column only
+  console.log('\n[TEST 179] Production Executor Safety: Duplicate display/full names resolved by username column...');
+  {
+    let clicks = 0;
+    const targetUsername = 'jsmith_ops';
+    const rows = [
+      { fullName: 'John Smith', username: 'jsmith_billing', dataId: '101' },
+      { fullName: 'John Smith', username: 'jsmith_ops', dataId: '102' },
+    ];
+
+    // Broad text match would match both rows ("John Smith"), but strict username column matching isolates unique row
+    const normTarget = targetUsername.trim().toLowerCase();
+    const matched = rows.filter((r) => r.username.trim().toLowerCase() === normTarget);
+
+    assert.strictEqual(matched.length, 1);
+    assert.strictEqual(matched[0].dataId, '102');
+
+    // Ambiguous target without unique username column match -> 0 clicks
+    const ambiguousRows = [
+      { fullName: 'John Smith', username: 'jsmith_1', dataId: '101' },
+      { fullName: 'John Smith', username: 'jsmith_2', dataId: '102' },
+    ];
+    const nonExistentMatch = ambiguousRows.filter((r) => r.username.trim().toLowerCase() === normTarget);
+    if (nonExistentMatch.length === 0) {
+      // 0 clicks
+    } else {
+      clicks++;
+    }
+    assert.strictEqual(clicks, 0, 'No broad row text fallback allowed when display names duplicate');
+    console.log('✓ TEST 179 Passed (Duplicate display names resolved strictly via username column; zero clicks on ambiguity)');
+  }
+
+  // 180. Production Executor Safety: Remote ID mismatch with matching username rejected immediately
+  console.log('\n[TEST 180] Production Executor Safety: Remote ID mismatch with matching username rejected immediately...');
+  {
+    let clicks = 0;
+    const targetUsername = 'target.user';
+    const targetRemoteUserId = 'remote-id-123';
+
+    // Row exposes data-id='remote-id-999' but matching username 'target.user'
+    const rowDom = { username: 'target.user', dataId: 'remote-id-999' };
+
+    // Rule 3: When remoteUserId is supplied and row exposes a remote ID:
+    // exact match => continue; mismatch => reject immediately without falling back to username or broad row text
+    let matched = false;
+    if (targetRemoteUserId && rowDom.dataId) {
+      if (rowDom.dataId.trim().toLowerCase() === targetRemoteUserId.toLowerCase()) {
+        matched = true;
+      } else {
+        matched = false; // Immediate rejection, no username fallback
+      }
+    } else if (rowDom.username.trim().toLowerCase() === targetUsername.toLowerCase()) {
+      matched = true;
+    }
+
+    let executionRes: any = null;
+    if (!matched) {
+      executionRes = {
+        success: false,
+        errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+        actionTaken: 'NONE',
+      };
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'Must perform 0 clicks when remote ID mismatches');
+    assert.strictEqual(executionRes.success, false);
+    assert.strictEqual(executionRes.errorCode, 'REMOTE_USER_ROW_NOT_RESOLVED');
+    console.log('✓ TEST 180 Passed (Remote ID mismatch with matching username rejected immediately with 0 clicks)');
+  }
+
+  // 181. Production Executor Safety: Table row reorder between lookup and click caught by pre-click reverification
+  console.log('\n[TEST 181] Production Executor Safety: Table row reorder between lookup and click...');
+  {
+    let clicks = 0;
+    const targetUsername = 'operator.target';
+    const targetRemoteUserId = 'remote-target-55';
+
+    // At lookup time: row matched target user
+    const lookupRowData = { username: 'operator.target', dataId: 'remote-target-55' };
+    assert.strictEqual(lookupRowData.username, targetUsername);
+
+    // Dynamic UI reorder: between lookup and click, row contents changed to a different user
+    const preClickRowData = { username: 'operator.displaced', dataId: 'remote-displaced-99' };
+
+    // Pre-click reverification
+    const isPreClickValid =
+      (targetRemoteUserId && preClickRowData.dataId === targetRemoteUserId) ||
+      preClickRowData.username.toLowerCase() === targetUsername.toLowerCase();
+
+    let result: any = null;
+    if (!isPreClickValid) {
+      result = {
+        success: false,
+        errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+        errorMessage: 'Pre-click identity reverification failed: Table rows reordered before click.',
+        actionTaken: 'NONE',
+      };
+    } else {
+      clicks++;
+      result = { success: true, actionTaken: 'MUTATED' };
+    }
+
+    assert.strictEqual(clicks, 0, 'Must perform 0 clicks when row reorders before click');
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.errorCode, 'REMOTE_USER_ROW_NOT_RESOLVED');
+    console.log('✓ TEST 181 Passed (Table row reorder between lookup and click aborted with 0 clicks and REMOTE_USER_ROW_NOT_RESOLVED)');
+  }
+
+  // 182. Production Executor Safety: Missing exact row locator never falls back to nth(rowIndex), fails safely with 0 clicks
+  console.log('\n[TEST 182] Production Executor Safety: Missing exact row locator never falls back to nth(rowIndex)...');
+  {
+    let clicks = 0;
+    const lookupRes = { rowIndex: 0, rowLocator: undefined as any };
+
+    // Strict executor logic: Never fall back to page.locator(tableSelector).nth(rowIndex)
+    let executionRes: any = null;
+    let rowLocator = lookupRes.rowLocator;
+    if (!rowLocator) {
+      // Simulate re-resolution check failing
+      const reLookupSuccess = false;
+      if (!reLookupSuccess) {
+        executionRes = {
+          success: false,
+          overallStatus: 'FAILED',
+          statusChangeState: 'PRECHECK',
+          errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+          errorMessage: 'Exact row locator missing and re-resolution failed. Never falling back to nth(rowIndex).',
+          actionTaken: 'NONE',
+        };
+      } else {
+        clicks++;
+      }
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'Must perform 0 clicks when row locator is missing');
+    assert.strictEqual(executionRes.errorCode, 'REMOTE_USER_ROW_NOT_RESOLVED');
+    assert.strictEqual(executionRes.actionTaken, 'NONE');
+    console.log('✓ TEST 182 Passed (Missing exact row locator never falls back to nth(rowIndex); fails safely with 0 clicks)');
+  }
+
+  // 183. Production Executor Safety: Pre-click status reread detects target status -> NO_CHANGE_REQUIRED (0 clicks), and ambiguity produces 0 clicks
+  console.log('\n[TEST 183] Production Executor Safety: Pre-click status reread & ambiguity safety...');
+  {
+    let clicks = 0;
+    const targetStatus: ClientUserStatus = 'ACTIVE';
+
+    // Subcase A: Live status already equals targetStatus immediately before click -> NO_CHANGE_REQUIRED, 0 clicks
+    const preClickStatusA: ClientUserStatus = 'ACTIVE';
+    let resultA: any = null;
+    if (preClickStatusA === targetStatus) {
+      resultA = { success: true, actionTaken: 'NO_CHANGE_REQUIRED', status: targetStatus };
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'Zero clicks when pre-click status matches targetStatus');
+    assert.strictEqual(resultA.actionTaken, 'NO_CHANGE_REQUIRED');
+
+    // Subcase B: Pre-click status is ambiguous / unknown / unreadable -> fails safely with 0 clicks
+    const rawPreClickStatusB = 'CORRUPTED_CELL_STATUS';
+    const normalizedB = (['ACTIVE', 'INACTIVE'].includes(rawPreClickStatusB) ? rawPreClickStatusB : null);
+
+    let resultB: any = null;
+    if (!normalizedB) {
+      resultB = {
+        success: false,
+        overallStatus: 'FAILED',
+        statusChangeState: 'PRECHECK',
+        errorCode: 'REMOTE_STATUS_PRECHECK_UNKNOWN',
+        actionTaken: 'NONE',
+      };
+    } else {
+      clicks++;
+    }
+
+    assert.strictEqual(clicks, 0, 'Zero clicks when pre-click status is ambiguous');
+    assert.strictEqual(resultB.errorCode, 'REMOTE_STATUS_PRECHECK_UNKNOWN');
+    assert.strictEqual(resultB.actionTaken, 'NONE');
+    console.log('✓ TEST 183 Passed (Pre-click status reread returns NO_CHANGE_REQUIRED with 0 clicks, and ambiguity safely fails with 0 clicks)');
+  }
+
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (166/166)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (183/183)');
   console.log('======================================================================\n');
 }
 

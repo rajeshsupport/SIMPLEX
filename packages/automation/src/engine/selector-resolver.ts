@@ -302,4 +302,50 @@ export class SelectorResolver {
       } catch {}
     }
   }
+
+  /**
+   * Type guard to ensure a value is a non-empty, non-object string that doesn't contain "[object Object]".
+   */
+  public static isNonObjectString(val: unknown): val is string {
+    return typeof val === 'string' && val.trim().length > 0 && !val.includes('[object Object]');
+  }
+
+  /**
+   * Normalizes version inputs into a clean string property, resolving nested versionConfig objects.
+   */
+  public static normalizeVersionString(versionInput: unknown, fallback: string = 'v9.4'): string {
+    if (!versionInput) return fallback;
+    if (this.isNonObjectString(versionInput)) return versionInput.trim();
+    if (typeof versionInput === 'object' && versionInput !== null) {
+      const obj = versionInput as Record<string, any>;
+      if (this.isNonObjectString(obj.applicableAppVersion)) return obj.applicableAppVersion.trim();
+      if (this.isNonObjectString(obj.applicationVersion)) return obj.applicationVersion.trim();
+      if (this.isNonObjectString(obj.version)) return obj.version.trim();
+      if (this.isNonObjectString(obj.versionNumber)) return `v${obj.versionNumber}`.trim();
+      if (typeof obj.versionNumber === 'number') return `v${obj.versionNumber}`;
+      if (this.isNonObjectString(obj.selectorProfileVersion)) return obj.selectorProfileVersion.trim();
+    }
+    return fallback;
+  }
+
+  /**
+   * Normalizes selector profile version strings, safely extracting string from objects.
+   */
+  public static normalizeSelectorProfile(profileInput: unknown, fallback: string = 'v9.3'): string {
+    if (!profileInput) return fallback;
+    if (this.isNonObjectString(profileInput)) return profileInput.trim();
+    if (typeof profileInput === 'object' && profileInput !== null) {
+      const obj = profileInput as Record<string, any>;
+      if (this.isNonObjectString(obj.selectorProfileVersion)) return obj.selectorProfileVersion.trim();
+      if (this.isNonObjectString(obj.profileVersion)) return obj.profileVersion.trim();
+      if (this.isNonObjectString(obj.applicableAppVersion)) return obj.applicableAppVersion.trim();
+      if (this.isNonObjectString(obj.applicationVersion)) return obj.applicationVersion.trim();
+      if (this.isNonObjectString(obj.version)) return obj.version.trim();
+    }
+    return fallback;
+  }
 }
+
+export const isNonObjectString = SelectorResolver.isNonObjectString.bind(SelectorResolver);
+export const normalizeVersionString = SelectorResolver.normalizeVersionString.bind(SelectorResolver);
+export const normalizeSelectorProfile = SelectorResolver.normalizeSelectorProfile.bind(SelectorResolver);
