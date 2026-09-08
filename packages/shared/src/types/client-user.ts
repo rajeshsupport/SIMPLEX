@@ -52,6 +52,7 @@ export interface ClientUser {
   remoteCreatedAt?: string | null;
   remoteUpdatedAt?: string | null;
   lastSyncedAt: string;
+  lastVerifiedAt?: string | null;
   createdAt?: string;
   updatedAt?: string;
   credentialDeliveryStatus?: CredentialDeliveryStatus;

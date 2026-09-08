@@ -144,7 +144,7 @@ export const UsersPage: React.FC = () => {
   const [manageRolesSubmitting, setManageRolesSubmitting] = useState<boolean>(false);
   const [manageRolesError, setManageRolesError] = useState<string | null>(null);
   const [manageRolesSuccess, setManageRolesSuccess] = useState<string | null>(null);
-  const [manageRolesDataSource, setManageRolesDataSource] = useState<'SNAPSHOT' | 'REMOTE_LIVE' | null>(null);
+  const [manageRolesDataSource, setManageRolesDataSource] = useState<'SNAPSHOT' | 'REMOTE_LIVE' | 'REFRESH_FAILED' | null>(null);
   const [manageRolesLastSyncedAt, setManageRolesLastSyncedAt] = useState<string | null>(null);
   const [manageRolesRefreshing, setManageRolesRefreshing] = useState<boolean>(false);
   const [userExistingRoles, setUserExistingRoles] = useState<string[]>([]);
@@ -1156,9 +1156,16 @@ export const UsersPage: React.FC = () => {
     setManageRoleSearch('');
     setIsManageRolesModalOpen(true);
     setManageRolesLoading(true);
+    setManageRolesDataSource(null);
+
+    // Populate fallback from central snapshot initially
+    const fallbackCurrent = (user.role || '').split(',').map((r) => r.trim()).filter(Boolean);
+    setUserExistingRoles(fallbackCurrent);
+    setAvailableClientRoles(clientOptions.roles || []);
+    setManageRolesLastSyncedAt(user.lastVerifiedAt ? String(user.lastVerifiedAt) : (user.lastSyncedAt ? String(user.lastSyncedAt) : null));
 
     try {
-      // Fetch user's current roles and client's live available roles strictly from central snapshot
+      // 1. Automatically execute a read-only live-role refresh for that exact user
       const res = await ApiClient.request<{
         username: string;
         fullName: string;
@@ -1167,24 +1174,23 @@ export const UsersPage: React.FC = () => {
         dataSource: 'SNAPSHOT' | 'REMOTE_LIVE';
         lastSyncedAt: string | null;
         isSnapshotData: boolean;
-      }>(`/client-users/${user.id}/roles`);
+      }>(`/client-users/${user.id}/roles/refresh`, {
+        method: 'POST',
+      });
 
       const toNames = (arr: any[]) =>
         (arr || []).map((r) => (typeof r === 'string' ? r : r?.canonicalRoleName || r?.roleName || r?.roleId || '')).filter(Boolean);
 
       setUserExistingRoles(toNames(res.currentRoles));
       setAvailableClientRoles(toNames(res.availableRoles));
-      setManageRolesDataSource(res.dataSource || 'SNAPSHOT');
-      setManageRolesLastSyncedAt(res.lastSyncedAt || null);
+      setManageRolesDataSource('REMOTE_LIVE');
+      setManageRolesLastSyncedAt(res.lastSyncedAt || new Date().toISOString());
     } catch (err: any) {
-      const msg = err.message || 'Failed to load user roles';
-      setManageRolesError(msg);
-      // Fallback: parse user.role from table
-      const fallbackCurrent = (user.role || '').split(',').map((r) => r.trim()).filter(Boolean);
-      setUserExistingRoles(fallbackCurrent);
-      setAvailableClientRoles(clientOptions.roles || []);
-      setManageRolesDataSource('SNAPSHOT');
-      setManageRolesLastSyncedAt(user.lastSyncedAt ? String(user.lastSyncedAt) : null);
+      const msg = err.message || 'Live remote role refresh failed';
+      setManageRolesError(`REFRESH FAILED / STALE SNAPSHOT: ${msg}`);
+      setManageRolesDataSource('REFRESH_FAILED');
+      // Preserve lastVerifiedAt from snapshot (do NOT overwrite with current time)
+      setManageRolesLastSyncedAt(user.lastVerifiedAt ? String(user.lastVerifiedAt) : null);
     } finally {
       setManageRolesLoading(false);
     }
@@ -1212,10 +1218,12 @@ export const UsersPage: React.FC = () => {
 
       setUserExistingRoles(toNames(res.currentRoles));
       setAvailableClientRoles(toNames(res.availableRoles));
-      setManageRolesDataSource(res.dataSource || 'REMOTE_LIVE');
-      setManageRolesLastSyncedAt(res.lastSyncedAt || null);
+      setManageRolesDataSource('REMOTE_LIVE');
+      setManageRolesLastSyncedAt(res.lastSyncedAt || new Date().toISOString());
     } catch (err: any) {
-      setManageRolesError(err.message || 'Read-only remote refresh failed');
+      const msg = err.message || 'Read-only remote refresh failed';
+      setManageRolesError(`REFRESH FAILED / STALE SNAPSHOT: ${msg}`);
+      setManageRolesDataSource('REFRESH_FAILED');
     } finally {
       setManageRolesRefreshing(false);
     }
@@ -3173,10 +3181,16 @@ export const UsersPage: React.FC = () => {
                   className={`font-semibold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider ${
                     manageRolesDataSource === 'REMOTE_LIVE'
                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                      : manageRolesDataSource === 'REFRESH_FAILED'
+                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
                       : 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
                   }`}
                 >
-                  {manageRolesDataSource === 'REMOTE_LIVE' ? 'Live Remote Verified' : 'Central Snapshot'}
+                  {manageRolesDataSource === 'REMOTE_LIVE'
+                    ? 'LIVE REMOTE VERIFIED'
+                    : manageRolesDataSource === 'REFRESH_FAILED'
+                    ? 'REFRESH FAILED / STALE SNAPSHOT'
+                    : 'CENTRAL SNAPSHOT'}
                 </span>
                 {manageRolesLastSyncedAt && (
                   <span className="text-slate-500 text-[10px]">
@@ -3363,9 +3377,18 @@ export const UsersPage: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    disabled={manageRolesSubmitting || selectedRolesToAdd.length === 0}
+                    disabled={
+                      manageRolesSubmitting ||
+                      selectedRolesToAdd.length === 0 ||
+                      manageRolesDataSource === 'REFRESH_FAILED'
+                    }
                     onClick={handleManageRolesSubmit}
                     className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded font-semibold shadow-lg shadow-sky-950/50 flex items-center gap-1.5"
+                    title={
+                      manageRolesDataSource === 'REFRESH_FAILED'
+                        ? 'Update disabled: Remote role refresh failed. Refresh must succeed before roles can be updated.'
+                        : undefined
+                    }
                   >
                     {manageRolesSubmitting ? (
                       <>

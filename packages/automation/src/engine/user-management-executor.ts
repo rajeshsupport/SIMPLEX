@@ -1123,8 +1123,8 @@ export class UserManagementExecutor {
           };
         }
 
-        // 3. Full Name match
-        if (normFullName && candidates.length > 0) {
+        // 3. Full Name match (only when remoteUserId is not supplied, strict single match)
+        if (!normUserId && normFullName && candidates.length > 0) {
           const fullNameMatches = candidates.filter((c) => {
             const textLower = c.text.toLowerCase();
             const labelLower = c.label.toLowerCase();
@@ -1180,6 +1180,180 @@ export class UserManagementExecutor {
   }
 
   /**
+   * Discovers and reads the complete set of assigned roles for a target user.
+   * Avenue 1 (In-Page XHR): Calls /checkroleAddNewUser within the authenticated session and parses the embedded JSON array.
+   * Avenue 2 (/userRole Registry Table): Scans /userRole rows matching exact remoteUserId or exact normalized username in column 2 (User Id).
+   * Strictly enforces exact user matching; rejects substring, prefix, or full-name matches.
+   */
+  public static async readUserAssignedRoles(
+    page: Page,
+    options: {
+      roleUrl: string;
+      username: string;
+      remoteUserId?: string;
+      loginUrl?: string;
+      credentials?: { username: string; password?: string };
+      onProgress?: (comment: string) => void;
+    }
+  ): Promise<{
+    success: boolean;
+    roles: string[];
+    userSearchState?: 'EXACT_MATCH_FOUND' | 'NOT_FOUND' | 'AMBIGUOUS' | 'FAILED';
+    errorCode?: string;
+    errorMessage?: string;
+  }> {
+    const { roleUrl, username, remoteUserId, loginUrl, credentials, onProgress } = options;
+    const normUsername = username.trim().toLowerCase();
+    const normRemoteUserId = remoteUserId ? remoteUserId.trim().toLowerCase() : undefined;
+
+    onProgress?.(`Inspecting live assigned roles for '${username}'…`);
+
+    // 1. Ensure authenticated
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: roleUrl, loginUrl, credentials });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        roles: [],
+        userSearchState: 'FAILED',
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Client administrator authentication failed.',
+      };
+    }
+
+    const discoveredRoles = new Set<string>();
+    let xhrSuccess = false;
+    let tableSuccess = false;
+
+    // Avenue 1: In-Page XHR /checkroleAddNewUser
+    try {
+      if (page.url() === 'about:blank' || !page.url().includes('/Master')) {
+        await page.goto(roleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+      }
+
+      const candidateUserIds = Array.from(new Set([normRemoteUserId, normUsername].filter(Boolean) as string[]));
+      for (const uid of candidateUserIds) {
+        const xhrResult = await page.evaluate(async (targetUid) => {
+          try {
+            const origin = window.location.origin;
+            const pathSegments = window.location.pathname.split('/');
+            const masterApp = pathSegments.find((p) => /MasterV\d+(\.\d+)?/i.test(p)) || 'MasterV9.3';
+            const endpoint = `${origin}/${masterApp}/checkroleAddNewUser?userid=${encodeURIComponent(targetUid)}`;
+            const resp = await fetch(endpoint, { credentials: 'include' });
+            if (!resp.ok) return { success: false, status: resp.status };
+            const text = await resp.text();
+            // Simplex returns SQL query followed by JSON array, e.g.: Select ... [{"Role_Code":"...","Role_Name":"...","User_Id":"..."},...]
+            const firstBracket = text.indexOf('[');
+            const lastBracket = text.lastIndexOf(']');
+            if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+              const jsonSlice = text.slice(firstBracket, lastBracket + 1);
+              const items = JSON.parse(jsonSlice);
+              if (Array.isArray(items)) {
+                return { success: true, items };
+              }
+            }
+            return { success: false, rawText: text.slice(0, 100) };
+          } catch (e: any) {
+            return { success: false, error: e?.message };
+          }
+        }, uid);
+
+        if (xhrResult.success && Array.isArray(xhrResult.items)) {
+          xhrSuccess = true;
+          for (const item of xhrResult.items) {
+            const itemUid = (item.User_Id || item.userid || '').trim().toLowerCase();
+            // Strict exact match only
+            if (itemUid === normUsername || (normRemoteUserId && itemUid === normRemoteUserId)) {
+              const roleName = (item.Role_Name || item.Role_Code || '').trim();
+              if (roleName) discoveredRoles.add(roleName);
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      onProgress?.(`XHR role check note: ${e?.message || 'In-page XHR query bypassed'}`);
+    }
+
+    // Avenue 2: /userRole Registry Table
+    try {
+      const userRoleUrl = roleUrl.replace(/\/addUserRole\b/i, '/userRole');
+      if (page.url() !== userRoleUrl) {
+        await page.goto(userRoleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.waitForTimeout(400);
+      }
+
+      await page.waitForSelector('table tbody tr', { timeout: 8000 }).catch(() => null);
+
+      // Check if table filter/search input exists
+      const filterInput = page.locator('input[type="search"], .filter-table input, .dataTables_filter input, #search, input[placeholder*="search" i]').first();
+      if ((await filterInput.count().catch(() => 0)) > 0 && (await filterInput.isVisible().catch(() => false))) {
+        await filterInput.fill(normUsername).catch(() => {});
+        await page.waitForTimeout(400);
+      }
+
+      let pageCount = 0;
+      const maxPages = 10;
+      let hasMorePages = true;
+
+      while (hasMorePages && pageCount < maxPages) {
+        pageCount++;
+        const tableRowsData = await page.evaluate((args: { targetUname: string; targetRemoteId?: string }) => {
+          const rows = Array.from(document.querySelectorAll('table tbody tr, table.table tbody tr'));
+          const found: string[] = [];
+          for (const row of rows) {
+            const tds = Array.from(row.querySelectorAll('td')).map((td) => (td.textContent || '').trim());
+            // Columns: S.NO(0), User Name(1), User Id(2), Role(3), Status(4)...
+            if (tds.length >= 4) {
+              const rowUserId = tds[2]?.toLowerCase() || '';
+              const rowRole = tds[3]?.trim() || '';
+              // Strictly exact match: Column 2 (User Id) == target username or remoteUserId
+              const matchesUser = rowUserId === args.targetUname || (args.targetRemoteId && rowUserId === args.targetRemoteId);
+              if (matchesUser && rowRole) {
+                found.push(rowRole);
+              }
+            }
+          }
+          return found;
+        }, { targetUname: normUsername, targetRemoteId: normRemoteUserId });
+
+        if (tableRowsData.length > 0) {
+          tableSuccess = true;
+          for (const r of tableRowsData) {
+            discoveredRoles.add(r);
+          }
+        }
+
+        // Pagination traversal
+        const nextBtn = page.locator('.pagination .next:not(.disabled) a, li.paginate_button.next:not(.disabled) a, a:has-text("Next"):not(.disabled)').first();
+        if ((await nextBtn.count().catch(() => 0)) > 0 && (await nextBtn.isVisible().catch(() => false))) {
+          await nextBtn.click().catch(() => { hasMorePages = false; });
+          await page.waitForTimeout(400);
+        } else {
+          hasMorePages = false;
+        }
+      }
+    } catch (e: any) {
+      onProgress?.(`Registry table scan note: ${e?.message || 'Registry scan bypassed'}`);
+    }
+
+    const finalRoles = Array.from(discoveredRoles);
+
+    if (!xhrSuccess && !tableSuccess && finalRoles.length === 0) {
+      return {
+        success: true,
+        roles: [],
+        userSearchState: 'NOT_FOUND',
+      };
+    }
+
+    onProgress?.(`Found ${finalRoles.length} assigned role(s) for '${username}'`);
+    return {
+      success: true,
+      roles: finalRoles,
+      userSearchState: 'EXACT_MATCH_FOUND',
+    };
+  }
+
+  /**
    * Maps single or multiple roles to a selected user on /addUserRole and verifies the saved roles.
    * Supports comma-separated role strings (e.g. 'ACCUMED,FRONT DESK,REPORTS') or role arrays.
    * Verifies that each role remains selected after submit/reload.
@@ -1193,12 +1367,13 @@ export class UserManagementExecutor {
       firstName?: string;
       remoteUserId?: string;
       requestedRoles: string[] | string;
+      existingRoles?: string[];
       loginUrl?: string;
       credentials?: { username: string; password?: string };
       onProgress?: (comment: string, partial?: Partial<RoleMappingResult>) => void;
     }
   ): Promise<RoleMappingResult> {
-    const { roleUrl, username, fullName, firstName, remoteUserId, requestedRoles, loginUrl, credentials, onProgress } = options;
+    const { roleUrl, username, fullName, firstName, remoteUserId, requestedRoles, existingRoles, loginUrl, credentials, onProgress } = options;
 
     onProgress?.('Opening Add User Role screen');
 
@@ -1206,6 +1381,11 @@ export class UserManagementExecutor {
     const rolesArray: string[] = Array.isArray(requestedRoles)
       ? requestedRoles.flatMap((r) => (typeof r === 'string' ? r.split(',') : [r])).map((s) => String(s).trim()).filter(Boolean)
       : (typeof requestedRoles === 'string' ? requestedRoles.split(',').map((s) => s.trim()).filter(Boolean) : []);
+
+    const existingArray: string[] = Array.isArray(existingRoles)
+      ? existingRoles.map((s) => String(s).trim()).filter(Boolean)
+      : [];
+    const expectedFinalRoles = Array.from(new Set([...existingArray, ...rolesArray]));
 
     // 1. Search and Select User
     const searchRes = await this.searchAndSelectUserInRoleScreen(page, {
@@ -1534,8 +1714,10 @@ export class UserManagementExecutor {
     let verificationErrorDetails = '';
 
     try {
-      verificationRes = await page.evaluate((args: { reqRoles: string[]; uname: string; fName?: string }) => {
-        const { reqRoles, uname, fName } = args;
+      verificationRes = await page.evaluate((args: { reqRoles: string[]; uname: string; remoteId?: string }) => {
+        const { reqRoles, uname, remoteId } = args;
+        const normTarget = uname.toLowerCase().trim();
+        const normRemote = remoteId ? remoteId.toLowerCase().trim() : undefined;
         const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tbody tr, table tbody tr'));
         const inputs = Array.from(document.querySelectorAll('table#adduserrole input[type="checkbox"], input[type="checkbox"]')) as HTMLInputElement[];
         const checkedRoles: string[] = [];
@@ -1545,7 +1727,6 @@ export class UserManagementExecutor {
           const checkRoleTd = row.querySelector('td.checkrole');
           const tds = Array.from(row.querySelectorAll('td')).map((td) => (td.textContent || '').trim());
           const label = checkRoleTd ? (checkRoleTd.textContent || '').trim() : '';
-          const val = cb ? (cb.getAttribute('data-chckrole') || cb.value || '').trim() : '';
 
           if (cb && cb.checked) {
             const canonicalLabel = label || (cb.getAttribute('data-chckrole') || cb.value || '').trim();
@@ -1556,12 +1737,9 @@ export class UserManagementExecutor {
 
           // Check if on /userRole registry table (Columns: S.NO(0), User Name(1), User Id(2), Role(3))
           if (tds.length >= 4) {
-            const rowUserName = tds[1]?.toLowerCase() || '';
-            const rowUserId = tds[2]?.toLowerCase() || '';
+            const rowUserId = tds[2]?.toLowerCase().trim() || '';
             const rowRole = tds[3]?.trim() || '';
-            const cleanUname = uname.toLowerCase().replace(/[^a-z0-9]/g, '');
-            const cleanRowUser = rowUserId.replace(/[^a-z0-9]/g, '');
-            const matchesTarget = rowUserId === uname.toLowerCase() || rowUserName === uname.toLowerCase() || (cleanUname && cleanRowUser === cleanUname) || (fName && rowUserName.includes(fName.toLowerCase()));
+            const matchesTarget = rowUserId === normTarget || (normRemote && rowUserId === normRemote);
             if (matchesTarget && rowRole && !checkedRoles.includes(rowRole)) {
               checkedRoles.push(rowRole);
             }
@@ -1587,7 +1765,7 @@ export class UserManagementExecutor {
           allVerified: verifiedRoles.length === reqRoles.length,
           verifiedRoles,
         };
-      }, { reqRoles: rolesArray, uname: username, fName: fullName || firstName });
+      }, { reqRoles: expectedFinalRoles, uname: username, remoteId: remoteUserId });
     } catch (e: any) {
       verificationInconclusive = true;
       verificationErrorDetails = e?.message || 'Exception during in-page role verification';
@@ -1601,19 +1779,18 @@ export class UserManagementExecutor {
           await page.goto(userRoleListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
           await page.waitForTimeout(600);
         }
-        const registryRes = await page.evaluate((args: { reqRoles: string[]; uname: string; fName?: string }) => {
-          const { reqRoles, uname, fName } = args;
+        const registryRes = await page.evaluate((args: { reqRoles: string[]; uname: string; remoteId?: string }) => {
+          const { reqRoles, uname, remoteId } = args;
+          const normTarget = uname.toLowerCase().trim();
+          const normRemote = remoteId ? remoteId.toLowerCase().trim() : undefined;
           const rows = Array.from(document.querySelectorAll('table tbody tr'));
           const foundRoles: string[] = [];
-          const cleanUname = uname.toLowerCase().replace(/[^a-z0-9]/g, '');
           for (const row of rows) {
             const tds = Array.from(row.querySelectorAll('td')).map((td) => (td.textContent || '').trim());
             if (tds.length >= 4) {
-              const rowUserName = tds[1]?.toLowerCase() || '';
-              const rowUserId = tds[2]?.toLowerCase() || '';
+              const rowUserId = tds[2]?.toLowerCase().trim() || '';
               const rowRole = tds[3]?.trim() || '';
-              const cleanRowUser = rowUserId.replace(/[^a-z0-9]/g, '');
-              const matchesTarget = rowUserId === uname.toLowerCase() || rowUserName === uname.toLowerCase() || (cleanUname && cleanRowUser === cleanUname) || (fName && rowUserName.includes(fName.toLowerCase()));
+              const matchesTarget = rowUserId === normTarget || (normRemote && rowUserId === normRemote);
               if (matchesTarget && rowRole && !foundRoles.includes(rowRole)) {
                 foundRoles.push(rowRole);
               }
@@ -1629,7 +1806,7 @@ export class UserManagementExecutor {
             allVerified: verifiedRoles.length === reqRoles.length,
             verifiedRoles,
           };
-        }, { reqRoles: rolesArray, uname: username, fName: fullName || firstName });
+        }, { reqRoles: expectedFinalRoles, uname: username, remoteId: remoteUserId });
 
         if (registryRes.allVerified) {
           verificationRes.allVerified = true;
@@ -1656,7 +1833,7 @@ export class UserManagementExecutor {
         overallStatus: 'PARTIAL_FAILED',
         requestedRoles: rolesArray,
         mappedRoles: verificationRes.verifiedRoles || [],
-        missingRoles: rolesArray.filter((r) => !(verificationRes.verifiedRoles || []).includes(r)),
+        missingRoles: expectedFinalRoles.filter((r) => !(verificationRes.verifiedRoles || []).includes(r)),
         roleSelectionProgress,
         failureReason,
         errorCode: 'ROLE_VERIFICATION_UNKNOWN',
@@ -1666,7 +1843,7 @@ export class UserManagementExecutor {
     }
 
     if (!verificationRes.allVerified) {
-      const failureReason = `Role verification failed: Expected ${rolesArray.length} roles but only ${verificationRes.verifiedCount} were saved`;
+      const failureReason = `Role verification failed: Expected ${expectedFinalRoles.length} roles but only ${verificationRes.verifiedCount} were saved`;
       onProgress?.(failureReason);
       return {
         success: false,
@@ -1678,7 +1855,7 @@ export class UserManagementExecutor {
         overallStatus: 'PARTIAL_FAILED',
         requestedRoles: rolesArray,
         mappedRoles: verificationRes.verifiedRoles,
-        missingRoles: rolesArray.filter((r) => !verificationRes.verifiedRoles.includes(r)),
+        missingRoles: expectedFinalRoles.filter((r) => !verificationRes.verifiedRoles.includes(r)),
         roleSelectionProgress,
         failureReason,
         errorCode: 'ROLE_VERIFICATION_MISMATCH',
@@ -1697,7 +1874,7 @@ export class UserManagementExecutor {
       roleVerificationState: 'PASSED',
       overallStatus: 'COMPLETED',
       requestedRoles: rolesArray,
-      mappedRoles: rolesArray,
+      mappedRoles: verificationRes.verifiedRoles && verificationRes.verifiedRoles.length > 0 ? verificationRes.verifiedRoles : expectedFinalRoles,
       missingRoles: [],
       roleSelectionProgress: `${rolesArray.length} of ${rolesArray.length} selected`,
       retryStartingPoint: 'NONE',

@@ -51,7 +51,8 @@ export class AutomationWorker {
       task.taskType === 'SYNC_CLIENT_USERS' ||
       task.taskType === 'SYNC_CLIENT_RESOURCES_HEADLESS' ||
       task.taskType === 'SYNC_CLIENT_RESOURCES' ||
-      task.taskType === 'SYNC_RESOURCES';
+      task.taskType === 'SYNC_RESOURCES' ||
+      task.taskType === 'REFRESH_CLIENT_USER_ROLES';
     const isInspectTask = task.taskType === 'INSPECT_CREATE_FORM_METADATA' || task.taskType === 'INSPECT_FORM_OPTIONS';
     const isMutationTask = [
       'CREATE_CLIENT_USER',
@@ -62,6 +63,7 @@ export class AutomationWorker {
       'CHANGE_CLIENT_USER_STATUS',
       'RESET_CLIENT_USER_PASSWORD',
       'MAP_USER_ROLES',
+      'MAP_CLIENT_USER_ROLES',
       'PROCESS_USER_FULL_WORKFLOW',
       'CREATE_CLIENT_RESOURCE',
       'CREATE_RESOURCE',
@@ -236,6 +238,99 @@ export class AutomationWorker {
       return;
     }
 
+    // =========================================================================
+    // 1.1 DEDICATED HEADLESS REFRESH CLIENT USER ROLES HANDLER (namespace: 'sync')
+    // =========================================================================
+    if (task.taskType === 'REFRESH_CLIENT_USER_ROLES') {
+      let lease: any = null;
+      try {
+        onProgress?.(`[ROLE REFRESH] Launching isolated headless role refresh context for client [${task.clientId}]...`);
+
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: 'AUTOMATION_OWNED',
+          namespace: 'sync',
+          isHeaded: false,
+          slowMo: 0,
+        });
+
+        const refreshPage = lease.primaryPage;
+        const roleUrl = resolveClientRoleUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.clientAppPath || task.payload?.applicationPath,
+          userRoleRoute: task.payload?.userRoleRoute,
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.clientAppPath || task.payload?.applicationPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+
+        const username = task.payload?.username || (task.payload?.payload && task.payload.payload.username);
+        const remoteUserId = task.payload?.remoteUserId || (task.payload?.payload && task.payload.payload.remoteUserId);
+
+        onProgress?.(`[ROLE REFRESH] Reading assigned roles for user '${username}' on ${roleUrl}...`);
+
+        const refreshRes = await UserManagementExecutor.readUserAssignedRoles(refreshPage, {
+          roleUrl,
+          username,
+          remoteUserId,
+          loginUrl,
+          credentials: task.credentials?.password
+            ? { username: task.credentials.username, password: task.credentials.password }
+            : undefined,
+          onProgress: (msg: string) => {
+            onProgress?.(`[ROLE REFRESH PROGRESS] ${msg}`);
+          },
+        });
+
+        const totalDurationMs = Date.now() - startTime;
+        if (refreshRes.success) {
+          onProgress?.(`[ROLE REFRESH SUCCESS] Discovered ${refreshRes.roles.length} roles for '${username}': ${refreshRes.roles.join(', ')}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: refreshRes,
+          });
+        } else {
+          const safeError = sanitizeErrorMessage(refreshRes.errorMessage || 'Role refresh failed on remote portal');
+          onProgress?.(`[ROLE REFRESH FAILED] ${safeError}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: safeError,
+            totalDurationMs,
+            resultData: refreshRes,
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        const safeMsg = sanitizeErrorMessage(err.message || 'Background role refresh runtime failure');
+        onProgress?.(`[FATAL ROLE REFRESH ERROR] ${safeMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs,
+          resultData: {
+            success: false,
+            roles: [],
+            errorCode: 'ROLE_REFRESH_RUNTIME_ERROR',
+            errorMessage: safeMsg,
+          },
+        });
+      } finally {
+        if (lease) {
+          try {
+            await lease.close({ reason: 'SYNC_COMPLETED' });
+            onProgress?.('[ROLE REFRESH] Headless role refresh context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
 
     // =========================================================================
     // 1.2 DEDICATED HEADLESS BACKGROUND RESOURCE SYNC HANDLER (namespace: 'sync')
@@ -440,6 +535,7 @@ export class AutomationWorker {
       'CHANGE_CLIENT_USER_STATUS',
       'RESET_CLIENT_USER_PASSWORD',
       'MAP_USER_ROLES',
+      'MAP_CLIENT_USER_ROLES',
       'PROCESS_USER_FULL_WORKFLOW',
       'CREATE_CLIENT_RESOURCE',
       'CREATE_RESOURCE',
@@ -794,7 +890,7 @@ export class AutomationWorker {
         }
 
         // 6. Map User Roles Directly
-        if (task.taskType === 'MAP_USER_ROLES') {
+        if (task.taskType === 'MAP_USER_ROLES' || task.taskType === 'MAP_CLIENT_USER_ROLES') {
           const payloadData = task.payload?.payload || task.payload;
           const roleUrl = resolveClientRoleUrl({
             baseUrl: task.clientBaseUrl,
@@ -802,7 +898,8 @@ export class AutomationWorker {
             userRoleRoute: task.payload?.userRoleRoute,
           });
           const username = payloadData?.username || task.payload?.username;
-          const requestedRoles = payloadData?.roles || (payloadData?.role ? (Array.isArray(payloadData.role) ? payloadData.role : payloadData.role.split(',').map((s: string) => s.trim()).filter(Boolean)) : []);
+          const requestedRoles = payloadData?.rolesToAdd || payloadData?.roles || (payloadData?.role ? (Array.isArray(payloadData.role) ? payloadData.role : payloadData.role.split(',').map((s: string) => s.trim()).filter(Boolean)) : []);
+          const existingRoles = payloadData?.existingRoles || [];
 
           onProgress?.(`Starting role mapping for '${username}'…`);
 
@@ -813,6 +910,7 @@ export class AutomationWorker {
             firstName: payloadData?.firstName,
             remoteUserId: payloadData?.remoteUserId,
             requestedRoles,
+            existingRoles,
             loginUrl,
             credentials: task.credentials,
             onProgress: (comment: string) => {

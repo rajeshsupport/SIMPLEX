@@ -378,58 +378,51 @@ export class WorkflowExecutor {
     const maxVerifyTimeoutMs = 15000;
     let authVerified = false;
 
-    // Event-driven verification: Race between navigation, dashboard appearance, error banner, or MFA
-    const verifyPromises: Promise<any>[] = [
-      page.waitForURL((url) => {
-        const u = url.toString().toLowerCase();
-        return !u.includes('/login') || u.includes('/dashboard') || u.includes('/home');
-      }, { timeout: 15000 }).catch(() => null),
-      page.locator(SelectorResolver.DASHBOARD_FALLBACKS.join(', ')).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => null),
-      page.locator('.alert-wrapper .login-alert, .alert_error_message:visible, [data-testid="error-message"]:visible').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => null),
-      page.locator(SelectorResolver.MFA_CONTAINER_FALLBACKS.join(', ')).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => null),
-    ];
+    // Bounded polling loop: Poll every 300ms up to 15s to eliminate premature races during navigation
+    while (Date.now() - verifyStartTime < maxVerifyTimeoutMs) {
+      // 1. Check for MFA / OTP / CAPTCHA prompt
+      const postMfa = await this.checkMfaOrCaptcha(page, workflow);
+      if (postMfa) {
+        telStep6.status = 'REQUIRES_MANUAL_INTERVENTION';
+        telStep6.errorMessage = 'Manual security verification is required in the opened browser window.';
+        stepsTelemetry.push(telStep6);
+        onStepUpdate?.(telStep6);
 
-    await Promise.race(verifyPromises);
+        return {
+          success: false,
+          status: 'REQUIRES_MANUAL_INTERVENTION',
+          classifiedCode: 'MFA_OR_CAPTCHA_REQUIRED',
+          errorMessage: 'Manual security verification is required in the opened browser window.',
+          stepsTelemetry,
+        };
+      }
 
-    // 1. Check for MFA / OTP / CAPTCHA prompt
-    const postMfa = await this.checkMfaOrCaptcha(page, workflow);
-    if (postMfa) {
-      telStep6.status = 'REQUIRES_MANUAL_INTERVENTION';
-      telStep6.errorMessage = 'Manual security verification is required in the opened browser window.';
-      stepsTelemetry.push(telStep6);
-      onStepUpdate?.(telStep6);
+      // 2. Check for explicit error banners or credential failure
+      const isBadCreds = await this.checkBadCredentials(page, workflow);
+      if (isBadCreds) {
+        telStep6.status = 'FAILED';
+        telStep6.errorMessage = 'Client login was unsuccessful. Verify the stored credentials.';
+        stepsTelemetry.push(telStep6);
+        onStepUpdate?.(telStep6);
 
-      return {
-        success: false,
-        status: 'REQUIRES_MANUAL_INTERVENTION',
-        classifiedCode: 'MFA_OR_CAPTCHA_REQUIRED',
-        errorMessage: 'Manual security verification is required in the opened browser window.',
-        stepsTelemetry,
-      };
-    }
+        return {
+          success: false,
+          status: 'FAILED',
+          classifiedCode: 'INVALID_CREDENTIALS',
+          errorMessage: 'Client login was unsuccessful. Verify the stored credentials.',
+          failedStepIndex: 6,
+          stepsTelemetry,
+        };
+      }
 
-    // 2. Check for explicit error banners or credential failure
-    const isBadCreds = await this.checkBadCredentials(page, workflow);
-    if (isBadCreds) {
-      telStep6.status = 'FAILED';
-      telStep6.errorMessage = 'Client login was unsuccessful. Verify the stored credentials.';
-      stepsTelemetry.push(telStep6);
-      onStepUpdate?.(telStep6);
+      // 3. Check for Dashboard Arrival / Authenticated Elements
+      const isSuccess = await this.checkSessionActive(page, workflow);
+      if (isSuccess) {
+        authVerified = true;
+        break;
+      }
 
-      return {
-        success: false,
-        status: 'FAILED',
-        classifiedCode: 'INVALID_CREDENTIALS',
-        errorMessage: 'Client login was unsuccessful. Verify the stored credentials.',
-        failedStepIndex: 6,
-        stepsTelemetry,
-      };
-    }
-
-    // 3. Check for Dashboard Arrival / Authenticated Elements
-    const isSuccess = await this.checkSessionActive(page, workflow);
-    if (isSuccess) {
-      authVerified = true;
+      await page.waitForTimeout(300);
     }
 
     if (!authVerified) {

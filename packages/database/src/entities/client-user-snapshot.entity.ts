@@ -103,6 +103,9 @@ export class ClientUserSnapshot {
   @Column({ type: 'datetime2' })
   lastSyncedAt!: Date;
 
+  @Column({ type: 'datetime2', nullable: true })
+  lastVerifiedAt!: Date | null;
+
   @CreateDateColumn({ type: 'datetime2' })
   createdAt!: Date;
 
