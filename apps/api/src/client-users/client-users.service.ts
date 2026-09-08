@@ -1972,12 +1972,27 @@ export class ClientUsersService implements OnModuleInit {
         });
       }
 
-      // Update local snapshot with resulting roles upon verified success
-      const newCanonicalRoles = diff.resultingRoles.join(', ');
+      // Update local snapshot with resulting roles upon verified success atomically
+      const newCanonicalRoles = Array.from(
+        new Set((diff.resultingRoles || []).map((r) => r.trim()).filter(Boolean))
+      ).join(', ');
+
+      const updateTimestamp = new Date();
+      await this.snapshotRepo
+        .createQueryBuilder()
+        .update(ClientUserSnapshot)
+        .set({
+          role: newCanonicalRoles,
+          lastVerifiedAt: updateTimestamp,
+          lastSyncedAt: updateTimestamp,
+          updatedAt: updateTimestamp,
+        })
+        .where('id = :id', { id: snapshot.id })
+        .execute();
+
       snapshot.role = newCanonicalRoles;
-      snapshot.lastVerifiedAt = new Date();
-      snapshot.lastSyncedAt = new Date();
-      await this.snapshotRepo.save(snapshot);
+      snapshot.lastVerifiedAt = updateTimestamp;
+      snapshot.lastSyncedAt = updateTimestamp;
 
       // Record Audit
       await this.auditRepo.save(
@@ -2182,12 +2197,35 @@ export class ClientUsersService implements OnModuleInit {
         });
       }
 
-      // Live roles verified: update snapshot.role, lastVerifiedAt, lastSyncedAt
-      const liveRoles: string[] = Array.isArray(parsedResult.roles) ? parsedResult.roles : [];
-      snapshot.role = liveRoles.join(', ');
-      snapshot.lastVerifiedAt = new Date();
-      snapshot.lastSyncedAt = new Date();
-      await this.snapshotRepo.save(snapshot);
+      // Live roles verified: normalize canonical role names and remove exact duplicates
+      const rawLiveRoles: string[] = Array.isArray(parsedResult.roles) ? parsedResult.roles : [];
+      const normalizedLiveRoles = Array.from(
+        new Set(
+          rawLiveRoles
+            .map((r) => (typeof r === 'string' ? r.trim() : ''))
+            .filter(Boolean)
+        )
+      );
+      const canonicalRolesString = normalizedLiveRoles.join(', ');
+
+      // Atomic persistence: update snapshot.role, lastVerifiedAt, lastSyncedAt together.
+      // If persistence fails, snapshot and lastVerifiedAt are not marked verified.
+      const updateTimestamp = new Date();
+      await this.snapshotRepo
+        .createQueryBuilder()
+        .update(ClientUserSnapshot)
+        .set({
+          role: canonicalRolesString,
+          lastVerifiedAt: updateTimestamp,
+          lastSyncedAt: updateTimestamp,
+          updatedAt: updateTimestamp,
+        })
+        .where('id = :id', { id: snapshot.id })
+        .execute();
+
+      snapshot.role = canonicalRolesString;
+      snapshot.lastVerifiedAt = updateTimestamp;
+      snapshot.lastSyncedAt = updateTimestamp;
 
       // Record non-sensitive audit metadata (no passwords or credentials)
       await this.auditRepo.save(
@@ -2202,7 +2240,7 @@ export class ClientUsersService implements OnModuleInit {
             clientUserId: id,
             username: snapshot.username,
             remoteUserId: snapshot.remoteUserId,
-            liveRoles,
+            liveRoles: normalizedLiveRoles,
             refreshedAt: new Date().toISOString(),
           }),
         })

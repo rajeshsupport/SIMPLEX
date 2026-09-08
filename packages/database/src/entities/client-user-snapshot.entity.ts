@@ -58,7 +58,7 @@ export class ClientUserSnapshot {
   @Column({ type: 'nvarchar', length: 100, nullable: true })
   nationality?: string | null;
 
-  @Column({ type: 'nvarchar', length: 100, nullable: true })
+  @Column({ type: 'nvarchar', length: 'MAX', nullable: true })
   role?: string | null;
 
   @Column({ type: 'nvarchar', length: 100, nullable: true })
