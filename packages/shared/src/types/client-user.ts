@@ -162,9 +162,30 @@ export interface ClientUserRoleItem {
   canonicalRoleName: string;
 }
 
+export type CreationWorkflowStage =
+  | 'PREVALIDATION'
+  | 'DUPLICATE_CHECK'
+  | 'USER_CREATION_SUBMITTED'
+  | 'REMOTE_USER_CREATED'
+  | 'USER_CREATION_VERIFIED'
+  | 'ROLE_MAPPING_SUBMITTED'
+  | 'ROLES_VERIFIED'
+  | 'CENTRAL_SNAPSHOT_PERSISTED'
+  | 'COMPLETED';
+
+export type CreationOutcome =
+  | 'FAILED_BEFORE_CREATION'
+  | 'CREATION_VERIFICATION_REQUIRED'
+  | 'USER_CREATED_ROLE_PENDING'
+  | 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'
+  | 'COMPLETED';
+
 export interface MapExistingUserRolesDto {
   clientId: string;
-  roles: (string | ClientUserRoleItem)[];
+  roles?: (string | ClientUserRoleItem)[];
+  rolesToAdd?: (string | ClientUserRoleItem)[];
+  rolesToRemove?: (string | ClientUserRoleItem)[];
+  resultingRoles?: (string | ClientUserRoleItem)[];
 }
 
 export interface UserRoleDiff {
@@ -172,7 +193,20 @@ export interface UserRoleDiff {
   rolesToAdd: string[];
   rolesUnchanged: string[];
   rolesRemoved: string[];
+  rolesToRemove?: string[];
   resultingRoles: string[];
+}
+
+export interface UserRoleChangeAuditData {
+  rolesBefore: string[];
+  rolesAdded: string[];
+  rolesRemoved: string[];
+  rolesAfter: string[];
+  targetUserId: string;
+  targetUsername: string;
+  operator: string;
+  timestamp: string;
+  correlationId: string;
 }
 
 export type UserImportAction = 'CREATE' | 'UPDATE' | 'ACTIVATE' | 'DEACTIVATE';

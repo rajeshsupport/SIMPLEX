@@ -14,6 +14,8 @@ import {
   assertValidOneTimeEventId,
   computeOneTimeEventIdHash,
   SHA256_EMPTY_DIGEST,
+  CreationWorkflowStage,
+  CreationOutcome,
 } from '@hmc/shared';
 import { SelectorResolver } from './selector-resolver';
 import * as fs from 'fs';
@@ -155,6 +157,11 @@ export interface UserWorkflowResult {
   missingRoles?: string[];
   roleSelectionProgress?: string;
   credentialDeliveryStatus?: CredentialDeliveryStatus;
+  workflowStage?: CreationWorkflowStage;
+  creationOutcome?: CreationOutcome;
+  isRemoteSaveConfirmed?: boolean;
+  isRemoteUserCreated?: boolean;
+  isRolesVerified?: boolean;
 }
 
 export class UserManagementExecutor {
@@ -631,8 +638,6 @@ export class UserManagementExecutor {
 
         if (!username && email.includes('@')) {
           username = email.split('@')[0];
-        } else if (!username && fullName) {
-          username = fullName.toLowerCase().replace(/\s+/g, '.');
         }
 
         if (!username) continue;
@@ -1366,26 +1371,52 @@ export class UserManagementExecutor {
       fullName?: string;
       firstName?: string;
       remoteUserId?: string;
-      requestedRoles: string[] | string;
+      requestedRoles?: string[] | string;
       existingRoles?: string[];
+      rolesToAdd?: string[] | string;
+      rolesToRemove?: string[] | string;
+      resultingRoles?: string[] | string;
       loginUrl?: string;
       credentials?: { username: string; password?: string };
       onProgress?: (comment: string, partial?: Partial<RoleMappingResult>) => void;
     }
   ): Promise<RoleMappingResult> {
-    const { roleUrl, username, fullName, firstName, remoteUserId, requestedRoles, existingRoles, loginUrl, credentials, onProgress } = options;
+    const { roleUrl, username, fullName, firstName, remoteUserId, requestedRoles, existingRoles, rolesToAdd, rolesToRemove, resultingRoles, loginUrl, credentials, onProgress } = options;
 
     onProgress?.('Opening Add User Role screen');
 
-    // Parse requested roles into array of trimmed strings
-    const rolesArray: string[] = Array.isArray(requestedRoles)
-      ? requestedRoles.flatMap((r) => (typeof r === 'string' ? r.split(',') : [r])).map((s) => String(s).trim()).filter(Boolean)
-      : (typeof requestedRoles === 'string' ? requestedRoles.split(',').map((s) => s.trim()).filter(Boolean) : []);
+    const toArray = (val: string[] | string | undefined): string[] => {
+      if (!val) return [];
+      return Array.isArray(val)
+        ? val.flatMap((r) => (typeof r === 'string' ? r.split(',') : [r])).map((s) => String(s).trim()).filter(Boolean)
+        : (typeof val === 'string' ? val.split(',').map((s) => s.trim()).filter(Boolean) : []);
+    };
 
-    const existingArray: string[] = Array.isArray(existingRoles)
-      ? existingRoles.map((s) => String(s).trim()).filter(Boolean)
-      : [];
-    const expectedFinalRoles = Array.from(new Set([...existingArray, ...rolesArray]));
+    const parsedAdd = toArray(rolesToAdd);
+    const parsedRemove = toArray(rolesToRemove);
+    const parsedExisting = toArray(existingRoles);
+    const parsedRequested = toArray(requestedRoles || resultingRoles);
+
+    let finalToAdd: string[] = parsedAdd;
+    let finalToRemove: string[] = parsedRemove;
+    let expectedFinalRoles: string[] = [];
+
+    if (parsedAdd.length > 0 || parsedRemove.length > 0) {
+      const removeSet = new Set(parsedRemove.map((r) => r.toLowerCase()));
+      const remainingExisting = parsedExisting.filter((r) => !removeSet.has(r.toLowerCase()));
+      expectedFinalRoles = Array.from(new Set([...remainingExisting, ...parsedAdd]));
+    } else if (parsedRequested.length > 0) {
+      const requestedSet = new Set(parsedRequested.map((r) => r.toLowerCase()));
+      const existingSet = new Set(parsedExisting.map((r) => r.toLowerCase()));
+
+      finalToAdd = parsedRequested.filter((r) => !existingSet.has(r.toLowerCase()));
+      finalToRemove = parsedExisting.filter((r) => !requestedSet.has(r.toLowerCase()));
+      expectedFinalRoles = parsedRequested;
+    } else {
+      expectedFinalRoles = parsedExisting;
+    }
+
+    const rolesArray = expectedFinalRoles;
 
     // 1. Search and Select User
     const searchRes = await this.searchAndSelectUserInRoleScreen(page, {
@@ -1436,7 +1467,7 @@ export class UserManagementExecutor {
 
     // Locate all role checkboxes / controls on the page using exact canonical catalog resolution,
     // stable ID lookup, and label re-verification (strictly preventing raw/substring collisions like BILL matching BILLPRINT).
-    const selectionResult = await page.evaluate((rolesToSelect) => {
+    const selectionResult = await page.evaluate(({ rolesToAdd, rolesToRemove }: { rolesToAdd: string[]; rolesToRemove: string[] }) => {
       interface CatalogEntry {
         canonicalName: string;
         stableId: string;
@@ -1509,39 +1540,26 @@ export class UserManagementExecutor {
       const foundRoles: string[] = [];
       const notFoundRoles: string[] = [];
 
-      for (const reqRole of rolesToSelect) {
+      // Process roles to ADD (check if not checked)
+      for (const reqRole of rolesToAdd) {
         const normReq = reqRole.toLowerCase().trim();
-
-        // Step A: Resolve requested role by exact canonical catalog name
-        // Strict exact equality matching only: NO substring, NO prefix matching!
         const catalogEntry = catalog.find((c) => c.canonicalName.toLowerCase().trim() === normReq);
-
         if (!catalogEntry) {
           notFoundRoles.push(reqRole);
           continue;
         }
 
-        // Step B: Obtain its stable role ID and source attribute
         const { stableId, sourceAttr } = catalogEntry;
-
-        // Step C: Locate the DOM checkbox by stable ID and source attribute
         let targetCheckbox: HTMLInputElement | null = null;
-
-        // Priority 1: getElementById if source attribute is id (handles IDs starting with digits and special chars)
         if (sourceAttr === 'id' && stableId) {
           targetCheckbox = document.getElementById(stableId) as HTMLInputElement | null;
         }
-
-        // Priority 2: Escaped locator using preserved source attribute
         if (!targetCheckbox && stableId && sourceAttr) {
           try {
             const sel = `input[${sourceAttr}="${escapeCss(stableId)}"]`;
             targetCheckbox = document.querySelector(sel) as HTMLInputElement | null;
           } catch {}
         }
-
-        // Priority 3: Fallback across all supported attributes with escaping:
-        // id, data-role-id, data-chckrole, data-role, and value
         if (!targetCheckbox && stableId) {
           const supportedAttrs = ['id', 'data-role-id', 'data-chckrole', 'data-role', 'value'];
           for (const attr of supportedAttrs) {
@@ -1555,17 +1573,13 @@ export class UserManagementExecutor {
             } catch {}
           }
         }
-
-        if (!targetCheckbox) {
-          targetCheckbox = catalogEntry.cb;
-        }
-
+        if (!targetCheckbox) targetCheckbox = catalogEntry.cb;
         if (!targetCheckbox) {
           notFoundRoles.push(reqRole);
           continue;
         }
 
-        // Step D: Re-verify its canonical label before clicking
+        // Associated label check
         const associatedLabel = (
           catalogEntry.label ||
           targetCheckbox.closest('tr')?.querySelector('td.checkrole')?.textContent ||
@@ -1579,14 +1593,12 @@ export class UserManagementExecutor {
           continue;
         }
 
-        // Strictly additive: if already checked, preserve it. If unchecked, check it.
         if (!targetCheckbox.checked) {
           targetCheckbox.checked = true;
           targetCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
           targetCheckbox.dispatchEvent(new Event('input', { bubbles: true }));
         }
 
-        // Set valid default page option in the row if present
         if (catalogEntry.row) {
           const sel = catalogEntry.row.querySelector('select') as HTMLSelectElement | null;
           if (sel && sel.options.length > 1) {
@@ -1609,8 +1621,51 @@ export class UserManagementExecutor {
         foundRoles.push(catalogEntry.canonicalName);
       }
 
+      // Process roles to REMOVE (uncheck if currently checked)
+      for (const remRole of rolesToRemove) {
+        const normRem = remRole.toLowerCase().trim();
+        const catalogEntry = catalog.find((c) => c.canonicalName.toLowerCase().trim() === normRem);
+        if (!catalogEntry) {
+          // If not in catalog, cannot uncheck via catalog, continue
+          continue;
+        }
+
+        const { stableId, sourceAttr } = catalogEntry;
+        let targetCheckbox: HTMLInputElement | null = null;
+        if (sourceAttr === 'id' && stableId) {
+          targetCheckbox = document.getElementById(stableId) as HTMLInputElement | null;
+        }
+        if (!targetCheckbox && stableId && sourceAttr) {
+          try {
+            const sel = `input[${sourceAttr}="${escapeCss(stableId)}"]`;
+            targetCheckbox = document.querySelector(sel) as HTMLInputElement | null;
+          } catch {}
+        }
+        if (!targetCheckbox && stableId) {
+          const supportedAttrs = ['id', 'data-role-id', 'data-chckrole', 'data-role', 'value'];
+          for (const attr of supportedAttrs) {
+            try {
+              const sel = `input[${attr}="${escapeCss(stableId)}"]`;
+              const el = document.querySelector(sel) as HTMLInputElement | null;
+              if (el) {
+                targetCheckbox = el;
+                break;
+              }
+            } catch {}
+          }
+        }
+        if (!targetCheckbox) targetCheckbox = catalogEntry.cb;
+        if (!targetCheckbox) continue;
+
+        if (targetCheckbox.checked) {
+          targetCheckbox.checked = false;
+          targetCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+          targetCheckbox.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+
       return { foundRoles, notFoundRoles };
-    }, rolesArray);
+    }, { rolesToAdd: finalToAdd, rolesToRemove: finalToRemove });
 
     mappedRoles.push(...selectionResult.foundRoles);
     missingRoles.push(...selectionResult.notFoundRoles);
@@ -1714,8 +1769,8 @@ export class UserManagementExecutor {
     let verificationErrorDetails = '';
 
     try {
-      verificationRes = await page.evaluate((args: { reqRoles: string[]; uname: string; remoteId?: string }) => {
-        const { reqRoles, uname, remoteId } = args;
+      verificationRes = await page.evaluate((args: { reqRoles: string[]; remRoles: string[]; uname: string; remoteId?: string }) => {
+        const { reqRoles, remRoles, uname, remoteId } = args;
         const normTarget = uname.toLowerCase().trim();
         const normRemote = remoteId ? remoteId.toLowerCase().trim() : undefined;
         const rows = Array.from(document.querySelectorAll('table#adduserrole tbody tr, table.table tbody tr, table tbody tr'));
@@ -1759,13 +1814,19 @@ export class UserManagementExecutor {
           return checkedRoles.some((c) => c.toLowerCase().trim() === rNorm);
         });
 
+        // Ensure removed roles are NOT checked
+        const lingeringRemovals = remRoles.filter((r) => {
+          const rNorm = r.toLowerCase().trim();
+          return checkedRoles.some((c) => c.toLowerCase().trim() === rNorm);
+        });
+
         return {
           checkedRoles,
           verifiedCount: verifiedRoles.length,
-          allVerified: verifiedRoles.length === reqRoles.length,
+          allVerified: verifiedRoles.length === reqRoles.length && lingeringRemovals.length === 0,
           verifiedRoles,
         };
-      }, { reqRoles: expectedFinalRoles, uname: username, remoteId: remoteUserId });
+      }, { reqRoles: expectedFinalRoles, remRoles: finalToRemove, uname: username, remoteId: remoteUserId });
     } catch (e: any) {
       verificationInconclusive = true;
       verificationErrorDetails = e?.message || 'Exception during in-page role verification';
@@ -1779,8 +1840,8 @@ export class UserManagementExecutor {
           await page.goto(userRoleListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
           await page.waitForTimeout(600);
         }
-        const registryRes = await page.evaluate((args: { reqRoles: string[]; uname: string; remoteId?: string }) => {
-          const { reqRoles, uname, remoteId } = args;
+        const registryRes = await page.evaluate((args: { reqRoles: string[]; remRoles: string[]; uname: string; remoteId?: string }) => {
+          const { reqRoles, remRoles, uname, remoteId } = args;
           const normTarget = uname.toLowerCase().trim();
           const normRemote = remoteId ? remoteId.toLowerCase().trim() : undefined;
           const rows = Array.from(document.querySelectorAll('table tbody tr'));
@@ -1800,13 +1861,17 @@ export class UserManagementExecutor {
             const rNorm = r.toLowerCase().trim();
             return foundRoles.some((c) => c.toLowerCase().trim() === rNorm);
           });
+          const lingeringRemovals = remRoles.filter((r) => {
+            const rNorm = r.toLowerCase().trim();
+            return foundRoles.some((c) => c.toLowerCase().trim() === rNorm);
+          });
           return {
             foundRoles,
             verifiedCount: verifiedRoles.length,
-            allVerified: verifiedRoles.length === reqRoles.length,
+            allVerified: verifiedRoles.length === reqRoles.length && lingeringRemovals.length === 0,
             verifiedRoles,
           };
-        }, { reqRoles: expectedFinalRoles, uname: username, remoteId: remoteUserId });
+        }, { reqRoles: expectedFinalRoles, remRoles: finalToRemove, uname: username, remoteId: remoteUserId });
 
         if (registryRes.allVerified) {
           verificationRes.allVerified = true;
@@ -1907,15 +1972,15 @@ export class UserManagementExecutor {
     const username = userDto.username;
     const fullName = `${userDto.firstName || ''} ${userDto.lastName || ''}`.trim();
 
-    onProgress?.('Preparing user row', { validationState: 'IN_PROGRESS' });
-    onProgress?.('Validating user information');
-    onProgress?.('Validating nationality');
-    onProgress?.('Parsing requested roles');
-    onProgress?.('Validating roles against live client options');
-    onProgress?.('Checking whether the username already exists');
+    onProgress?.('Preparing user row', { validationState: 'IN_PROGRESS', workflowStage: 'PREVALIDATION' });
+    onProgress?.('Validating user information', { workflowStage: 'PREVALIDATION' });
+    onProgress?.('Validating nationality', { workflowStage: 'PREVALIDATION' });
+    onProgress?.('Parsing requested roles', { workflowStage: 'PREVALIDATION' });
+    onProgress?.('Validating roles against live client options', { workflowStage: 'PREVALIDATION' });
+    onProgress?.('Checking whether the username already exists', { workflowStage: 'DUPLICATE_CHECK' });
 
     // 1. User Creation
-    onProgress?.('Creating user', { validationState: 'PASSED', creationState: 'IN_PROGRESS' });
+    onProgress?.('Creating user', { validationState: 'PASSED', creationState: 'IN_PROGRESS', workflowStage: 'USER_CREATION_SUBMITTED' });
     const effectiveUsersUrl = usersUrl || addUsersUrl.replace(/\/addUsers\b/i, '/users');
 
     const createRes = await this.createUser(page, {
@@ -1928,12 +1993,21 @@ export class UserManagementExecutor {
 
     if (!createRes.success) {
       const failureReason = `User creation failed: ${createRes.errorMessage || createRes.message || 'User creation failed on client portal.'}`;
+      const outcome: CreationOutcome =
+        createRes.errorCode === 'REMOTE_USER_NOT_FOUND_AFTER_CREATE' || createRes.errorCode === 'REMOTE_CREATE_VERIFICATION_FAILED'
+          ? 'CREATION_VERIFICATION_REQUIRED'
+          : 'FAILED_BEFORE_CREATION';
+
       onProgress?.(failureReason, {
         validationState: 'PASSED',
         creationState: 'FAILED',
         overallStatus: 'FAILED',
         failureReason,
         credentialDeliveryStatus: 'FAILED',
+        workflowStage: 'USER_CREATION_SUBMITTED',
+        creationOutcome: outcome,
+        isRemoteUserCreated: false,
+        isRemoteSaveConfirmed: false,
       });
       onProgress?.('Current user marked as failed');
       onProgress?.('Continuing to the next user');
@@ -1955,8 +2029,20 @@ export class UserManagementExecutor {
         credentialDeliveryStatus: 'FAILED',
         retryStartingPoint: 'USER_CREATION',
         nextAction: 'Continuing to next user',
+        workflowStage: 'USER_CREATION_SUBMITTED',
+        creationOutcome: outcome,
+        isRemoteUserCreated: false,
+        isRemoteSaveConfirmed: false,
+        isRolesVerified: false,
       };
     }
+
+    onProgress?.('Remote user verified on client portal', {
+      creationState: 'COMPLETED',
+      workflowStage: 'USER_CREATION_VERIFIED',
+      isRemoteUserCreated: true,
+      isRemoteSaveConfirmed: true,
+    });
 
     // Capture secret in localized scope and immediately dispatch through dedicated channel
     let capturedSecret =
@@ -1999,6 +2085,9 @@ export class UserManagementExecutor {
     onProgress?.('User created successfully', {
       creationState: 'COMPLETED',
       credentialDeliveryStatus: deliveryStatus,
+      workflowStage: 'USER_CREATION_VERIFIED',
+      isRemoteUserCreated: true,
+      isRemoteSaveConfirmed: true,
     });
 
     // Determine roles to map
@@ -2007,7 +2096,14 @@ export class UserManagementExecutor {
       : (userDto.role ? userDto.role.split(',').map((s) => s.trim()).filter(Boolean) : []);
 
     if (!roleUrl || requestedRoles.length === 0) {
-      onProgress?.('User process completed', { overallStatus: 'COMPLETED' });
+      onProgress?.('User process completed', {
+        overallStatus: 'COMPLETED',
+        workflowStage: 'ROLES_VERIFIED',
+        creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+        isRemoteUserCreated: true,
+        isRemoteSaveConfirmed: true,
+        isRolesVerified: true,
+      });
       onProgress?.('Moving to the next user');
       return {
         success: true,
@@ -2027,10 +2123,20 @@ export class UserManagementExecutor {
         credentialDeliveryStatus: deliveryStatus,
         retryStartingPoint: 'NONE',
         nextAction: 'Completed',
+        workflowStage: 'ROLES_VERIFIED',
+        creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+        isRemoteUserCreated: true,
+        isRemoteSaveConfirmed: true,
+        isRolesVerified: true,
       };
     }
 
     // 2. Role Mapping Workflow
+    onProgress?.('Submitting role mappings', {
+      workflowStage: 'ROLE_MAPPING_SUBMITTED',
+      roleUpdateState: 'IN_PROGRESS',
+    });
+
     const roleMappingRes = await this.mapUserRoles(page, {
       roleUrl,
       username,
@@ -2054,6 +2160,11 @@ export class UserManagementExecutor {
         overallStatus: 'PARTIAL_FAILED',
         failureReason: roleMappingRes.failureReason,
         credentialDeliveryStatus: deliveryStatus,
+        workflowStage: 'ROLE_MAPPING_SUBMITTED',
+        creationOutcome: 'USER_CREATED_ROLE_PENDING',
+        isRemoteUserCreated: true,
+        isRemoteSaveConfirmed: true,
+        isRolesVerified: false,
       });
       onProgress?.('Continuing to the next user');
 
@@ -2078,9 +2189,22 @@ export class UserManagementExecutor {
         credentialDeliveryStatus: deliveryStatus,
         retryStartingPoint: 'ROLE_MAPPING',
         nextAction: 'Continuing to next user',
+        workflowStage: 'ROLE_MAPPING_SUBMITTED',
+        creationOutcome: 'USER_CREATED_ROLE_PENDING',
+        isRemoteUserCreated: true,
+        isRemoteSaveConfirmed: true,
+        isRolesVerified: false,
       };
     }
 
+    onProgress?.('Roles verified successfully on client portal', {
+      workflowStage: 'ROLES_VERIFIED',
+      roleVerificationState: 'PASSED',
+      creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+      isRemoteUserCreated: true,
+      isRemoteSaveConfirmed: true,
+      isRolesVerified: true,
+    });
     onProgress?.('Moving to the next user');
 
     return {
@@ -2101,6 +2225,11 @@ export class UserManagementExecutor {
       credentialDeliveryStatus: deliveryStatus,
       retryStartingPoint: 'NONE',
       nextAction: 'Completed',
+      workflowStage: 'ROLES_VERIFIED',
+      creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+      isRemoteUserCreated: true,
+      isRemoteSaveConfirmed: true,
+      isRolesVerified: true,
     };
   }
 
@@ -4091,15 +4220,19 @@ export class UserManagementExecutor {
       }
     });
 
-    if (usernameColIdx === -1) {
-      // Default to index 2 (S.NO(0), User Name / Full Name(1), Name / Login(2))
-      if (headerTexts.length >= 6 || fullNameColIdx === 1) {
-        usernameColIdx = 2;
-      } else if (fullNameColIdx !== -1) {
-        usernameColIdx = fullNameColIdx;
-      } else {
-        usernameColIdx = 2;
-      }
+    if (usernameColIdx === -1 && !targetRemoteUserId) {
+      return {
+        success: false,
+        errorCode: 'REMOTE_USERNAME_COLUMN_NOT_FOUND',
+        errorMessage: `Verified username column could not be identified on users table for user '${targetUsername}'.`,
+        diagnostics: {
+          requestedNormalizedUsername: normTarget,
+          remoteRowsInspected: 0,
+          pagesVisited: 0,
+          usernameColIdx: -1,
+          matchCount: 0,
+        },
+      };
     }
     if (statusColIdx === -1) statusColIdx = headerTexts.length > 2 ? headerTexts.length - 2 : 4;
     if (actionColIdx === -1) actionColIdx = headerTexts.length > 1 ? headerTexts.length - 1 : 5;
@@ -4135,30 +4268,29 @@ export class UserManagementExecutor {
 
               const cellTexts = cells.map((c) => (c.textContent || '').trim());
               const cellUsername = (usernameColIdx >= 0 && usernameColIdx < cellTexts.length ? cellTexts[usernameColIdx] : '').trim().toLowerCase();
-              const cellFullName = (fullNameColIdx >= 0 && fullNameColIdx < cellTexts.length ? cellTexts[fullNameColIdx] : '').trim().toLowerCase();
 
               const dataId = row.getAttribute('data-id') || row.getAttribute('data-user-id') || row.getAttribute('id') || '';
-              const links = Array.from(row.querySelectorAll('a[href], button[onclick], [ng-click], a[onclick], [data-user]')).map((a) => {
-                return (
-                  (a.getAttribute('href') || '') +
-                  ' ' +
-                  (a.getAttribute('onclick') || '') +
-                  ' ' +
-                  (a.getAttribute('ng-click') || '') +
-                  ' ' +
-                  (a.getAttribute('data-user') || '')
-                );
-              });
 
               let isMatch = false;
 
-              // Rule 3: When remoteUserId is supplied and the row exposes a remote ID:
-              // exact match => continue; mismatch => reject immediately (do not fall back to name or broad row text)
-              if (targetRemoteUserId && dataId) {
+              const isSyntheticPlaceholder =
+                Boolean(targetRemoteUserId && targetRemoteUserId.trim().toLowerCase() === `remote_${normTarget}`);
+
+              // Rule 1: Genuine authoritative remote ID matching
+              if (targetRemoteUserId && !isSyntheticPlaceholder && dataId) {
                 if (dataId.trim().toLowerCase() === targetRemoteUserId.toLowerCase()) {
                   isMatch = true;
                 } else {
                   // Explicit mismatch: immediately reject, do NOT fall back to username or broad row text
+                  isMatch = false;
+                  continue;
+                }
+              } else if (targetRemoteUserId && isSyntheticPlaceholder && dataId) {
+                // Synthetic legacy placeholder: allow if dataId matches synthetic ID or matches live username
+                if (dataId.trim().toLowerCase() === targetRemoteUserId.toLowerCase() || dataId.trim().toLowerCase() === normTarget) {
+                  isMatch = true;
+                } else {
+                  // Explicit mismatch against another user ID
                   isMatch = false;
                   continue;
                 }
@@ -4310,10 +4442,8 @@ export class UserManagementExecutor {
           });
           await page.waitForTimeout(200);
 
-          // Enter target username variants (exact, dot-separated, or prefix)
-          const queries = [targetUsername.trim()];
-          if (targetUsername.includes('_')) queries.push(targetUsername.replace(/_/g, '.'));
-          if (targetUsername.includes('.')) queries.push(targetUsername.replace(/\./g, '_'));
+          // Enter exact target username or remote user ID (no mutation or substring guessing)
+          const queries = targetRemoteUserId ? [targetRemoteUserId, targetUsername.trim()] : [targetUsername.trim()];
 
           for (const q of queries) {
             await searchInput.fill(q);
@@ -4483,7 +4613,7 @@ export class UserManagementExecutor {
     await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
     const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
-    if (!lookupRes.success || !lookupRes.rowHandle) {
+    if (!lookupRes.success || !lookupRes.rowLocator) {
       return {
         success: false,
         username,
@@ -4492,9 +4622,7 @@ export class UserManagementExecutor {
       };
     }
 
-    const rowIndex = lookupRes.rowIndex ?? 0;
-    const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
-    const rowLocator = page.locator(tableSelector).nth(rowIndex);
+    const rowLocator = lookupRes.rowLocator;
 
     const editBtn = rowLocator.locator(
       'button.btn-edit, a.btn-edit, a[href*="edit" i], [data-testid="btn-edit-user"], a[title*="edit" i], button[title*="edit" i]'
@@ -4794,11 +4922,16 @@ export class UserManagementExecutor {
           : '';
         const dataId = el.getAttribute('data-id') || el.getAttribute('data-user-id') || el.getAttribute('id') || '';
 
+        const isSynthetic =
+          Boolean(args.targetRemoteUserId && args.normTarget && args.targetRemoteUserId.trim().toLowerCase() === `remote_${args.normTarget}`);
+
         let matched = false;
-        // Rule 3: When remoteUserId is supplied and the row exposes a remote ID:
-        // exact match => continue; mismatch => reject immediately (do not fall back to name or broad row text)
-        if (args.targetRemoteUserId && dataId) {
+        if (args.targetRemoteUserId && !isSynthetic && dataId) {
+          // Authoritative ID check: must match exactly
           matched = dataId.trim().toLowerCase() === args.targetRemoteUserId.toLowerCase();
+        } else if (isSynthetic && dataId) {
+          // Synthetic placeholder check: matches synthetic ID or live username-as-ID
+          matched = (args.targetRemoteUserId ? dataId.trim().toLowerCase() === args.targetRemoteUserId.toLowerCase() : false) || dataId.trim().toLowerCase() === args.normTarget;
         } else if (cellUsername && cellUsername === args.normTarget) {
           // Rule 2: exact normalized username match in known username column
           matched = true;
@@ -5204,6 +5337,7 @@ export class UserManagementExecutor {
           usersListUrl: string;
           addUsersUrl?: string;
           username: string;
+          remoteUserId?: string;
           loginUrl?: string;
           credentials?: { username: string; password?: string };
           onProgress?: (msg: string) => void;
@@ -5212,15 +5346,15 @@ export class UserManagementExecutor {
   ): Promise<MutationResult> {
     const isObj = typeof arg1 === 'object';
     const usersListUrl = isObj ? arg1.usersListUrl : (arg1 as string);
-    const addUsersUrl = isObj ? arg1.addUsersUrl : undefined;
     const username = (isObj ? arg1.username : (arg2 as string)).trim();
+    const remoteUserId = isObj ? (arg1 as any).remoteUserId : undefined;
     const loginUrl = isObj ? arg1.loginUrl : undefined;
     const credentials = isObj ? arg1.credentials : undefined;
     const onProgress = isObj ? arg1.onProgress : undefined;
 
-    // 1. Ensure authenticated
+    // 1. Ensure authenticated directly on usersListUrl (no addUsersUrl visit)
     onProgress?.(`Logging in to selected Simplex client…`);
-    const authRes = await this.ensureAuthenticated(page, { targetUrl: addUsersUrl || usersListUrl, loginUrl, credentials });
+    const authRes = await this.ensureAuthenticated(page, { targetUrl: usersListUrl, loginUrl, credentials });
     if (!authRes.authenticated) {
       return {
         success: false,
@@ -5230,17 +5364,7 @@ export class UserManagementExecutor {
       };
     }
 
-    // 2. Authoritative client default-password capture from live Add User screen
-    let clientDefaultPassword: string | undefined = undefined;
-    if (addUsersUrl) {
-      onProgress?.(`Capturing client default password from Add User screen…`);
-      try {
-        await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        clientDefaultPassword = await this.captureLiveDefaultPassword(page);
-      } catch {}
-    }
-
-    // 3. Open users list screen
+    // 2. Open users list screen directly
     onProgress?.(`Opening Users screen…`);
     try {
       await page.goto(usersListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
@@ -5253,9 +5377,9 @@ export class UserManagementExecutor {
       };
     }
 
-    // 4. Locate target user row
+    // 3. Locate target user row using remote ID first, exact username second
     onProgress?.(`Searching for '${username}'…`);
-    const lookupRes = await this.findExactUserRow(page, username, usersListUrl);
+    const lookupRes = await this.findExactUserRow(page, username, usersListUrl, { remoteUserId });
     if (!lookupRes.success || !lookupRes.rowHandle) {
       return {
         success: false,
@@ -5310,9 +5434,16 @@ export class UserManagementExecutor {
 
     // 6. Locate and trigger Password Reset control
     onProgress?.(`Resetting password for '${username}' in Simplex client…`);
-    const rowIndex = lookupRes.rowIndex ?? 0;
-    const tableSelector = 'table tbody tr, [ng-repeat*="user" i], [data-ng-repeat*="user" i], [role="row"]:not(:first-child), .user-row';
-    const rowLocator = page.locator(tableSelector).nth(rowIndex);
+    if (!lookupRes.rowLocator) {
+      page.off('dialog', dialogHandler);
+      return {
+        success: false,
+        username,
+        errorCode: 'REMOTE_USER_ROW_NOT_RESOLVED',
+        errorMessage: `Exact row locator missing for user '${username}'. Never falling back to nth(rowIndex).`,
+      };
+    }
+    const rowLocator = lookupRes.rowLocator;
 
     if (page.isClosed()) {
       page.off('dialog', dialogHandler);
@@ -5486,17 +5617,8 @@ export class UserManagementExecutor {
     // 9. Confirm positive completion
     // Invariant: Do not wait for username or status row to change after reset; those values normally remain unchanged.
     if (isResetConfirmed) {
-      // Fallback: If reset was confirmed but neither dialog nor upfront capture got password, attempt fallback capture
-      if (!explicitResetPassword && !clientDefaultPassword && addUsersUrl) {
-        try {
-          await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 8000 });
-          clientDefaultPassword = await this.captureLiveDefaultPassword(page);
-        } catch {}
-      }
-
       const deliveredPassword =
         explicitResetPassword ||
-        clientDefaultPassword ||
         this.getCachedClientDefaultPassword(usersListUrl);
 
       if (deliveredPassword) {
@@ -5516,7 +5638,7 @@ export class UserManagementExecutor {
     return {
       success: false,
       username,
-      errorCode: 'REMOTE_PASSWORD_RESET_UNVERIFIED',
+      errorCode: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
       errorMessage: `Password reset for user '${username}' could not be verified on remote client.`,
     };
   }

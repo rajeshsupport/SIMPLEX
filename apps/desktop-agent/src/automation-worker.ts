@@ -745,13 +745,6 @@ export class AutomationWorker {
 
         // 4. Reset User Password
         if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
-          const addUsersUrl = resolveClientRoute({
-            baseUrl: task.clientBaseUrl,
-            applicationPath: appPath,
-            route: task.payload?.addUsersRoute || task.addUsersRoute,
-            fallbackRoute: '/addUsers',
-          });
-
           const reportProgress = (msg: string) => {
             onProgress?.(msg);
             this.agentClient
@@ -763,15 +756,14 @@ export class AutomationWorker {
           };
 
           reportProgress(`Logging in to selected Simplex client…`);
-          reportProgress(`Capturing client default password from Add User screen…`);
           reportProgress(`Opening Users screen…`);
           reportProgress(`Searching for '${task.payload.username}'…`);
           reportProgress(`Resetting password for '${task.payload.username}' in Simplex client…`);
 
           const resetRes = await UserManagementExecutor.resetUserPassword(mutationPage, {
             usersListUrl,
-            addUsersUrl,
             username: task.payload.username,
+            remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
             loginUrl,
             credentials: task.credentials,
             onProgress: reportProgress,
@@ -873,8 +865,10 @@ export class AutomationWorker {
             userRoleRoute: task.payload?.userRoleRoute,
           });
           const username = payloadData?.username || task.payload?.username;
-          const requestedRoles = payloadData?.rolesToAdd || payloadData?.roles || (payloadData?.role ? (Array.isArray(payloadData.role) ? payloadData.role : payloadData.role.split(',').map((s: string) => s.trim()).filter(Boolean)) : []);
+          const requestedRoles = payloadData?.resultingRoles || payloadData?.roles || (payloadData?.role ? (Array.isArray(payloadData.role) ? payloadData.role : payloadData.role.split(',').map((s: string) => s.trim()).filter(Boolean)) : []);
           const existingRoles = payloadData?.existingRoles || [];
+          const rolesToAdd = payloadData?.rolesToAdd || [];
+          const rolesToRemove = payloadData?.rolesToRemove || [];
 
           onProgress?.(`Starting role mapping for '${username}'…`);
 
@@ -883,9 +877,11 @@ export class AutomationWorker {
             username,
             fullName: payloadData?.fullName,
             firstName: payloadData?.firstName,
-            remoteUserId: payloadData?.remoteUserId,
+            remoteUserId: payloadData?.remoteUserId || task.remoteUserId,
             requestedRoles,
             existingRoles,
+            rolesToAdd,
+            rolesToRemove,
             loginUrl,
             credentials: task.credentials,
             onProgress: (comment: string) => {

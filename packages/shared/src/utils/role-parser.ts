@@ -114,6 +114,7 @@ export interface RoleDiffResult {
   rolesToAdd: string[];
   rolesUnchanged: string[];
   rolesRemoved: string[];
+  rolesToRemove?: string[];
   resultingRoles: string[];
 }
 
@@ -172,6 +173,70 @@ export function computeRoleDiff(
     rolesToAdd,
     rolesUnchanged,
     rolesRemoved: [], // Strictly additive - zero removals
+    rolesToRemove: [],
+    resultingRoles,
+  };
+}
+
+/**
+ * Computes a bi-directional role diff between existing user roles and selected target roles.
+ * Allows both checking new roles (rolesToAdd) and unchecking existing roles (rolesRemoved).
+ * Resulting formula: finalRemoteRoles = (existing \ removals) U additions.
+ */
+export function computeBidirectionalRoleDiff(
+  existingRoles: (string | null | undefined)[],
+  selectedRoles: (string | null | undefined)[]
+): RoleDiffResult {
+  const existingSet = new Set(
+    existingRoles
+      .filter((r): r is string => typeof r === "string" && r.trim().length > 0)
+      .map((r) => r.trim())
+  );
+  const existingNormMap = new Map<string, string>();
+  for (const r of existingSet) {
+    existingNormMap.set(r.toLowerCase(), r);
+  }
+
+  const selectedList = selectedRoles
+    .filter((r): r is string => typeof r === "string" && r.trim().length > 0)
+    .map((r) => r.trim());
+
+  const rolesToAdd: string[] = [];
+  const rolesUnchanged: string[] = [];
+  const seenToAdd = new Set<string>();
+  const selectedNormSet = new Set<string>();
+
+  for (const sel of selectedList) {
+    const norm = sel.toLowerCase();
+    selectedNormSet.add(norm);
+    if (existingNormMap.has(norm)) {
+      const canonical = existingNormMap.get(norm)!;
+      if (!rolesUnchanged.includes(canonical)) {
+        rolesUnchanged.push(canonical);
+      }
+    } else {
+      if (!seenToAdd.has(norm)) {
+        seenToAdd.add(norm);
+        rolesToAdd.push(sel);
+      }
+    }
+  }
+
+  const rolesRemoved: string[] = [];
+  for (const r of existingSet) {
+    if (!selectedNormSet.has(r.toLowerCase())) {
+      rolesRemoved.push(r);
+    }
+  }
+
+  const resultingRoles = Array.from(new Set([...rolesUnchanged, ...rolesToAdd]));
+
+  return {
+    existingRoles: Array.from(existingSet),
+    rolesToAdd,
+    rolesUnchanged,
+    rolesRemoved,
+    rolesToRemove: rolesRemoved,
     resultingRoles,
   };
 }
