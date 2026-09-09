@@ -1,5 +1,7 @@
 import {
   Injectable,
+  Inject,
+  forwardRef,
   NotFoundException,
   BadRequestException,
   ConflictException,
@@ -62,6 +64,11 @@ import {
   CreationWorkflowStage,
   toRoleItems,
   ClientUserRoleItem,
+  AutomationInProgressResponse,
+  UserCreationRunStatusResponse,
+  SyncUserBatchDto,
+  SyncUserBatchResponse,
+  ScrapedUserBatchItem,
 } from '@hmc/shared';
 import { AgentsService } from '../agents/agents.service.js';
 
@@ -1087,16 +1094,36 @@ export class ClientUsersService implements OnModuleInit {
 
       const savedRun = await this.runRepo.save(run);
 
-      // Wait for completion (up to 30s)
+      // Bounded synchronous wait budget (20s)
       const startTime = Date.now();
+      const SYNC_WAIT_BUDGET_MS = 20000;
       let completedRun: AutomationRun | null = null;
-      while (Date.now() - startTime < 30000) {
+      while (Date.now() - startTime < SYNC_WAIT_BUDGET_MS) {
         await new Promise((r) => setTimeout(r, 400));
         const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
         if (r && ['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'].includes(r.status)) {
           completedRun = r;
           break;
         }
+      }
+
+      // If still pending or running at synchronous deadline: return HTTP 202 AUTOMATION_IN_PROGRESS
+      if (!completedRun) {
+        const latestRun = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        let latestStage = 'USER_CREATION_SUBMITTED';
+        try {
+          const p = JSON.parse(latestRun?.resultSummaryJson || '{}');
+          if (p.workflowStage) latestStage = p.workflowStage;
+          else if (p.message) latestStage = p.message;
+        } catch {}
+
+        return {
+          operationStatus: 'AUTOMATION_IN_PROGRESS',
+          runId: savedRun.id,
+          stage: latestStage,
+          targetUsername: sanitizedDto.username,
+          message: 'User creation and multi-role mapping is in progress on remote portal.',
+        } as any;
       }
 
       let parsedResult: any = {};
@@ -1270,6 +1297,130 @@ export class ClientUsersService implements OnModuleInit {
     } finally {
       releaseLock();
     }
+  }
+
+  /**
+   * Polls the live status of an asynchronous user creation / multi-role workflow.
+   * Strictly read-only: 0 inserts or updates to ClientUserSnapshot, AutomationRun, AuditLog, or any database record.
+   */
+  async getCreationRunStatus(
+    runId: string,
+    user: JwtPayload,
+    requestedClientId?: string
+  ): Promise<UserCreationRunStatusResponse> {
+    const run = await this.runRepo.findOne({ where: { id: runId } });
+    if (!run) {
+      throw new NotFoundException({
+        code: 'RUN_NOT_FOUND',
+        message: `Automation run '${runId}' not found.`,
+      });
+    }
+
+    if (requestedClientId && run.clientId !== requestedClientId) {
+      throw new ForbiddenException({
+        code: 'CLIENT_MISMATCH',
+        message: 'Automation run does not belong to the requested client.',
+      });
+    }
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(run.clientId)) {
+      throw new ForbiddenException({
+        code: 'FORBIDDEN_CLIENT',
+        message: 'Not authorized for this client',
+      });
+    }
+
+    let params: any = {};
+    try {
+      params = JSON.parse(run.parametersJson || '{}');
+    } catch {}
+    const targetUsername = params.username || params.payload?.username || 'user';
+    let parsedResult: any = {};
+    try {
+      parsedResult = JSON.parse(run.resultSummaryJson || '{}');
+    } catch {}
+
+    // 1. In-progress states
+    if (['QUEUED', 'RUNNING', 'CLAIMED', 'AUTHENTICATING', 'NAVIGATING', 'EXTRACTING', 'PERSISTING'].includes(run.status)) {
+      const stage = parsedResult.workflowStage || parsedResult.message || run.status;
+      return {
+        operationStatus: 'AUTOMATION_IN_PROGRESS',
+        runId: run.id,
+        stage,
+        targetUsername,
+        message: parsedResult.message || 'Operation is still running on remote portal.',
+      };
+    }
+
+    // 2. Terminal completion (SUCCEEDED / COMPLETED)
+    if (['COMPLETED', 'SUCCEEDED'].includes(run.status)) {
+      const client = await this.clientRepo.findOne({ where: { id: run.clientId } });
+      const normUsername = targetUsername.trim().toLowerCase();
+      const snapshot = await this.snapshotRepo
+        .createQueryBuilder('u')
+        .where('u.clientId = :clientId', { clientId: run.clientId })
+        .andWhere('LOWER(u.username) = :normUsername', { normUsername })
+        .getOne();
+
+      if (!snapshot) {
+        return {
+          operationStatus: 'COMPLETED',
+          runId: run.id,
+          stage: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          targetUsername,
+          creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          message: 'User and roles were created successfully in Simplex. Central synchronization is pending.',
+        };
+      }
+
+      return {
+        operationStatus: 'COMPLETED',
+        runId: run.id,
+        stage: 'ROLES_VERIFIED',
+        targetUsername,
+        creationOutcome: 'COMPLETED',
+        user: client ? this.mapToDto(snapshot, client) : (snapshot as any),
+        oneTimeCredentialEventId: parsedResult.oneTimeCredentialEventId,
+        credentialDeliveryStatus: parsedResult.credentialDeliveryStatus || 'DELIVERED',
+        message: `User '${targetUsername}' created and verified on client portal.`,
+      };
+    }
+
+    // 3. Terminal failure
+    if (run.status === 'FAILED') {
+      if (parsedResult.isRemoteSaveConfirmed) {
+        return {
+          operationStatus: 'FAILED',
+          runId: run.id,
+          stage: parsedResult.workflowStage || 'ROLES_FAILED_AFTER_USER_CREATED',
+          targetUsername,
+          creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          errorMessage: run.errorMessage || 'User created on remote portal but role assignment failed.',
+        };
+      }
+
+      const isBeforeCreate = parsedResult.isRemoteUserCreated === false && parsedResult.creationState !== 'COMPLETED';
+      const outcome: CreationOutcome = isBeforeCreate ? 'FAILED_BEFORE_CREATION' : 'CREATION_VERIFICATION_REQUIRED';
+
+      return {
+        operationStatus: 'FAILED',
+        runId: run.id,
+        stage: parsedResult.workflowStage || 'FAILED',
+        targetUsername,
+        creationOutcome: outcome,
+        errorMessage: run.errorMessage || parsedResult.errorMessage || 'User creation failed on client portal.',
+      };
+    }
+
+    // 4. TIMED_OUT or unknown status -> NEVER generic failure, always CREATION_VERIFICATION_REQUIRED
+    return {
+      operationStatus: 'FAILED',
+      runId: run.id,
+      stage: 'OPERATION_TIMED_OUT',
+      targetUsername,
+      creationOutcome: 'CREATION_VERIFICATION_REQUIRED',
+      errorMessage: 'Operation timed out during automation execution. Verification required.',
+    };
   }
 
   /**

@@ -27,6 +27,7 @@ import {
   resolveTaskModePolicy,
 } from '@hmc/shared';
 import { ClientsService } from '../clients/clients.service.js';
+import { ClientDirectoryReconciliationService } from './client-directory-reconciliation.service.js';
 
 @Injectable()
 export class AgentsService {
@@ -47,7 +48,8 @@ export class AgentsService {
     private versionRepo: Repository<AutomationWorkflowVersion>,
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
-    private clientsService: ClientsService
+    private clientsService: ClientsService,
+    private reconciliationService: ClientDirectoryReconciliationService
   ) {}
 
   async getAllAgents(): Promise<DesktopAgentSummary[]> {
@@ -330,6 +332,7 @@ export class AgentsService {
       run.completedAt = new Date();
       await this.runRepo.save(run);
     }
+    this.reconciliationService.discardBuffer(runId);
     return run;
   }
 
@@ -360,6 +363,18 @@ export class AgentsService {
       run.completedAt = new Date();
     }
     await this.runRepo.save(run);
+
+    if (['SUCCEEDED', 'COMPLETED'].includes(run.status)) {
+      if (run.runType === 'PROCESS_USER_FULL_WORKFLOW' || run.runType === 'CREATE_CLIENT_USER') {
+        try {
+          await this.reconciliationService.persistCreationCompletionSnapshot(run, dto.resultData);
+        } catch (persistErr: any) {
+          this.logger.error(`Failed to persist verified creation snapshot for run ${run.id}: ${persistErr.message}`);
+        }
+      }
+    } else if (['FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+      this.reconciliationService.discardBuffer(runId);
+    }
 
     // Maintain active agent lease & status as BUSY while task telemetry is received
     if (run.desktopAgentId) {

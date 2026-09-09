@@ -34,6 +34,7 @@ import {
   ClaimEphemeralCredentialDto,
   AckEphemeralCredentialDto,
   MapExistingUserRolesDto,
+  SyncUserBatchDto,
 } from '@hmc/shared';
 
 @SkipThrottle()
@@ -143,12 +144,28 @@ export class ClientUsersController {
 
   @Post()
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_CREATE)
-  @HttpCode(HttpStatus.CREATED)
   async createClientUser(
     @Body() dto: CreateClientUserDto,
+    @CurrentUser() user: JwtPayload,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const result = await this.clientUsersService.createClientUser(dto, user);
+    if (result && typeof result === 'object' && 'operationStatus' in result && (result as any).operationStatus === 'AUTOMATION_IN_PROGRESS') {
+      res.status(HttpStatus.ACCEPTED);
+    } else {
+      res.status(HttpStatus.CREATED);
+    }
+    return result;
+  }
+
+  @Get('creation-status/:runId')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getCreationRunStatus(
+    @Param('runId') runId: string,
+    @Query('clientId') clientId: string,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.createClientUser(dto, user);
+    return this.clientUsersService.getCreationRunStatus(runId, user, clientId);
   }
 
   @Put(':id')

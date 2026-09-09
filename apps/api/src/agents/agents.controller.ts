@@ -4,12 +4,14 @@ import {
   Post,
   Body,
   Param,
+  Headers,
   UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { AgentsService } from './agents.service.js';
+import { ClientDirectoryReconciliationService } from './client-directory-reconciliation.service.js';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { PermissionsGuard } from '../common/guards/permissions.guard.js';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator.js';
@@ -18,12 +20,16 @@ import {
   PERMISSIONS,
   AgentHeartbeatPayload,
   AutomationRunStepTelemetry,
+  SyncUserBatchDto,
 } from '@hmc/shared';
 
 @SkipThrottle()
 @Controller('agents')
 export class AgentsController {
-  constructor(private agentsService: AgentsService) {}
+  constructor(
+    private agentsService: AgentsService,
+    private reconciliationService: ClientDirectoryReconciliationService
+  ) {}
 
   @Get()
   @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -87,6 +93,18 @@ export class AgentsController {
   ) {
     await this.agentsService.updateRunTelemetry(runId, dto);
     return { success: true };
+  }
+
+  @Post('runs/:runId/client-users/sync-batches')
+  @HttpCode(HttpStatus.OK)
+  async ingestClientUsersSyncBatches(
+    @Param('runId') runId: string,
+    @Headers('x-agent-id') agentId: string,
+    @Headers('x-agent-token') agentToken: string,
+    @Body() dto: SyncUserBatchDto
+  ) {
+    dto.runId = runId;
+    return this.reconciliationService.ingestSyncBatch(runId, dto, { agentId, agentToken });
   }
 
   @Post('dispatch-open-and-login')

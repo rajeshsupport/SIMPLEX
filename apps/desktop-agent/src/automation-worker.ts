@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { BrowserContext, Page } from 'playwright';
 import { BrowserProfileManager, BrowserLifecycleManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate, SelectorResolver } from '@hmc/automation';
 import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, normalizeClientBaseUrl, resolveTaskModePolicy, isMutationTaskType } from '@hmc/shared';
@@ -214,10 +215,110 @@ export class AutomationWorker {
 
         if (syncRes.success) {
           onProgress?.(`✓ [BACKGROUND SYNC COMPLETED] Scraped ${syncRes.totalScraped} users in ${totalDurationMs}ms.`);
+
+          // Byte-aware chunking: maximum 100 records per batch and strictly <= 400 KB (409,600 bytes) UTF-8 payload target
+          const scrapedUsers = syncRes.users || [];
+          const batchId = crypto.randomUUID();
+          const maxRecordsPerBatch = 100;
+          const maxPayloadBytes = 400 * 1024; // 400 KB safe target (well within 500 KB parser limit)
+
+          const batches: (typeof scrapedUsers)[] = [];
+          let currentBatch: typeof scrapedUsers = [];
+
+          for (const user of scrapedUsers) {
+            // Check trial batch byte size if adding this user
+            const trialBatch = [...currentBatch, user];
+            const trialDto = {
+              batchId,
+              runId: task.runId,
+              clientId: task.clientId,
+              sequenceNumber: batches.length + 1,
+              totalBatches: batches.length + 1,
+              isFinalBatch: false,
+              idempotencyKey: `${batchId}-${batches.length + 1}`,
+              users: trialBatch,
+            };
+            const trialBytes = Buffer.byteLength(JSON.stringify(trialDto), 'utf8');
+
+            if (currentBatch.length >= maxRecordsPerBatch || (currentBatch.length > 0 && trialBytes > maxPayloadBytes)) {
+              // Flush current batch and start new batch
+              batches.push(currentBatch);
+              currentBatch = [user];
+            } else {
+              currentBatch.push(user);
+            }
+          }
+          if (currentBatch.length > 0) {
+            batches.push(currentBatch);
+          }
+          if (batches.length === 0) {
+            batches.push([]);
+          }
+
+          // Verification & re-split pass: ensure every assembled batch fits <= 400 KB with full wrapper metadata
+          let verifiedBatches: (typeof scrapedUsers)[] = [];
+          const queue = [...batches];
+          while (queue.length > 0) {
+            const candidate = queue.shift()!;
+            if (candidate.length <= 1) {
+              verifiedBatches.push(candidate);
+              continue;
+            }
+            const candidateDto = {
+              batchId,
+              runId: task.runId,
+              clientId: task.clientId,
+              sequenceNumber: verifiedBatches.length + 1,
+              totalBatches: verifiedBatches.length + queue.length + 1,
+              isFinalBatch: queue.length === 0,
+              idempotencyKey: `${batchId}-${verifiedBatches.length + 1}`,
+              users: candidate,
+            };
+            const candidateBytes = Buffer.byteLength(JSON.stringify(candidateDto), 'utf8');
+            if (candidateBytes <= maxPayloadBytes) {
+              verifiedBatches.push(candidate);
+            } else {
+              // Exceeds 400 KB target: split candidate batch into halves and re-check
+              const mid = Math.floor(candidate.length / 2);
+              queue.unshift(candidate.slice(mid));
+              queue.unshift(candidate.slice(0, mid));
+            }
+          }
+
+          const totalBatches = verifiedBatches.length;
+          for (let i = 0; i < totalBatches; i++) {
+            const chunk = verifiedBatches[i];
+            const sequenceNumber = i + 1;
+            const isFinalBatch = sequenceNumber === totalBatches;
+            const finalDto = {
+              batchId,
+              runId: task.runId,
+              clientId: task.clientId,
+              sequenceNumber,
+              totalBatches,
+              isFinalBatch,
+              idempotencyKey: `${batchId}-${sequenceNumber}`,
+              users: chunk,
+            };
+
+            // Recalculate Buffer.byteLength(JSON.stringify(finalDto), 'utf8') immediately before transmission
+            const finalBytes = Buffer.byteLength(JSON.stringify(finalDto), 'utf8');
+            onProgress?.(
+              `[SYNC CHUNK] Dispatching byte-aware batch ${sequenceNumber}/${totalBatches} (${chunk.length} users, ${finalBytes} bytes)...`
+            );
+            await this.agentClient.sendSyncBatch(task.runId, finalDto);
+          }
+
+          // Send lightweight completion telemetry (without oversized raw users array)
           await this.agentClient.sendTelemetry(task.runId, {
             status: 'COMPLETED',
             totalDurationMs,
-            resultData: syncRes,
+            resultData: {
+              success: true,
+              totalScraped: syncRes.totalScraped,
+              stage: 'COMPLETED',
+              message: `Sync completed: ${syncRes.totalScraped} users reconciled across ${totalBatches} bounded batch(es).`,
+            },
           });
         } else {
           const safeError = sanitizeErrorMessage(syncRes.errorMessage || 'Background user synchronization failed');

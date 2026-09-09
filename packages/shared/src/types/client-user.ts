@@ -581,3 +581,58 @@ export function isSystemCircuitBreakerError(errorCode?: string, errorMessage?: s
   }
   return false;
 }
+
+export interface AutomationInProgressResponse {
+  operationStatus: 'AUTOMATION_IN_PROGRESS';
+  runId: string;
+  stage?: string;
+  targetUsername: string;
+  message?: string;
+}
+
+export interface UserCreationRunStatusResponse {
+  operationStatus: 'AUTOMATION_IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+  runId: string;
+  stage?: string;
+  targetUsername?: string;
+  user?: ClientUser;
+  creationOutcome?: CreationOutcome;
+  workflowStage?: CreationWorkflowStage;
+  errorMessage?: string;
+  message?: string;
+  oneTimeCredentialEventId?: string;
+  credentialDeliveryStatus?: CredentialDeliveryStatus;
+}
+
+export interface ScrapedUserBatchItem {
+  username: string;
+  fullName?: string;
+  mobileNumber?: string;
+  email?: string;
+  role?: string;
+  status?: string;
+  remoteUserId?: string;
+}
+
+export interface SyncUserBatchDto {
+  batchId: string;
+  runId: string;
+  clientId: string;
+  sequenceNumber: number;
+  totalBatches: number;
+  isFinalBatch: boolean;
+  idempotencyKey: string;
+  users: ScrapedUserBatchItem[];
+}
+
+export interface SyncUserBatchResponse {
+  success: boolean;
+  batchId: string;
+  sequenceNumber: number;
+  totalBatches: number;
+  isFinalBatch: boolean;
+  isDuplicate?: boolean;
+  receivedCount: number;
+  finalized?: boolean;
+  persistedCount?: number;
+}

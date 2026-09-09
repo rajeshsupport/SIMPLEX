@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   Users,
   Plus,
@@ -45,6 +45,8 @@ import {
   PERMISSIONS,
   computeRoleDiff,
   computeBidirectionalRoleDiff,
+  AutomationInProgressResponse,
+  UserCreationRunStatusResponse,
 } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
 
@@ -527,6 +529,18 @@ export const UsersPage: React.FC = () => {
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [optionsSyncTime, setOptionsSyncTime] = useState<string | null>(null);
   const [isConfirmingCreate, setIsConfirmingCreate] = useState(false);
+  const [isSubmittingCreate, setIsSubmittingCreate] = useState(false);
+
+  interface InProgressCreationState {
+    runId: string;
+    stage?: string;
+    targetUsername: string;
+    message?: string;
+    clientId: string;
+    startedAt: number;
+  }
+  const SESSION_STORAGE_CREATION_KEY = 'hmc_in_progress_creation';
+  const [inProgressCreation, setInProgressCreation] = useState<InProgressCreationState | null>(null);
   const reqIdRef = useRef<number>(0);
 
   const loadFormOptions = async (clientId: string, forceRefresh: boolean = false) => {
@@ -640,6 +654,173 @@ export const UsersPage: React.FC = () => {
   useEffect(() => {
     loadUsers();
   }, [selectedClientId, search, statusFilter, roleFilter, page]);
+
+  const pollCreationStatus = useCallback((runId: string) => {
+    let pollCount = 0;
+    const maxPolls = 120; // 120 * 1500ms = 180s
+
+    const interval = setInterval(async () => {
+      pollCount++;
+      if (pollCount > maxPolls) {
+        clearInterval(interval);
+        setInProgressCreation(null);
+        sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+        setCreateError('Creation polling timed out. Please verify user status via directory sync.');
+        return;
+      }
+
+      try {
+        const statusUrl = `/client-users/creation-status/${runId}${selectedClientId ? `?clientId=${encodeURIComponent(selectedClientId)}` : ''}`;
+        const statusRes = await ApiClient.request<UserCreationRunStatusResponse>(statusUrl);
+        if (statusRes.operationStatus === 'AUTOMATION_IN_PROGRESS') {
+          setInProgressCreation((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  stage: statusRes.stage || prev.stage,
+                  message: statusRes.message || prev.message,
+                }
+              : null
+          );
+          return;
+        }
+
+        // Terminal state reached: clear interval and storage
+        clearInterval(interval);
+        setInProgressCreation(null);
+        sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+        setIsSubmittingCreate(false);
+
+        if (statusRes.operationStatus === 'COMPLETED') {
+          setIsCreateModalOpen(false);
+          setIsConfirmingCreate(false);
+          setCreateError(null);
+          setPendingSyncUser(null);
+          setPotentialDuplicate(null);
+
+          const isRestricted = statusRes.credentialDeliveryStatus === 'RESTRICTED';
+          const isUnavailable =
+            statusRes.credentialDeliveryStatus === 'UNAVAILABLE' || statusRes.credentialDeliveryStatus === 'FAILED';
+
+          openCredentialSuccessModal({
+            type: 'CREATE',
+            username: statusRes.user?.username || statusRes.targetUsername || '',
+            fullName: statusRes.user?.fullName,
+            clientCode: selectedClient?.clientCode,
+            clientName: selectedClient?.clientName,
+            clientId: selectedClientId,
+            oneTimeCredentialEventId: statusRes.oneTimeCredentialEventId,
+            isRestricted,
+            isUnavailable,
+          });
+
+          // Reset form state
+          setCreateForm({
+            clientId: selectedClientId,
+            username: '',
+            firstName: '',
+            middleName: '',
+            lastName: '',
+            nickName: '',
+            email: '',
+            mobileNumber: '',
+            nationality: '',
+            role: '',
+            roles: [],
+            profileRole: '',
+            barcodeNumber: '',
+            signatureBase64: '',
+            signatureFilename: '',
+            stampBase64: '',
+            stampFilename: '',
+            profileBase64: '',
+            profileFilename: '',
+            status: 'ACTIVE',
+            overrideDuplicateName: false,
+          });
+          setSelectedCreateRoles([]);
+          setCreateRoleSearch('');
+          await loadUsers();
+          return;
+        }
+
+        if (statusRes.operationStatus === 'FAILED') {
+          if (statusRes.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING') {
+            setIsConfirmingCreate(false);
+            setIsCreateModalOpen(false);
+            setPendingSyncUser({
+              username: statusRes.targetUsername || '',
+              message:
+                statusRes.message ||
+                statusRes.errorMessage ||
+                'User and roles were created successfully on remote portal. Central synchronization is pending. No duplicate creation will be attempted.',
+            });
+            await loadUsers();
+            return;
+          }
+
+          if (statusRes.creationOutcome === 'CREATION_VERIFICATION_REQUIRED') {
+            setCreateError(
+              statusRes.errorMessage ||
+                'Creation verification required: automation status uncertain. Automatic retry is blocked; please verify the remote directory before taking action.'
+            );
+            return;
+          }
+
+          if (statusRes.creationOutcome === 'FAILED_BEFORE_CREATION') {
+            setCreateError(statusRes.errorMessage || 'Creation failed prior to remote form submission. Safe to retry.');
+            setIsConfirmingCreate(false);
+            return;
+          }
+
+          setCreateError(statusRes.errorMessage || 'User creation failed on remote portal.');
+        }
+      } catch (err: any) {
+        console.warn('[POLL STATUS ERROR]', err);
+      }
+    }, 1500);
+  }, [selectedClient, selectedClientId]);
+
+  // Session storage resume on page load/refresh with strict schema & TTL validation
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_STORAGE_CREATION_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const allowedKeys = new Set(['runId', 'stage', 'targetUsername', 'clientId', 'startedAt']);
+        const keys = Object.keys(parsed);
+        const hasExtraKeys = keys.some((k) => !allowedKeys.has(k));
+
+        const isValid =
+          parsed &&
+          typeof parsed === 'object' &&
+          !hasExtraKeys &&
+          typeof parsed.runId === 'string' &&
+          uuidRegex.test(parsed.runId) &&
+          typeof parsed.clientId === 'string' &&
+          uuidRegex.test(parsed.clientId) &&
+          typeof parsed.targetUsername === 'string' &&
+          parsed.targetUsername.length > 0 &&
+          parsed.targetUsername.length <= 100 &&
+          typeof parsed.stage === 'string' &&
+          parsed.stage.length > 0 &&
+          parsed.stage.length <= 100 &&
+          typeof parsed.startedAt === 'number' &&
+          parsed.startedAt <= Date.now() &&
+          Date.now() - parsed.startedAt < 600000; // <= 10m TTL
+
+        if (isValid) {
+          setInProgressCreation(parsed);
+          pollCreationStatus(parsed.runId);
+        } else {
+          sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+        }
+      }
+    } catch {
+      sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+    }
+  }, [pollCreationStatus]);
 
   const [syncProgressMessage, setSyncProgressMessage] = useState<string | null>(null);
   const [syncTerminalState, setSyncTerminalState] = useState<'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | null>(null);
@@ -912,17 +1093,42 @@ export const UsersPage: React.FC = () => {
         roles: selectedCreateRoles,
       };
 
-      const res = await ApiClient.request<ClientUser>('/client-users', {
+      setIsSubmittingCreate(true);
+      const res = await ApiClient.request<ClientUser | AutomationInProgressResponse>('/client-users', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
 
-      if ((res as any).creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING') {
+      if ('operationStatus' in res && res.operationStatus === 'AUTOMATION_IN_PROGRESS') {
+        const inProg: InProgressCreationState = {
+          runId: res.runId,
+          stage: res.stage,
+          targetUsername: res.targetUsername || createForm.username,
+          message: res.message,
+          clientId: selectedClientId,
+          startedAt: Date.now(),
+        };
+        const safeSession = {
+          runId: inProg.runId,
+          stage: inProg.stage,
+          targetUsername: inProg.targetUsername,
+          clientId: inProg.clientId,
+          startedAt: inProg.startedAt,
+        };
+        sessionStorage.setItem(SESSION_STORAGE_CREATION_KEY, JSON.stringify(safeSession));
+        setIsSubmittingCreate(false);
+        pollCreationStatus(inProg.runId);
+        return;
+      }
+
+      const createdUser = res as ClientUser;
+
+      if ((createdUser as any).creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING') {
         setIsConfirmingCreate(false);
         setPendingSyncUser({
-          username: res.username || createForm.username,
+          username: createdUser.username || createForm.username,
           message:
-            (res as any).message ||
+            (createdUser as any).message ||
             'User and roles were created successfully in Simplex. Central synchronization is pending. No duplicate creation will be attempted.',
         });
         await loadUsers();
@@ -936,13 +1142,13 @@ export const UsersPage: React.FC = () => {
       setPotentialDuplicate(null);
 
       // Setup Post-Create Shared Credential Success Modal
-      const isRestricted = (res as any).credentialDeliveryStatus === 'RESTRICTED';
-      const isUnavailable = (res as any).credentialDeliveryStatus === 'UNAVAILABLE' || (res as any).credentialDeliveryStatus === 'FAILED';
+      const isRestricted = (createdUser as any).credentialDeliveryStatus === 'RESTRICTED';
+      const isUnavailable = (createdUser as any).credentialDeliveryStatus === 'UNAVAILABLE' || (createdUser as any).credentialDeliveryStatus === 'FAILED';
 
       openCredentialSuccessModal({
         type: 'CREATE',
-        username: res.username,
-        fullName: res.fullName,
+        username: createdUser.username,
+        fullName: createdUser.fullName,
         clientCode: selectedClient?.clientCode,
         clientName: selectedClient?.clientName,
         clientId: selectedClientId,
@@ -981,6 +1187,7 @@ export const UsersPage: React.FC = () => {
       await loadUsers();
     } catch (err: any) {
       setIsConfirmingCreate(false);
+      setIsSubmittingCreate(false);
       if (
         err.response?.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING' ||
         err.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'
@@ -1781,6 +1988,30 @@ export const UsersPage: React.FC = () => {
           </select>
         </div>
       </div>
+
+      {inProgressCreation && (
+        <div className="p-3.5 bg-amber-950/80 border border-amber-500/60 rounded-xl flex items-center justify-between text-amber-200 text-sm shadow-lg">
+          <div className="flex items-center gap-3">
+            <RefreshCw className="w-5 h-5 animate-spin text-amber-400 shrink-0" />
+            <div>
+              <div className="font-semibold text-amber-300 flex items-center gap-2">
+                <span>User Creation In Progress on Remote Portal</span>
+                <span className="text-[11px] bg-amber-900/80 text-amber-300 font-mono px-2 py-0.5 rounded border border-amber-700/50">
+                  Stage: {inProgressCreation.stage || 'PROCESSING'}
+                </span>
+              </div>
+              <p className="text-xs text-amber-200/90 mt-0.5">
+                Creating user <strong className="font-mono text-white">{inProgressCreation.targetUsername}</strong> on remote portal. Automation run is executing.
+              </p>
+            </div>
+          </div>
+          <div className="text-right">
+            <span className="text-xs font-mono text-amber-400 bg-slate-900/60 px-2.5 py-1 rounded border border-amber-800/40">
+              Run ID: {inProgressCreation.runId.substring(0, 8)}…
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Selected Client Info Card */}
       {selectedClient && (
@@ -2716,22 +2947,57 @@ export const UsersPage: React.FC = () => {
             </div>
           )}
 
+          {inProgressCreation && (
+            <div className="p-3.5 bg-amber-950/80 border border-amber-600/50 rounded-lg text-amber-200">
+              <div className="font-bold flex items-center gap-2 text-amber-300 mb-1">
+                <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+                Automation In Progress on Remote Portal
+              </div>
+              <p className="text-xs text-amber-200/90 leading-relaxed">
+                {inProgressCreation.message ||
+                  'User creation and multi-role mapping is currently executing on the remote client portal. Please wait while the Desktop Agent completes the workflow.'}
+              </p>
+              <div className="mt-2 text-[11px] font-mono text-amber-400/80 flex items-center gap-2">
+                <span>
+                  Stage: <strong className="text-amber-200">{inProgressCreation.stage || 'PROCESSING'}</strong>
+                </span>
+                <span>•</span>
+                <span>Run ID: {inProgressCreation.runId.substring(0, 8)}…</span>
+              </div>
+            </div>
+          )}
+
           <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
             {isConfirmingCreate ? (
               <>
                 <button
                   type="button"
                   onClick={() => setIsConfirmingCreate(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+                  disabled={!!inProgressCreation || isSubmittingCreate}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 rounded font-semibold"
                 >
                   Back to Edit
                 </button>
                 <button
                   type="submit"
-                  disabled={isLoadingOptions || !!optionsError || !formMetadata || selectedCreateRoles.length === 0}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-emerald-950/50"
+                  disabled={
+                    isLoadingOptions ||
+                    !!optionsError ||
+                    !formMetadata ||
+                    selectedCreateRoles.length === 0 ||
+                    !!inProgressCreation ||
+                    isSubmittingCreate
+                  }
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-emerald-950/50 flex items-center gap-2"
                 >
-                  Confirm & Create on Client
+                  {inProgressCreation ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
+                      <span>Creating on Portal…</span>
+                    </>
+                  ) : (
+                    <span>Confirm & Create on Client</span>
+                  )}
                 </button>
               </>
             ) : (
