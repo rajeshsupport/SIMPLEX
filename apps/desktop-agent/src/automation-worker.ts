@@ -397,8 +397,8 @@ export class AutomationWorker {
           username,
           remoteUserId,
           loginUrl,
-          credentials: task.credentials?.password
-            ? { username: task.credentials.username, password: task.credentials.password }
+          credentials: (task.credentials?.password || task.payload?.credentials?.password)
+            ? { username: (task.credentials?.username || task.payload?.credentials?.username), password: (task.credentials?.password || task.payload?.credentials?.password) }
             : undefined,
           onProgress: (msg: string) => {
             onProgress?.(`[ROLE REFRESH PROGRESS] ${msg}`);
@@ -833,9 +833,9 @@ export class AutomationWorker {
               totalDurationMs,
               resultData: {
                 ...serializableResult,
-                overallStatus: statusRes.overallStatus || 'PARTIAL_FAILED',
-                statusChangeState: statusRes.statusChangeState || 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
-                retryStartingPoint: statusRes.retryStartingPoint || 'STATUS_VERIFICATION',
+                overallStatus: (statusRes as any).overallStatus || 'PARTIAL_FAILED',
+                statusChangeState: (statusRes as any).statusChangeState || 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+                retryStartingPoint: (statusRes as any).retryStartingPoint || 'STATUS_VERIFICATION',
                 errorCode: statusRes.errorCode || 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
                 errorMessage: safeError,
               },

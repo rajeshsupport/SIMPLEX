@@ -514,8 +514,14 @@ export const UsersPage: React.FC = () => {
       try {
         const data = await ApiClient.request<ClientWithCredentialInfo[]>('/clients');
         setClients(data || []);
-        if (data && data.length > 0 && !selectedClientId) {
-          setSelectedClientId(data[0].id);
+        if (data && data.length > 0) {
+          const savedClientId = localStorage.getItem('hmc_selected_client_id');
+          const defaultClient =
+            (savedClientId && data.find((c) => c.id === savedClientId)) ||
+            data.find((c) => c.clientCode === 'MASTER') ||
+            data[0];
+          setSelectedClientId(defaultClient.id);
+          localStorage.setItem('hmc_selected_client_id', defaultClient.id);
         }
       } catch (err) {
         console.error('Failed to load clients', err);
@@ -593,6 +599,7 @@ export const UsersPage: React.FC = () => {
     setPage(1);
     setActionMessage(null);
     setSelectedClientId(newClientId);
+    localStorage.setItem('hmc_selected_client_id', newClientId);
     setSelectedCreateRoles([]);
     setCreateRoleSearch('');
   };
@@ -745,6 +752,20 @@ export const UsersPage: React.FC = () => {
         }
 
         if (statusRes.operationStatus === 'FAILED') {
+          if (statusRes.creationOutcome === 'USER_CREATED_ROLE_PENDING') {
+            setIsConfirmingCreate(false);
+            setIsCreateModalOpen(false);
+            setPendingSyncUser({
+              username: statusRes.targetUsername || '',
+              message:
+                statusRes.message ||
+                statusRes.errorMessage ||
+                'User was created successfully in Simplex, but role mapping is pending verification. No duplicate creation will be attempted.',
+            });
+            await loadUsers();
+            return;
+          }
+
           if (statusRes.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING') {
             setIsConfirmingCreate(false);
             setIsCreateModalOpen(false);
@@ -1190,14 +1211,22 @@ export const UsersPage: React.FC = () => {
       setIsSubmittingCreate(false);
       if (
         err.response?.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING' ||
-        err.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'
+        err.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING' ||
+        err.response?.creationOutcome === 'USER_CREATED_ROLE_PENDING' ||
+        err.creationOutcome === 'USER_CREATED_ROLE_PENDING' ||
+        err.response?.code === 'USER_CREATED_ROLE_PENDING' ||
+        err.code === 'USER_CREATED_ROLE_PENDING' ||
+        err.response?.data?.creationOutcome === 'USER_CREATED_ROLE_PENDING' ||
+        err.response?.data?.code === 'USER_CREATED_ROLE_PENDING'
       ) {
+        setIsCreateModalOpen(false);
         setPendingSyncUser({
           username: createForm.username,
           message:
             err.message ||
             err.response?.message ||
-            'User and roles were created successfully in Simplex. Central synchronization is pending. No duplicate creation will be attempted.',
+            err.response?.data?.message ||
+            'User was created successfully in Simplex, but role mapping is pending verification. No duplicate creation will be attempted.',
         });
         await loadUsers();
         return;
@@ -1303,8 +1332,11 @@ export const UsersPage: React.FC = () => {
         body: JSON.stringify({ status: nextStatus }),
       });
 
+      const verifiedMsg = nextStatus === 'ACTIVE'
+        ? 'User activated successfully in Simplex'
+        : 'User deactivated successfully in Simplex';
       setStatusMutationStage('Remote status verified. Synchronizing Central directory…');
-      setStatusMutationSuccess(`✓ User '${selectedUser.username}' status updated to ${nextStatus} in ${selectedClient?.clientCode || 'Simplex'}.`);
+      setStatusMutationSuccess(verifiedMsg);
 
       if (statusMutationTimerRef.current) {
         clearInterval(statusMutationTimerRef.current);
@@ -1321,7 +1353,7 @@ export const UsersPage: React.FC = () => {
         setStatusMutationStage('');
         setActionMessage({
           type: 'success',
-          text: `✓ User '${selectedUser.username}' status updated to ${nextStatus} in ${selectedClient?.clientCode || 'Simplex'}.`,
+          text: verifiedMsg,
         });
       }, 500);
     } catch (err: any) {
@@ -1876,7 +1908,7 @@ export const UsersPage: React.FC = () => {
       .filter((r) => retryMap.has(r.username.toLowerCase()))
       .map((r) => {
         const res = retryMap.get(r.username.toLowerCase());
-        const startingPoint = res?.retryStartingPoint || (res?.result === 'PARTIAL_FAILED' || res?.overallStatus === 'PARTIAL_FAILED' ? 'ROLE_MAPPING' : 'USER_CREATION');
+        const startingPoint = res?.retryStartingPoint || (res?.result === 'PARTIAL_FAILED' || res?.overallStatus === 'PARTIAL_FAILED' ? 'ROLE_STATE_INSPECTION' : 'USER_CREATION');
         return {
           ...r,
           retryStartingPoint: startingPoint,
@@ -3625,35 +3657,47 @@ export const UsersPage: React.FC = () => {
 
                 return (
                   <>
-                    {/* Role Diff Summary Card */}
+                    {/* Role Diff Summary Card (6-Part Diff) */}
                     <div className="p-3 bg-slate-950/90 rounded-lg border border-slate-800 space-y-2">
                       <div className="font-bold text-slate-300 text-xs flex items-center justify-between">
-                        <span>Role Update Preview</span>
-                        <span className="text-[10px] text-sky-400 font-normal">Add / Remove Roles</span>
+                        <span>Role Update Preview (6-Part Diff)</span>
+                        <span className="text-[10px] text-sky-400 font-normal">Activate / Add / Deactivate</span>
                       </div>
-                      <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-[11px]">
                         <div>
-                          <span className="text-slate-500 block">Existing Roles ({diff.existingRoles.length}):</span>
-                          <span className="text-slate-300 font-medium">
+                          <span className="text-slate-400 block font-medium">1. Existing Active Roles ({diff.existingRoles.length}):</span>
+                          <span className="text-slate-300 font-mono">
                             {diff.existingRoles.length > 0 ? diff.existingRoles.join(', ') : 'None'}
                           </span>
                         </div>
                         <div>
-                          <span className="text-emerald-400 block font-semibold">Roles to Add ({diff.rolesToAdd.length}):</span>
+                          <span className="text-sky-400 block font-medium">2. Roles to Activate (Inactive):</span>
+                          <span className="text-sky-300 font-mono">
+                            None
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-emerald-400 block font-semibold">3. New Roles to Add ({diff.rolesToAdd.length}):</span>
                           <span className="text-emerald-300 font-semibold font-mono">
                             {diff.rolesToAdd.length > 0 ? diff.rolesToAdd.join(', ') : 'None'}
                           </span>
                         </div>
                         <div>
-                          <span className="text-red-400 block font-semibold">Roles to Remove ({diff.rolesRemoved.length}):</span>
+                          <span className="text-red-400 block font-semibold">4. Roles to Deactivate ({diff.rolesRemoved.length}):</span>
                           <span className="text-red-300 font-semibold font-mono">
                             {diff.rolesRemoved.length > 0 ? diff.rolesRemoved.join(', ') : 'None'}
                           </span>
                         </div>
                         <div>
-                          <span className="text-slate-500 block">Roles Unchanged ({diff.rolesUnchanged.length}):</span>
-                          <span className="text-slate-400">
+                          <span className="text-slate-400 block font-medium">5. Roles Unchanged ({diff.rolesUnchanged.length}):</span>
+                          <span className="text-slate-400 font-mono">
                             {diff.rolesUnchanged.length > 0 ? diff.rolesUnchanged.join(', ') : 'None'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-amber-400 block font-semibold">6. Final Active Role Set ({diff.resultingRoles.length}):</span>
+                          <span className="text-amber-300 font-semibold font-mono">
+                            {diff.resultingRoles.length > 0 ? diff.resultingRoles.join(', ') : 'None'}
                           </span>
                         </div>
                       </div>

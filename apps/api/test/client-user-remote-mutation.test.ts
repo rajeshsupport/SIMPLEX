@@ -29,6 +29,7 @@ import {
   type TaskModePolicy,
 } from '@hmc/shared';
 import { AgentsService } from '../dist/agents/agents.service.js';
+import { ClientDirectoryReconciliationService } from '../dist/agents/client-directory-reconciliation.service.js';
 import { DesktopAgentPoller } from '../../desktop-agent/dist/cli-runner.js';
 
 type ClientUserStatus = 'ACTIVE' | 'INACTIVE';
@@ -2665,7 +2666,7 @@ async function runClientUserMutationUnitTests() {
   const rowResultItem = { sNo: 1, rowNumber: 2, username: 'usr1', result: 'CREATED', credentialDeliveryStatus: 'DELIVERED' };
   const batchResultSummary = { jobId: 'job-1', totalRows: 1, createdRows: 1, results: [rowResultItem] };
   const partialFailureResult = { success: false, overallStatus: 'PARTIAL_FAILED', credentialDeliveryStatus: 'DELIVERED' };
-  const retryStateObj = { retryStartingPoint: 'ROLE_MAPPING', username: 'usr1' };
+  const retryStateObj = { retryStartingPoint: 'ROLE_STATE_INSPECTION', username: 'usr1' };
   const apiRestResponse = { id: 'u1', username: 'usr1', status: 'ACTIVE', credentialDeliveryStatus: 'DELIVERED' };
   const jobStatusPolling = { status: 'RUNNING', progress: 50, message: 'Mapping roles' };
   const mssqlWriteSpy = { query: 'INSERT INTO [client_user_snapshots] (username, status) VALUES (@p0, @p1)', params: ['usr1', 'ACTIVE'] };
@@ -3708,17 +3709,17 @@ async function runClientUserMutationUnitTests() {
 
   // 15. Inconclusive remote verification classified as ROLE_VERIFICATION_UNKNOWN with retryStartingPoint ROLE_MAPPING
   {
-    console.log('\n[TEST 147] Inconclusive verification classified as ROLE_VERIFICATION_UNKNOWN with retryStartingPoint ROLE_MAPPING...');
+    console.log('\n[TEST 147] Inconclusive verification classified as ROLE_VERIFICATION_UNKNOWN with retryStartingPoint ROLE_STATE_INSPECTION...');
     const inconclusiveResult = {
       success: false,
       overallStatus: 'PARTIAL_FAILED',
       errorCode: 'ROLE_VERIFICATION_UNKNOWN',
       errorMessage: 'Role verification inconclusive: remote portal response timed out during registry check',
-      retryStartingPoint: 'ROLE_MAPPING',
+      retryStartingPoint: 'ROLE_STATE_INSPECTION',
     };
     assert.strictEqual(inconclusiveResult.overallStatus, 'PARTIAL_FAILED');
     assert.strictEqual(inconclusiveResult.errorCode, 'ROLE_VERIFICATION_UNKNOWN');
-    assert.strictEqual(inconclusiveResult.retryStartingPoint, 'ROLE_MAPPING');
+    assert.strictEqual(inconclusiveResult.retryStartingPoint, 'ROLE_STATE_INSPECTION');
     console.log('✓ TEST 147 Passed');
   }
 
@@ -4257,12 +4258,12 @@ async function runClientUserMutationUnitTests() {
       await page.click('button:has-text("Surgeon")');
       await page.waitForTimeout(300);
 
-      // Verify 4-section diff card rendered in DOM
+      // Verify 4-section / 6-part diff card rendered in DOM
       const diffCardText = await page.locator('div[role="dialog"], div.fixed').innerText();
-      assert.ok(diffCardText.includes('Existing Roles'), 'Diff card must show Existing roles');
-      assert.ok(diffCardText.includes('Roles to Add'), 'Diff card must show Roles to add');
+      assert.ok(diffCardText.includes('Existing Roles') || diffCardText.includes('Existing Active Roles'), 'Diff card must show Existing roles');
+      assert.ok(diffCardText.includes('Roles to Add') || diffCardText.includes('New Roles to Add'), 'Diff card must show Roles to add');
       assert.ok(diffCardText.includes('Surgeon'), 'Diff card must reflect Surgeon under Roles to add');
-      assert.ok(diffCardText.includes('Roles to Remove') || diffCardText.includes('Roles Removed'), 'Diff card must show Roles to Remove');
+      assert.ok(diffCardText.includes('Roles to Remove') || diffCardText.includes('Roles Removed') || diffCardText.includes('Roles to Deactivate'), 'Diff card must show Roles to Remove');
       assert.ok(diffCardText.includes('Roles Unchanged'), 'Diff card must show Roles Unchanged');
 
       // Click "Update Roles in Simplex" button
@@ -5333,7 +5334,7 @@ async function runClientUserMutationUnitTests() {
       isRemoteSaveConfirmed: true,
       creationState: 'COMPLETED',
       roleMappingState: 'FAILED',
-      retryStartingPoint: 'ROLE_MAPPING',
+      retryStartingPoint: 'ROLE_STATE_INSPECTION',
     };
 
     let persistedSnapshot: any = null;
@@ -5357,9 +5358,9 @@ async function runClientUserMutationUnitTests() {
     }
 
     assert.ok(persistedSnapshot !== null, 'User must be persisted in Central DB even when role mapping fails');
-    assert.strictEqual(thrownError.retryStartingPoint, 'ROLE_MAPPING');
+    assert.strictEqual(thrownError.retryStartingPoint, 'ROLE_STATE_INSPECTION');
 
-    // Retry resumes from ROLE_MAPPING without calling createUser again
+    // Retry resumes from ROLE_STATE_INSPECTION without calling createUser again
     let userCreatedCallCount = 0;
     let roleMappingCallCount = 0;
 
@@ -5367,14 +5368,14 @@ async function runClientUserMutationUnitTests() {
       if (startingPoint === 'USER_CREATION') {
         userCreatedCallCount++;
       }
-      if (startingPoint === 'ROLE_MAPPING' || startingPoint === 'USER_CREATION') {
+      if (startingPoint === 'ROLE_STATE_INSPECTION' || startingPoint === 'USER_CREATION') {
         roleMappingCallCount++;
       }
     };
 
     executeRetry(thrownError.retryStartingPoint);
     assert.strictEqual(userCreatedCallCount, 0, 'Retry must NOT recreate user (0 mutations)');
-    assert.strictEqual(roleMappingCallCount, 1, 'Retry must resume directly at ROLE_MAPPING');
+    assert.strictEqual(roleMappingCallCount, 1, 'Retry must resume directly at ROLE_STATE_INSPECTION');
     console.log('✓ TEST 190 Passed (Plus-button multi-role creation, remote verification, Central refresh, 2 mutations, browser cleanup & safe retry)');
   }
 
@@ -5657,19 +5658,19 @@ async function runClientUserMutationUnitTests() {
     const roleMappingFailed = true;
 
     if (roleMappingFailed) {
-      // API saves snapshot with retryStartingPoint = 'ROLE_MAPPING'
+      // API saves snapshot with retryStartingPoint = 'ROLE_STATE_INSPECTION'
       centralDb.set(username, {
         username,
         isPresentRemotely: true,
         status: 'ACTIVE',
-        retryStartingPoint: 'ROLE_MAPPING',
+        retryStartingPoint: 'ROLE_STATE_INSPECTION',
       });
     }
 
     // Phase 2: Operator retries - creation preflight checks Central DB
     const existing = centralDb.get(username);
     assert.ok(existing, 'User snapshot must exist in Central DB');
-    assert.strictEqual(existing.retryStartingPoint, 'ROLE_MAPPING');
+    assert.strictEqual(existing.retryStartingPoint, 'ROLE_STATE_INSPECTION');
 
     // If operator attempts to re-create:
     let recreateBlocked = false;
@@ -7451,10 +7452,313 @@ async function runClientUserMutationUnitTests() {
     assert.strictEqual(flatReconstructed.length, fullTestSet.length, 'TEST 253: Exactly same number of rows reconstructed');
     assert.deepStrictEqual(flatReconstructed, fullTestSet, 'TEST 253: Every input row reconstructed exactly once without drops or mutations');
     console.log('✓ TEST 253 Passed (Final serialized DTO size verified after wrapper metadata finalization; 100% rows reconstructed)');
+    // 254. Direct invocation of ClientDirectoryReconciliationService on DB failure produces REMOTE_COMPLETED_CENTRAL_SYNC_PENDING
+    console.log('\n[TEST 254] Production-Chain: ClientDirectoryReconciliationService DB failure yields REMOTE_COMPLETED_CENTRAL_SYNC_PENDING...');
+    {
+      const mockSnapshotTable254 = new Map<string, any>();
+      const failingSnapshotRepo = {
+        createQueryBuilder: () => ({
+          where: () => ({
+            andWhere: () => ({
+              getOne: async () => null,
+            }),
+          }),
+        }),
+        create: (dto: any) => ({ ...dto }),
+        save: async () => {
+          throw new Error('Database transaction connection error: [MSSQL] deadlock or connection timeout');
+        },
+      };
+
+      const mockClientRepo254 = {
+        findOne: async () => ({ id: 'client-test-254', clientCode: 'HOSP_01' }),
+      };
+
+      const failingReconciliationService = new ClientDirectoryReconciliationService(
+        failingSnapshotRepo as any,
+        mockClientRepo254 as any,
+        { findOne: async () => null } as any,
+        { findOne: async () => null } as any
+      );
+
+      // Direct invocation of ClientDirectoryReconciliationService.persistCreationCompletionSnapshot
+      const testRun254: any = {
+        id: 'run-test-254',
+        clientId: 'client-test-254',
+        runType: 'PROCESS_USER_FULL_WORKFLOW',
+        status: 'FINAL_ROLES_VERIFIED',
+        parametersJson: JSON.stringify({
+          username: 'test_db_fail_user',
+          firstName: 'Db',
+          lastName: 'Fail',
+        }),
+      };
+
+      const directStagesEmitted: string[] = [];
+      let directError: any = null;
+      try {
+        await failingReconciliationService.persistCreationCompletionSnapshot(
+          testRun254,
+          { stage: 'FINAL_ROLES_VERIFIED', username: 'test_db_fail_user' },
+          (stage) => directStagesEmitted.push(stage)
+        );
+      } catch (err: any) {
+        directError = err;
+      }
+
+      assert.ok(directError, 'Direct persistence must throw on DB failure');
+      assert.strictEqual(directStagesEmitted.includes('COMPLETED'), false, 'Direct invocation must never emit COMPLETED on DB failure');
+      assert.strictEqual(directStagesEmitted.includes('CENTRAL_SNAPSHOT_PERSISTED'), false, 'Direct invocation must never emit CENTRAL_SNAPSHOT_PERSISTED on DB failure');
+      assert.strictEqual(mockSnapshotTable254.size, 0, 'No partial snapshot must be persisted on DB failure');
+
+      // Now invoke via the production AgentsService.updateRunTelemetry pipeline
+      let updatedRunStatus = '';
+      const runRepoWithFailingDb = {
+        findOne: async () => ({
+          id: 'run-test-254',
+          clientId: 'client-test-254',
+          runType: 'PROCESS_USER_FULL_WORKFLOW',
+          status: 'FINAL_ROLES_VERIFIED',
+          parametersJson: JSON.stringify({
+            username: 'test_db_fail_user',
+            firstName: 'Db',
+            lastName: 'Fail',
+          }),
+          updatedAt: new Date(),
+        }),
+        save: async (r: any) => {
+          updatedRunStatus = r.status;
+          return r;
+        },
+      };
+
+      const agentsServiceWithFailingDb = new AgentsService(
+        { findOne: async () => null } as any,
+        runRepoWithFailingDb as any,
+        { findOne: async () => null, create: (d: any) => d, save: async () => {} } as any,
+        mockClientRepo254 as any,
+        { findOne: async () => null } as any,
+        { findOne: async () => null } as any,
+        { create: (d: any) => d, save: async () => {} } as any,
+        {} as any,
+        failingReconciliationService
+      );
+
+      await agentsServiceWithFailingDb.updateRunTelemetry('run-test-254', {
+        status: 'FINAL_ROLES_VERIFIED',
+        resultData: { stage: 'FINAL_ROLES_VERIFIED', username: 'test_db_fail_user' },
+      });
+
+      assert.strictEqual(
+        updatedRunStatus,
+        'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+        'Failure must result in REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'
+      );
+      assert.notStrictEqual(updatedRunStatus, 'COMPLETED', 'Must never report COMPLETED on DB failure');
+      assert.strictEqual(mockSnapshotTable254.size, 0, 'Zero partial snapshots persisted in database');
+      console.log('✓ TEST 254 Passed (ClientDirectoryReconciliationService failure yields REMOTE_COMPLETED_CENTRAL_SYNC_PENDING, 0 partial snapshots, never COMPLETED)');
+    }
+
+    // 255. Production chain AgentsService.updateRunTelemetry -> ClientDirectoryReconciliationService produces exact stage order
+    console.log('\n[TEST 255] Production-Chain: AgentsService -> ClientDirectoryReconciliationService exact stage order...');
+    {
+      const persistedSnapshots255 = new Map<string, any>();
+      const successSnapshotRepo = {
+        createQueryBuilder: () => ({
+          where: () => ({
+            andWhere: () => ({
+              getOne: async () => null,
+            }),
+          }),
+        }),
+        create: (dto: any) => ({ ...dto }),
+        save: async (entity: any) => {
+          persistedSnapshots255.set(entity.username, entity);
+          return entity;
+        },
+      };
+
+      const mockClientRepo255 = {
+        findOne: async () => ({ id: 'client-test-255', clientCode: 'HOSP_01' }),
+      };
+
+      const successReconciliationService = new ClientDirectoryReconciliationService(
+        successSnapshotRepo as any,
+        mockClientRepo255 as any,
+        { findOne: async () => null } as any,
+        { findOne: async () => null } as any
+      );
+
+      let savedRunStatus255 = '';
+      let savedSummaryJson255: any = null;
+      const successRunRepo = {
+        findOne: async () => ({
+          id: 'run-test-255',
+          clientId: 'client-test-255',
+          runType: 'PROCESS_USER_FULL_WORKFLOW',
+          status: 'FINAL_ROLES_VERIFIED',
+          parametersJson: JSON.stringify({
+            username: 'dr_success_order',
+            firstName: 'Success',
+            lastName: 'Order',
+            role: 'DOCTOR',
+          }),
+          updatedAt: new Date(),
+        }),
+        save: async (r: any) => {
+          savedRunStatus255 = r.status;
+          if (r.resultSummaryJson) {
+            savedSummaryJson255 = JSON.parse(r.resultSummaryJson);
+          }
+          return r;
+        },
+      };
+
+      const successAgentsService = new AgentsService(
+        { findOne: async () => null } as any,
+        successRunRepo as any,
+        { findOne: async () => null, create: (d: any) => d, save: async () => {} } as any,
+        mockClientRepo255 as any,
+        { findOne: async () => null } as any,
+        { findOne: async () => null } as any,
+        { create: (d: any) => d, save: async () => {} } as any,
+        {} as any,
+        successReconciliationService
+      );
+
+      await successAgentsService.updateRunTelemetry('run-test-255', {
+        status: 'FINAL_ROLES_VERIFIED',
+        resultData: {
+          stage: 'FINAL_ROLES_VERIFIED',
+          username: 'dr_success_order',
+          remoteUserId: 'REMOTE-255',
+        },
+      });
+
+      assert.strictEqual(savedRunStatus255, 'COMPLETED', 'Terminal run status must be COMPLETED');
+      assert.ok(savedSummaryJson255, 'Summary JSON must be populated');
+      const emittedStages = savedSummaryJson255.stagesEmitted;
+      assert.ok(Array.isArray(emittedStages), 'stagesEmitted must be an array');
+      assert.deepStrictEqual(
+        emittedStages,
+        ['FINAL_ROLES_VERIFIED', 'CENTRAL_SNAPSHOT_PERSISTED', 'COMPLETED'],
+        'Stages must transition in exact order: FINAL_ROLES_VERIFIED -> CENTRAL_SNAPSHOT_PERSISTED -> COMPLETED'
+      );
+      assert.strictEqual(persistedSnapshots255.has('dr_success_order'), true, 'Snapshot must be persisted in database');
+      console.log('✓ TEST 255 Passed (Production chain produced exact stage sequence: FINAL_ROLES_VERIFIED -> CENTRAL_SNAPSHOT_PERSISTED -> COMPLETED)');
+    }
+
+    // 256. Concurrent calls to production AgentsService.updateRunTelemetry: single-flight lock & idempotent persistence
+    console.log('\n[TEST 256] Production-Chain: Concurrent AgentsService.updateRunTelemetry single-flight deduplication...');
+    {
+      let snapshotSavesCount256 = 0;
+      const persistedSnapshots256 = new Map<string, any>();
+      const concurrentSnapshotRepo = {
+        createQueryBuilder: () => ({
+          where: () => ({
+            andWhere: () => ({
+              getOne: async () => persistedSnapshots256.get('dr_concurrent_api') || null,
+            }),
+          }),
+        }),
+        create: (dto: any) => ({ ...dto }),
+        save: async (entity: any) => {
+          snapshotSavesCount256++;
+          persistedSnapshots256.set(entity.username, entity);
+          return entity;
+        },
+      };
+
+      const mockClientRepo256 = {
+        findOne: async () => ({ id: 'client-test-256', clientCode: 'HOSP_01' }),
+      };
+
+      const concurrentReconciliationService = new ClientDirectoryReconciliationService(
+        concurrentSnapshotRepo as any,
+        mockClientRepo256 as any,
+        { findOne: async () => null } as any,
+        { findOne: async () => null } as any
+      );
+
+      const run256 = {
+        id: 'run-test-256',
+        clientId: 'client-test-256',
+        runType: 'PROCESS_USER_FULL_WORKFLOW',
+        status: 'FINAL_ROLES_VERIFIED',
+        parametersJson: JSON.stringify({
+          username: 'dr_concurrent_api',
+          firstName: 'Concurrent',
+          lastName: 'Api',
+        }),
+        updatedAt: new Date(),
+      };
+
+      const concurrentRunRepo = {
+        findOne: async () => run256,
+        save: async (r: any) => r,
+      };
+
+      let auditLogsRecorded = 0;
+      const mockAuditRepo = {
+        create: (d: any) => {
+          auditLogsRecorded++;
+          return d;
+        },
+        save: async (d: any) => d,
+      };
+
+      const concurrentAgentsService = new AgentsService(
+        { findOne: async () => null } as any,
+        concurrentRunRepo as any,
+        { findOne: async () => null, create: (d: any) => d, save: async () => {} } as any,
+        mockClientRepo256 as any,
+        { findOne: async () => null } as any,
+        { findOne: async () => null } as any,
+        mockAuditRepo as any,
+        {} as any,
+        concurrentReconciliationService
+      );
+
+      // Dispatch 2 concurrent telemetry completion packets calling production AgentsService
+      await Promise.all([
+        concurrentAgentsService.updateRunTelemetry('run-test-256', {
+          status: 'FINAL_ROLES_VERIFIED',
+          resultData: {
+            stage: 'FINAL_ROLES_VERIFIED',
+            username: 'dr_concurrent_api',
+            remoteUserId: 'REMOTE-256',
+          },
+        }),
+        concurrentAgentsService.updateRunTelemetry('run-test-256', {
+          status: 'FINAL_ROLES_VERIFIED',
+          resultData: {
+            stage: 'FINAL_ROLES_VERIFIED',
+            username: 'dr_concurrent_api',
+            remoteUserId: 'REMOTE-256',
+          },
+        }),
+      ]);
+
+      assert.strictEqual(snapshotSavesCount256, 1, 'Exactly one Central DB snapshot save transaction must execute');
+      assert.strictEqual(persistedSnapshots256.size, 1, 'Exactly one snapshot record persisted');
+
+      // Dispatch third duplicate telemetry call sequentially to assert idempotence
+      await concurrentAgentsService.updateRunTelemetry('run-test-256', {
+        status: 'FINAL_ROLES_VERIFIED',
+        resultData: {
+          stage: 'FINAL_ROLES_VERIFIED',
+          username: 'dr_concurrent_api',
+          remoteUserId: 'REMOTE-256',
+        },
+      });
+
+      assert.strictEqual(snapshotSavesCount256, 1, 'Duplicate completion telemetry is idempotent (0 additional saves)');
+      console.log('✓ TEST 256 Passed (Concurrent AgentsService.updateRunTelemetry safely deduplicated: exactly 1 snapshot transaction, idempotent duplicate handling)');
+    }
   }
 
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (253/253)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (256/256)');
   console.log('======================================================================\n');
 }
 

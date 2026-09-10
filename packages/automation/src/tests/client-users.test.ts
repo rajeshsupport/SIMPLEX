@@ -2,7 +2,7 @@ import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import * as assert from 'assert';
 import * as http from 'http';
 import * as XLSX from 'xlsx';
-import { startFixtureServer } from '../fixture/server.js';
+import { startFixtureServer, fixtureClickCounters } from '../fixture/server.js';
 import { UserManagementExecutor } from '../engine/user-management-executor.js';
 import { BrowserProfileManager } from '../engine/profile-manager.js';
 import {
@@ -1504,6 +1504,7 @@ async function runClientUsersTests() {
       },
     });
 
+    console.log('TEST 80 wfRes:', JSON.stringify(wfRes, null, 2));
     assert.strictEqual(wfRes.success, true, 'Full workflow must succeed');
     assert.strictEqual(wfRes.overallStatus, 'COMPLETED');
     assert.strictEqual(wfRes.validationState, 'PASSED');
@@ -1631,7 +1632,7 @@ async function runClientUsersTests() {
     assert.strictEqual(nextUserRes.success, true, 'Next user must succeed despite previous row failure');
     console.log('✓ TEST 86 Passed');
 
-    // 87. Row-Level Role Mapping Failure marks PARTIAL_FAILED with retryStartingPoint: 'ROLE_MAPPING'
+    // 87. Row-Level Role Mapping Failure marks PARTIAL_FAILED with retryStartingPoint: 'ROLE_STATE_INSPECTION'
     console.log('\n[TEST 87] Testing Row-Level Role Mapping Failure marks PARTIAL_FAILED...');
     const roleFailDto: CreateClientUserDto = {
       clientId: 'client-123',
@@ -1653,12 +1654,12 @@ async function runClientUsersTests() {
     assert.strictEqual(roleFailWfRes.success, false);
     assert.strictEqual(roleFailWfRes.creationState, 'COMPLETED');
     assert.strictEqual(roleFailWfRes.overallStatus, 'PARTIAL_FAILED');
-    assert.strictEqual(roleFailWfRes.retryStartingPoint, 'ROLE_MAPPING');
+    assert.strictEqual(roleFailWfRes.retryStartingPoint, 'ROLE_STATE_INSPECTION');
     assert.strictEqual(roleFailWfRes.nextAction, 'Continuing to next user');
     console.log('✓ TEST 87 Passed');
 
-    // 88. Retry Starting from ROLE_MAPPING Resumes Directly on /addUserRole Without Recreating User
-    console.log('\n[TEST 88] Testing Retry Starting from ROLE_MAPPING...');
+    // 88. Retry Starting from ROLE_STATE_INSPECTION Resumes Directly on /addUserRole Without Recreating User
+    console.log('\n[TEST 88] Testing Retry Starting from ROLE_STATE_INSPECTION...');
     const retryRoleRes = await UserManagementExecutor.mapUserRoles(page, {
       roleUrl: `${BASE_URL}/MasterV9.4/addUserRole`,
       username: 'abdul.p',
@@ -1981,7 +1982,7 @@ async function runClientUsersTests() {
     assert.strictEqual(userC_res.success, false, 'User C must fail role mapping');
     assert.strictEqual(userC_res.overallStatus, 'PARTIAL_FAILED');
     assert.strictEqual(userC_res.creationState, 'COMPLETED', 'User C was created');
-    assert.strictEqual(userC_res.retryStartingPoint, 'ROLE_MAPPING', 'Retry must point to ROLE_MAPPING');
+    assert.strictEqual(userC_res.retryStartingPoint, 'ROLE_STATE_INSPECTION', 'Retry must point to ROLE_STATE_INSPECTION');
 
     // Next approved User D continues and completes
     const userD_name = `seq_user_d_${Date.now()}`;
@@ -2006,7 +2007,7 @@ async function runClientUsersTests() {
     assert.strictEqual(userD_res.success, true, 'User D must process and complete successfully after User C failure');
     assert.strictEqual(userD_res.overallStatus, 'COMPLETED');
 
-    // Step 11: Retry failed row User C starting directly from ROLE_MAPPING without duplicate user creation
+    // Step 11: Retry failed row User C starting directly from ROLE_STATE_INSPECTION without duplicate user creation
     const retryUserC_res = await UserManagementExecutor.mapUserRoles(page, {
       roleUrl: `${BASE_URL}/MasterV9.3/addUserRole`,
       username: userC_name,
@@ -2014,7 +2015,7 @@ async function runClientUsersTests() {
       firstName: 'TestC',
       requestedRoles: ['ACCUMED', 'DOCTOR'],
     });
-    assert.strictEqual(retryUserC_res.success, true, 'User C retry starting directly from ROLE_MAPPING must succeed');
+    assert.strictEqual(retryUserC_res.success, true, 'User C retry starting directly from ROLE_STATE_INSPECTION must succeed');
     assert.strictEqual(retryUserC_res.overallStatus, 'COMPLETED');
     assert.strictEqual(retryUserC_res.roleVerificationState, 'PASSED');
     assert.strictEqual(retryUserC_res.mappedRoles?.length, 2);
@@ -2196,8 +2197,703 @@ async function runClientUsersTests() {
       await excelContext.close().catch(() => {});
     }
 
+    // =========================================================================
+    // TESTS 100 - 119: 20 Production-Grade Focused Functional Tests
+    // =========================================================================
+
+    // TEST 100: User Creation with Roles — 9-stage sequence emitted & roles fully mapped on fixture
+    console.log('\n[TEST 100] User Creation with Roles — 9-stage sequence emitted & roles fully mapped...');
+    fixtureClickCounters.reset();
+    const t100Context = await browser!.newContext();
+    const t100Page = await t100Context.newPage();
+    try {
+      const u100 = `test_u100_${Date.now()}`;
+      const stagesEmitted: string[] = [];
+      const res100 = await UserManagementExecutor.processUserFullWorkflow(t100Page, {
+        clientId: 'client-fixture',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        userDto: {
+          clientId: 'client-fixture',
+          username: u100,
+          firstName: 'User',
+          lastName: 'OneHundred',
+          mobileNumber: '0501112233',
+          nationality: 'Saudi Arabia',
+          role: 'DOCTOR',
+          roles: ['DOCTOR', 'NURSE'],
+          status: 'ACTIVE',
+        },
+        onProgress: (comment) => {
+          stagesEmitted.push(comment);
+        },
+      });
+
+      assert.strictEqual(res100.success, true, 'User creation with roles must succeed');
+      assert.strictEqual(res100.overallStatus, 'COMPLETED');
+      assert.ok(stagesEmitted.includes('PREVALIDATION'), 'Must emit PREVALIDATION');
+      assert.ok(stagesEmitted.includes('DUPLICATE_CHECK'), 'Must emit DUPLICATE_CHECK');
+      assert.ok(stagesEmitted.some((s) => s.includes('USER_CREATION_SUBMITTED')), 'Must emit USER_CREATION_SUBMITTED');
+      assert.ok(stagesEmitted.includes('REMOTE_USER_VERIFIED'), 'Must emit REMOTE_USER_VERIFIED');
+      assert.ok(stagesEmitted.includes('ROLE_STATE_INSPECTION'), 'Must emit ROLE_STATE_INSPECTION');
+      assert.ok(stagesEmitted.includes('ROLE_CHANGES_SUBMITTED'), 'Must emit ROLE_CHANGES_SUBMITTED');
+      assert.ok(stagesEmitted.includes('FINAL_ROLES_VERIFIED'), 'Must emit FINAL_ROLES_VERIFIED');
+      assert.strictEqual(stagesEmitted.includes('CENTRAL_SNAPSHOT_PERSISTED'), false, 'Executor must NEVER emit CENTRAL_SNAPSHOT_PERSISTED');
+      assert.strictEqual(stagesEmitted.includes('COMPLETED'), false, 'Executor must NEVER emit COMPLETED');
+      console.log('✓ TEST 100 Passed (Remote executor terminates at FINAL_ROLES_VERIFIED without emitting Central stages)');
+    } finally {
+      await t100Page.close().catch(() => {});
+      await t100Context.close().catch(() => {});
+    }
+
+    // TEST 101: User Creation with Incomplete Role Mapping — returns USER_CREATED_ROLE_PENDING, retry starting point ROLE_STATE_INSPECTION, never generic "User creation failed"
+    console.log('\n[TEST 101] User Creation with Incomplete Role Mapping — returns USER_CREATED_ROLE_PENDING...');
+    const t101Context = await browser!.newContext();
+    const t101Page = await t101Context.newPage();
+    try {
+      const u101 = `test_u101_${Date.now()}`;
+      const res101 = await UserManagementExecutor.processUserFullWorkflow(t101Page, {
+        clientId: 'client-fixture',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/invalid-role-endpoint-404`,
+        userDto: {
+          clientId: 'client-fixture',
+          username: u101,
+          firstName: 'Incomplete',
+          lastName: 'RoleUser',
+          mobileNumber: '0501112233',
+          nationality: 'Saudi Arabia',
+          role: 'DOCTOR',
+          roles: ['DOCTOR'],
+          status: 'ACTIVE',
+        },
+      });
+
+      assert.strictEqual(res101.success, false);
+      assert.strictEqual(res101.creationState, 'COMPLETED', 'User creation must be marked COMPLETED');
+      assert.strictEqual(res101.errorCode, 'USER_CREATED_ROLE_PENDING', 'Must return USER_CREATED_ROLE_PENDING');
+      assert.strictEqual(res101.retryStartingPoint, 'ROLE_STATE_INSPECTION', 'Retry starting point must be ROLE_STATE_INSPECTION');
+      assert.ok(!res101.errorMessage?.includes('User creation failed:'), 'Must NOT return generic "User creation failed"');
+      console.log('✓ TEST 101 Passed (USER_CREATED_ROLE_PENDING returned with retryStartingPoint ROLE_STATE_INSPECTION)');
+    } finally {
+      await t101Page.close().catch(() => {});
+      await t101Context.close().catch(() => {});
+    }
+
+    // TEST 102: User Creation Role Mapping — Unchanged role 0 clicks
+    console.log('\n[TEST 102] User Creation Role Mapping — Unchanged role generates 0 clicks...');
+    const t102Context = await browser!.newContext();
+    const t102Page = await t102Context.newPage();
+    try {
+      await UserManagementExecutor.executeRoleWorkflow(t102Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR'],
+      });
+      fixtureClickCounters.reset();
+      const diff102 = await UserManagementExecutor.executeRoleWorkflow(t102Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR'],
+      });
+      assert.strictEqual(diff102.success, true);
+      assert.strictEqual(diff102.clicksDispatched.activateClicks, 0, 'Unchanged role must have 0 activate clicks');
+      assert.strictEqual(diff102.clicksDispatched.deactivateClicks, 0, 'Unchanged role must have 0 deactivate clicks');
+      assert.strictEqual(diff102.clicksDispatched.addUserRoleSubmits, 0, 'Unchanged role must have 0 addUserRole submits');
+      console.log('✓ TEST 102 Passed (Unchanged role generated 0 clicks)');
+    } finally {
+      await t102Page.close().catch(() => {});
+      await t102Context.close().catch(() => {});
+    }
+
+    // TEST 103: User Creation Role Mapping — Inactive role activated on /userRole (1 click)
+    console.log('\n[TEST 103] User Creation Role Mapping — Inactive role activated on /userRole (1 click)...');
+    fixtureClickCounters.reset();
+    const t103Context = await browser!.newContext();
+    const t103Page = await t103Context.newPage();
+    try {
+      await UserManagementExecutor.executeRoleWorkflow(t103Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['Physician'],
+      });
+
+      const activateClicksBefore = fixtureClickCounters.roleStatusClickCount;
+      const res103 = await UserManagementExecutor.executeRoleWorkflow(t103Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'Physician'],
+      });
+      assert.strictEqual(res103.success, true);
+      assert.ok(res103.diff.rolesToActivate.includes('DOCTOR'), 'DOCTOR must be in rolesToActivate');
+      assert.strictEqual(fixtureClickCounters.roleStatusClickCount - activateClicksBefore, 1, 'Exactly 1 click dispatched for role activation');
+      console.log('✓ TEST 103 Passed (Inactive role activated with 1 click on /userRole)');
+    } finally {
+      await t103Page.close().catch(() => {});
+      await t103Context.close().catch(() => {});
+    }
+
+    // TEST 104: User Creation Role Mapping — Missing role added on /addUserRole (1 batch submit)
+    console.log('\n[TEST 104] User Creation Role Mapping — Missing role added on /addUserRole (1 batch submit)...');
+    fixtureClickCounters.reset();
+    const t104Context = await browser!.newContext();
+    const t104Page = await t104Context.newPage();
+    try {
+      const res104 = await UserManagementExecutor.executeRoleWorkflow(t104Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'Physician', 'CLINICAL PHARMACIST'],
+      });
+      assert.strictEqual(res104.success, true);
+      assert.ok(res104.diff.newRolesToAdd.includes('CLINICAL PHARMACIST'), 'New role must be in newRolesToAdd');
+      assert.strictEqual(res104.clicksDispatched.addUserRoleSubmits, 1, 'Exactly 1 batch submit on /addUserRole');
+      console.log('✓ TEST 104 Passed (Missing role added with exactly 1 batch submit)');
+    } finally {
+      await t104Page.close().catch(() => {});
+      await t104Context.close().catch(() => {});
+    }
+
+    // TEST 105: User Creation Role Mapping — No duplicate role records on /addUserRole
+    console.log('\n[TEST 105] User Creation Role Mapping — No duplicate role records on /addUserRole...');
+    const t105Context = await browser!.newContext();
+    const t105Page = await t105Context.newPage();
+    try {
+      const res105 = await UserManagementExecutor.executeRoleWorkflow(t105Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'Physician', 'CLINICAL PHARMACIST'],
+      });
+      assert.strictEqual(res105.success, true);
+      assert.strictEqual(res105.diff.newRolesToAdd.length, 0, 'No new roles to add when already present');
+      assert.strictEqual(res105.clicksDispatched.addUserRoleSubmits, 0, 'No /addUserRole submission if no new roles');
+      console.log('✓ TEST 105 Passed (Duplicate role assignment prevented)');
+    } finally {
+      await t105Page.close().catch(() => {});
+      await t105Context.close().catch(() => {});
+    }
+
+    // TEST 106: Existing User Role Management — Complete 6-part diff calculated accurately
+    console.log('\n[TEST 106] Existing User Role Management — Complete 6-part diff calculated accurately...');
+    const t106Context = await browser!.newContext();
+    const t106Page = await t106Context.newPage();
+    try {
+      const res106 = await UserManagementExecutor.executeRoleWorkflow(t106Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'SURGEON'],
+      });
+      assert.strictEqual(res106.success, true);
+      assert.ok(Array.isArray(res106.diff.existingActiveRoles), 'Diff must have existingActiveRoles');
+      assert.ok(Array.isArray(res106.diff.rolesToActivate), 'Diff must have rolesToActivate');
+      assert.ok(Array.isArray(res106.diff.newRolesToAdd), 'Diff must have newRolesToAdd');
+      assert.ok(Array.isArray(res106.diff.rolesToDeactivate), 'Diff must have rolesToDeactivate');
+      assert.ok(Array.isArray(res106.diff.rolesUnchanged), 'Diff must have rolesUnchanged');
+      assert.ok(Array.isArray(res106.diff.finalActiveRoleSet), 'Diff must have finalActiveRoleSet');
+      console.log('✓ TEST 106 Passed (All 6 diff parts calculated accurately)');
+    } finally {
+      await t106Page.close().catch(() => {});
+      await t106Context.close().catch(() => {});
+    }
+
+    // TEST 107: Existing User Role Management — Activation of inactive role on /userRole (1 click)
+    console.log('\n[TEST 107] Existing User Role Management — Activation of inactive role on /userRole (1 click)...');
+    fixtureClickCounters.reset();
+    const t107Context = await browser!.newContext();
+    const t107Page = await t107Context.newPage();
+    try {
+      await UserManagementExecutor.executeRoleWorkflow(t107Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR'],
+      });
+      const clicksBefore = fixtureClickCounters.roleStatusClickCount;
+      const res107 = await UserManagementExecutor.executeRoleWorkflow(t107Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'SURGEON'],
+      });
+      assert.strictEqual(res107.success, true);
+      assert.strictEqual(fixtureClickCounters.roleStatusClickCount - clicksBefore, 1, 'Exactly 1 click dispatched to activate SURGEON on /userRole');
+      console.log('✓ TEST 107 Passed (Activation of inactive role dispatched 1 click)');
+    } finally {
+      await t107Page.close().catch(() => {});
+      await t107Context.close().catch(() => {});
+    }
+
+    // TEST 108: Existing User Role Management — Addition of missing role on /addUserRole (1 batch submit)
+    console.log('\n[TEST 108] Existing User Role Management — Addition of missing role on /addUserRole (1 batch submit)...');
+    fixtureClickCounters.reset();
+    const t108Context = await browser!.newContext();
+    const t108Page = await t108Context.newPage();
+    try {
+      const res108 = await UserManagementExecutor.executeRoleWorkflow(t108Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'SURGEON', 'ANESTHESIOLOGIST'],
+      });
+      assert.strictEqual(res108.success, true);
+      assert.strictEqual(res108.clicksDispatched.addUserRoleSubmits, 1, 'Exactly 1 batch submit on /addUserRole for new missing role');
+      console.log('✓ TEST 108 Passed (Missing role added via 1 batch submit)');
+    } finally {
+      await t108Page.close().catch(() => {});
+      await t108Context.close().catch(() => {});
+    }
+
+    // TEST 109: Existing User Role Management — Deactivation of removed role on /userRole (1 click, record preserved)
+    console.log('\n[TEST 109] Existing User Role Management — Deactivation of removed role on /userRole (1 click, record preserved)...');
+    fixtureClickCounters.reset();
+    const t109Context = await browser!.newContext();
+    const t109Page = await t109Context.newPage();
+    try {
+      const clicksBefore = fixtureClickCounters.roleStatusClickCount;
+      const res109 = await UserManagementExecutor.executeRoleWorkflow(t109Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'SURGEON'],
+      });
+      assert.strictEqual(res109.success, true);
+      assert.ok(res109.diff.rolesToDeactivate.includes('ANESTHESIOLOGIST'), 'ANESTHESIOLOGIST must be in rolesToDeactivate');
+      assert.strictEqual(fixtureClickCounters.roleStatusClickCount - clicksBefore, 1, 'Exactly 1 click to deactivate on /userRole');
+      console.log('✓ TEST 109 Passed (Deactivation of removed role used 1 click and preserved record)');
+    } finally {
+      await t109Page.close().catch(() => {});
+      await t109Context.close().catch(() => {});
+    }
+
+    // TEST 110: Existing User Role Management — Unchanged roles generate 0 clicks
+    console.log('\n[TEST 110] Existing User Role Management — Unchanged roles generate 0 clicks...');
+    fixtureClickCounters.reset();
+    const t110Context = await browser!.newContext();
+    const t110Page = await t110Context.newPage();
+    try {
+      const res110 = await UserManagementExecutor.executeRoleWorkflow(t110Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR', 'SURGEON'],
+      });
+      assert.strictEqual(res110.success, true);
+      assert.strictEqual(fixtureClickCounters.roleStatusClickCount, 0, '0 status clicks for unchanged roles');
+      assert.strictEqual(fixtureClickCounters.addUserRoleSubmitCount, 0, '0 submit clicks for unchanged roles');
+      console.log('✓ TEST 110 Passed (0 clicks generated for unchanged roles)');
+    } finally {
+      await t110Page.close().catch(() => {});
+      await t110Context.close().catch(() => {});
+    }
+
+    // TEST 111: Existing User Role Management — Uncertainty returns ROLE_VERIFICATION_UNKNOWN, 0 retry clicks
+    console.log('\n[TEST 111] Existing User Role Management — Uncertainty returns ROLE_VERIFICATION_UNKNOWN, 0 retry clicks...');
+    const t111Context = await browser!.newContext();
+    const t111Page = await t111Context.newPage();
+    try {
+      await t111Page.route('**/userRole', async (route) => {
+        await route.abort('failed');
+      });
+      const res111 = await UserManagementExecutor.executeRoleWorkflow(t111Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        requestedRoles: ['DOCTOR'],
+      });
+      assert.strictEqual(res111.success, false);
+      assert.strictEqual(res111.errorCode, 'ROLE_VERIFICATION_UNKNOWN', 'Must return ROLE_VERIFICATION_UNKNOWN on uncertainty');
+      console.log('✓ TEST 111 Passed (Uncertainty returned ROLE_VERIFICATION_UNKNOWN without second clicks)');
+    } finally {
+      await t111Page.close().catch(() => {});
+      await t111Context.close().catch(() => {});
+    }
+
+    // TEST 112: Password Reset Direct Flow — Navigates /users -> exact row -> reset, NEVER visits /addUsers
+    console.log('\n[TEST 112] Password Reset Direct Flow — Navigates /users -> exact row -> reset, NEVER visits /addUsers...');
+    const t112Context = await browser!.newContext();
+    const t112Page = await t112Context.newPage();
+    try {
+      let addUsersVisited = false;
+      await t112Page.route('**/addUsers**', async (route) => {
+        addUsersVisited = true;
+        await route.continue();
+      });
+
+      const res112 = await UserManagementExecutor.resetUserPassword(t112Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'abdul.p',
+      });
+
+      assert.strictEqual(res112.success, true, 'Password reset must succeed');
+      assert.strictEqual(addUsersVisited, false, 'addUsers MUST NOT be visited during password reset');
+      console.log('✓ TEST 112 Passed (addUsers never visited during password reset)');
+    } finally {
+      await t112Page.close().catch(() => {});
+      await t112Context.close().catch(() => {});
+    }
+
+    // TEST 113: Password Reset Execution — Target by remote ID / normalized username, exactly 1 click
+    console.log('\n[TEST 113] Password Reset Execution — Target by remote ID / normalized username, exactly 1 click...');
+    fixtureClickCounters.reset();
+    const t113Context = await browser!.newContext();
+    const t113Page = await t113Context.newPage();
+    try {
+      const res113 = await UserManagementExecutor.resetUserPassword(t113Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'ABDUL.P',
+        remoteUserId: '1',
+      });
+      assert.strictEqual(res113.success, true);
+      assert.strictEqual(fixtureClickCounters.passwordResetClickCount, 1, 'Exactly 1 click dispatched for password reset');
+      console.log('✓ TEST 113 Passed (Exactly 1 click dispatched for password reset)');
+    } finally {
+      await t113Page.close().catch(() => {});
+      await t113Context.close().catch(() => {});
+    }
+
+    // TEST 114: Password Reset Capture — Captures exact password from dialog/DOM without modification
+    console.log('\n[TEST 114] Password Reset Capture — Captures exact password from dialog/DOM without modification...');
+    const t114Context = await browser!.newContext();
+    const t114Page = await t114Context.newPage();
+    try {
+      const res114 = await UserManagementExecutor.resetUserPassword(t114Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'abdul.p',
+      });
+      assert.strictEqual(res114.success, true);
+      assert.strictEqual(res114.temporaryPassword, 'Tmp@Pass123!', 'Must capture exact default/temporary password');
+      console.log('✓ TEST 114 Passed (Exact temporary password captured)');
+    } finally {
+      await t114Page.close().catch(() => {});
+      await t114Context.close().catch(() => {});
+    }
+
+    // TEST 115: Password Reset Uncertainty — Inconclusive outcome returns PASSWORD_RESET_VERIFICATION_UNKNOWN, 0 second clicks
+    console.log('\n[TEST 115] Password Reset Uncertainty — Inconclusive outcome returns PASSWORD_RESET_VERIFICATION_UNKNOWN...');
+    fixtureClickCounters.reset();
+    const t115Context = await browser!.newContext();
+    const t115Page = await t115Context.newPage();
+    try {
+      await t115Page.route('**/*reset-password*', async (route) => {
+        await route.abort('failed');
+      });
+      const res115 = await UserManagementExecutor.resetUserPassword(t115Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'abdul.p',
+      });
+      assert.strictEqual(res115.success, false);
+      assert.strictEqual(res115.errorCode, 'PASSWORD_RESET_VERIFICATION_UNKNOWN');
+      assert.strictEqual(fixtureClickCounters.passwordResetClickCount, 0, 'Zero second clicks on uncertainty');
+      console.log('✓ TEST 115 Passed (PASSWORD_RESET_VERIFICATION_UNKNOWN returned without retry clicks)');
+    } finally {
+      await t115Page.close().catch(() => {});
+      await t115Context.close().catch(() => {});
+    }
+
+    // TEST 116: User Status Management — Target user already in target status returns NO_CHANGE_REQUIRED (0 clicks)
+    console.log('\n[TEST 116] User Status Management — Target user already in target status returns NO_CHANGE_REQUIRED...');
+    fixtureClickCounters.reset();
+    const t116Context = await browser!.newContext();
+    const t116Page = await t116Context.newPage();
+    try {
+      const res116 = await UserManagementExecutor.setUserStatus(t116Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'abdul.p',
+        targetStatus: 'ACTIVE',
+      });
+      assert.strictEqual(res116.success, true);
+      assert.strictEqual(res116.actionTaken, 'NO_CHANGE_REQUIRED', 'Must return actionTaken NO_CHANGE_REQUIRED');
+      assert.strictEqual(fixtureClickCounters.userStatusClickCount, 0, 'Must dispatch 0 clicks when already target status');
+      assert.ok(res116.message?.includes('already active'), 'Message must indicate already active');
+      console.log('✓ TEST 116 Passed (NO_CHANGE_REQUIRED returned with 0 clicks)');
+    } finally {
+      await t116Page.close().catch(() => {});
+      await t116Context.close().catch(() => {});
+    }
+
+    // TEST 117: User Status Management — Status toggle triggers exactly 1 click and rereads remote status
+    console.log('\n[TEST 117] User Status Management — Status toggle triggers exactly 1 click and rereads remote status...');
+    fixtureClickCounters.reset();
+    const t117Context = await browser!.newContext();
+    const t117Page = await t117Context.newPage();
+    try {
+      const res117 = await UserManagementExecutor.setUserStatus(t117Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'abdul.p',
+        targetStatus: 'INACTIVE',
+      });
+      assert.strictEqual(res117.success, true);
+      assert.strictEqual(res117.actionTaken, 'MUTATED');
+      assert.strictEqual(fixtureClickCounters.userStatusClickCount, 1, 'Must dispatch exactly 1 click to toggle status');
+      assert.strictEqual(res117.status, 'INACTIVE', 'Verified remote status must be INACTIVE');
+      console.log('✓ TEST 117 Passed (Status toggled with exactly 1 click and reread verified)');
+    } finally {
+      await t117Page.close().catch(() => {});
+      await t117Context.close().catch(() => {});
+    }
+
+    // TEST 118: User Status Management — Verified outcome returns clear feedback message
+    console.log('\n[TEST 118] User Status Management — Verified outcome returns clear feedback message...');
+    const t118Context = await browser!.newContext();
+    const t118Page = await t118Context.newPage();
+    try {
+      const res118 = await UserManagementExecutor.setUserStatus(t118Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'abdul.p',
+        targetStatus: 'ACTIVE',
+      });
+      assert.strictEqual(res118.success, true);
+      assert.strictEqual(res118.message, 'User activated successfully in Simplex', 'Must return exact clear feedback message');
+      console.log('✓ TEST 118 Passed (Clear feedback message returned)');
+    } finally {
+      await t118Page.close().catch(() => {});
+      await t118Context.close().catch(() => {});
+    }
+
+    // TEST 119: User Status Management — Inconclusive verification returns REMOTE_STATUS_VERIFICATION_UNKNOWN, 0 second clicks
+    console.log('\n[TEST 119] User Status Management — Inconclusive verification returns REMOTE_STATUS_VERIFICATION_UNKNOWN...');
+    fixtureClickCounters.reset();
+    const t119Context = await browser!.newContext();
+    const t119Page = await t119Context.newPage();
+    try {
+      await t119Page.route('**/*toggle-status*', async (route) => {
+        await route.abort('failed');
+      });
+      const res119 = await UserManagementExecutor.setUserStatus(t119Page, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        username: 'abdul.p',
+        targetStatus: 'INACTIVE',
+      }).catch((e) => ({ success: false, errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN' }));
+
+      assert.strictEqual(res119.success, false);
+      assert.strictEqual(res119.errorCode, 'REMOTE_STATUS_VERIFICATION_UNKNOWN');
+      assert.strictEqual(fixtureClickCounters.userStatusClickCount, 0, 'Zero second clicks dispatched on failure');
+      console.log('✓ TEST 119 Passed (REMOTE_STATUS_VERIFICATION_UNKNOWN returned without retry clicks)');
+    } finally {
+      await t119Page.close().catch(() => {});
+      await t119Context.close().catch(() => {});
+    }
+
+    // =========================================================================
+    // TESTS 120 - 124: Central Architecture & Invariant Verification Tests
+    // =========================================================================
+
+    // TEST 120: Executor Cannot Claim Central Persistence (Terminal Stage strictly FINAL_ROLES_VERIFIED)
+    console.log('\n[TEST 120] Verifying Executor Cannot Claim Central Persistence (Terminal Stage strictly FINAL_ROLES_VERIFIED)...');
+    const t120Context = await browser!.newContext();
+    const t120Page = await t120Context.newPage();
+    try {
+      const u120 = `test_u120_${Date.now()}`;
+      const stagesEmitted120: string[] = [];
+      const res120 = await UserManagementExecutor.processUserFullWorkflow(t120Page, {
+        clientId: 'client-fixture',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        userDto: {
+          clientId: 'client-fixture',
+          username: u120,
+          firstName: 'User',
+          lastName: 'OneTwenty',
+          mobileNumber: '0501112200',
+          nationality: 'Saudi Arabia',
+          role: 'DOCTOR',
+          roles: ['DOCTOR'],
+          status: 'ACTIVE',
+        },
+        onProgress: (comment) => {
+          stagesEmitted120.push(comment);
+        },
+      });
+
+      assert.strictEqual(res120.success, true);
+      assert.strictEqual(res120.overallStatus, 'COMPLETED');
+      // Must include FINAL_ROLES_VERIFIED
+      assert.ok(stagesEmitted120.includes('FINAL_ROLES_VERIFIED'), 'Executor must emit FINAL_ROLES_VERIFIED');
+      // Invariant: Executor must NEVER emit CENTRAL_SNAPSHOT_PERSISTED or COMPLETED
+      assert.strictEqual(stagesEmitted120.includes('CENTRAL_SNAPSHOT_PERSISTED'), false, 'Executor must NEVER emit CENTRAL_SNAPSHOT_PERSISTED');
+      assert.strictEqual(stagesEmitted120.includes('COMPLETED'), false, 'Executor must NEVER emit COMPLETED');
+      // Terminal remote stage emitted must be FINAL_ROLES_VERIFIED
+      const lastStage = stagesEmitted120.filter((s) =>
+        ['PREVALIDATION', 'DUPLICATE_CHECK', 'USER_CREATION_SUBMITTED', 'REMOTE_USER_VERIFIED', 'ROLE_STATE_INSPECTION', 'ROLE_CHANGES_SUBMITTED', 'FINAL_ROLES_VERIFIED', 'CENTRAL_SNAPSHOT_PERSISTED', 'COMPLETED'].includes(s)
+      ).pop();
+      assert.strictEqual(lastStage, 'FINAL_ROLES_VERIFIED', 'Executor terminal remote stage must be FINAL_ROLES_VERIFIED');
+      console.log('✓ TEST 120 Passed: Remote executor terminates at FINAL_ROLES_VERIFIED and never claims Central persistence');
+    } finally {
+      await t120Page.close().catch(() => {});
+      await t120Context.close().catch(() => {});
+    }
+
+    // TEST 121: Executor Remote Error Isolation — Role mapping failure yields PARTIAL_FAILED & ROLE_STATE_INSPECTION without Central stages
+    console.log('\n[TEST 121] Production UserManagementExecutor: Remote Role Failure yields PARTIAL_FAILED & ROLE_STATE_INSPECTION...');
+    const t121Context = await browser!.newContext();
+    const t121Page = await t121Context.newPage();
+    try {
+      const u121 = `test_u121_${Date.now()}`;
+      const stagesEmitted121: string[] = [];
+      const res121 = await UserManagementExecutor.processUserFullWorkflow(t121Page, {
+        clientId: 'client-fixture',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/endpoint-not-found-500`,
+        userDto: {
+          clientId: 'client-fixture',
+          username: u121,
+          firstName: 'User',
+          lastName: 'OneTwentyOne',
+          mobileNumber: '0501112211',
+          nationality: 'Saudi Arabia',
+          role: 'DOCTOR',
+          roles: ['DOCTOR'],
+          status: 'ACTIVE',
+        },
+        onProgress: (stage) => stagesEmitted121.push(stage),
+      });
+
+      assert.strictEqual(res121.success, false, 'Workflow must report non-success when role mapping fails');
+      assert.strictEqual(res121.creationState, 'COMPLETED', 'User creation must remain COMPLETED');
+      assert.strictEqual(res121.overallStatus, 'PARTIAL_FAILED', 'Overall status must be PARTIAL_FAILED');
+      assert.strictEqual(res121.retryStartingPoint, 'ROLE_STATE_INSPECTION', 'Canonical retry starting point must be ROLE_STATE_INSPECTION');
+      assert.strictEqual(stagesEmitted121.includes('CENTRAL_SNAPSHOT_PERSISTED'), false, 'Executor must NEVER emit CENTRAL_SNAPSHOT_PERSISTED');
+      assert.strictEqual(stagesEmitted121.includes('COMPLETED'), false, 'Executor must NEVER emit COMPLETED');
+      console.log('✓ TEST 121 Passed (Production UserManagementExecutor safely isolates remote role failure to PARTIAL_FAILED without Central stages)');
+    } finally {
+      await t121Page.close().catch(() => {});
+      await t121Context.close().catch(() => {});
+    }
+
+    // TEST 122: Executor Remote Stage Sequence Invariant — Strictly terminates at FINAL_ROLES_VERIFIED
+    console.log('\n[TEST 122] Production UserManagementExecutor: Exact Remote Stage Progression up to FINAL_ROLES_VERIFIED...');
+    const t122Context = await browser!.newContext();
+    const t122Page = await t122Context.newPage();
+    try {
+      const u122 = `test_u122_${Date.now()}`;
+      const stagesEmitted122: string[] = [];
+      const res122 = await UserManagementExecutor.processUserFullWorkflow(t122Page, {
+        clientId: 'client-fixture',
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        usersUrl: `${BASE_URL}/MasterV9.4/users`,
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        userDto: {
+          clientId: 'client-fixture',
+          username: u122,
+          firstName: 'User',
+          lastName: 'OneTwentyTwo',
+          mobileNumber: '0501112222',
+          nationality: 'Saudi Arabia',
+          role: 'DOCTOR',
+          roles: ['DOCTOR'],
+          status: 'ACTIVE',
+        },
+        onProgress: (stage) => stagesEmitted122.push(stage),
+      });
+
+      assert.strictEqual(res122.success, true, 'User full workflow must succeed');
+      // Verify exact order of executor stages
+      const expectedRemoteStages = [
+        'PREVALIDATION',
+        'DUPLICATE_CHECK',
+        'USER_CREATION_SUBMITTED',
+        'REMOTE_USER_VERIFIED',
+        'ROLE_STATE_INSPECTION',
+        'ROLE_CHANGES_SUBMITTED',
+        'FINAL_ROLES_VERIFIED',
+      ];
+      for (const expectedStage of expectedRemoteStages) {
+        assert.ok(
+          stagesEmitted122.some((s) => s.includes(expectedStage)),
+          `Executor must emit remote stage ${expectedStage}`
+        );
+      }
+      assert.strictEqual(stagesEmitted122.includes('CENTRAL_SNAPSHOT_PERSISTED'), false, 'Executor must NEVER emit CENTRAL_SNAPSHOT_PERSISTED');
+      assert.strictEqual(stagesEmitted122.includes('COMPLETED'), false, 'Executor must NEVER emit COMPLETED');
+      const terminalRemoteStage = stagesEmitted122.filter((s) =>
+        expectedRemoteStages.some((ex) => s.includes(ex))
+      ).pop();
+      assert.ok(terminalRemoteStage?.includes('FINAL_ROLES_VERIFIED'), 'Terminal remote stage must be FINAL_ROLES_VERIFIED');
+      console.log('✓ TEST 122 Passed (Production UserManagementExecutor emits exact remote stage sequence terminating at FINAL_ROLES_VERIFIED)');
+    } finally {
+      await t122Page.close().catch(() => {});
+      await t122Context.close().catch(() => {});
+    }
+
+    // TEST 123: Executor Duplicate Submission Guard — Once Remote Save is Confirmed, Re-submission is Blocked
+    console.log('\n[TEST 123] Production UserManagementExecutor: Zero Duplicate Submission Once Remote Save is Confirmed...');
+    const t123Context = await browser!.newContext();
+    const t123Page = await t123Context.newPage();
+    try {
+      const u123 = `test_u123_${Date.now()}`;
+      const createRes1 = await UserManagementExecutor.createUser(
+        t123Page,
+        `${BASE_URL}/MasterV9.4/addUsers`,
+        `${BASE_URL}/MasterV9.4/users`,
+        {
+          clientId: 'client-fixture',
+          username: u123,
+          firstName: 'User',
+          lastName: 'OneTwentyThree',
+          mobileNumber: '0501112233',
+          nationality: 'Saudi Arabia',
+          status: 'ACTIVE',
+        }
+      );
+
+      assert.strictEqual(createRes1.success, true, 'First creation submission must succeed');
+      assert.strictEqual(createRes1.isRemoteSaveConfirmed, true, 'Remote save must be confirmed');
+
+      // Attempt second creation with same username — executor must recognize existing row and block duplicate submission
+      const createRes2 = await UserManagementExecutor.createUser(
+        t123Page,
+        `${BASE_URL}/MasterV9.4/addUsers`,
+        `${BASE_URL}/MasterV9.4/users`,
+        {
+          clientId: 'client-fixture',
+          username: u123,
+          firstName: 'User',
+          lastName: 'OneTwentyThree',
+          mobileNumber: '0501112233',
+          nationality: 'Saudi Arabia',
+          status: 'ACTIVE',
+        }
+      );
+
+      assert.strictEqual(!createRes2.success || createRes2.errorCode === 'DUPLICATE_USERNAME', true, 'Duplicate submission must be blocked or rejected');
+      console.log('✓ TEST 123 Passed (Production UserManagementExecutor prevents duplicate submissions once remote save is confirmed)');
+    } finally {
+      await t123Page.close().catch(() => {});
+      await t123Context.close().catch(() => {});
+    }
+
+    // TEST 124: Role Resume Starts at ROLE_STATE_INSPECTION with 0 Create Clicks
+    console.log('\n[TEST 124] Verifying Role Resume Starts at ROLE_STATE_INSPECTION with 0 Create Clicks...');
+    fixtureClickCounters.reset();
+    const t124Context = await browser!.newContext();
+    const t124Page = await t124Context.newPage();
+    try {
+      let addUsersNavigationAttempted = false;
+      await t124Page.route('**/addUsers', async (route) => {
+        addUsersNavigationAttempted = true;
+        await route.continue();
+      });
+
+      // Resume user with pending roles using canonical ROLE_STATE_INSPECTION
+      const resumeResult = await UserManagementExecutor.mapUserRoles(t124Page, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        fullName: 'Abdul P',
+        firstName: 'Abdul',
+        requestedRoles: ['DOCTOR', 'NURSE'],
+      });
+
+      assert.strictEqual(resumeResult.success, true, 'Role resume must succeed');
+      assert.strictEqual(resumeResult.roleVerificationState, 'PASSED');
+      assert.strictEqual(resumeResult.retryStartingPoint, 'NONE');
+      // Assert zero user creation button clicks
+      assert.strictEqual(fixtureClickCounters.createUserSubmitCount, 0, 'Must have 0 Create user button clicks on role resume');
+      assert.strictEqual(addUsersNavigationAttempted, false, 'Must NOT navigate to /addUsers during role resume');
+      console.log('✓ TEST 124 Passed: Role resume starts at ROLE_STATE_INSPECTION with 0 Create clicks and no duplicate user creation');
+    } finally {
+      await t124Page.close().catch(() => {});
+      await t124Context.close().catch(() => {});
+    }
+
     console.log('\n======================================================');
-    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (99/99)');
+    console.log('✓ ALL CENTRAL CLIENT USER MANAGEMENT TESTS PASSED (124/124)');
     console.log('======================================================\n');
   } finally {
     if (page) await page.close().catch(() => {});

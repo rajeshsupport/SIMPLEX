@@ -350,38 +350,66 @@ export class AgentsService {
     if (!run) return;
 
     run.updatedAt = new Date(); // Refresh active task execution lease
-    if (dto.resultData?.stage) {
-      run.status = dto.resultData.stage as any;
-    } else if (dto.status) {
-      run.status = (dto.status === 'COMPLETED' ? 'SUCCEEDED' : dto.status) as any;
-    }
-
-    if (dto.errorMessage) run.errorMessage = dto.errorMessage;
     if (dto.totalDurationMs) run.totalDurationMs = dto.totalDurationMs;
-    if (dto.resultData !== undefined) run.resultSummaryJson = JSON.stringify(dto.resultData);
-    if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REQUIRES_MANUAL_INTERVENTION'].includes(run.status)) {
-      run.completedAt = new Date();
-    }
-    await this.runRepo.save(run);
 
-    if (['SUCCEEDED', 'COMPLETED'].includes(run.status)) {
-      if (run.runType === 'PROCESS_USER_FULL_WORKFLOW' || run.runType === 'CREATE_CLIENT_USER') {
-        try {
-          await this.reconciliationService.persistCreationCompletionSnapshot(run, dto.resultData);
-        } catch (persistErr: any) {
-          this.logger.error(`Failed to persist verified creation snapshot for run ${run.id}: ${persistErr.message}`);
-        }
+    const isCreationWorkflow = run.runType === 'PROCESS_USER_FULL_WORKFLOW' || run.runType === 'CREATE_CLIENT_USER';
+    const isRemoteVerificationDone =
+      dto.resultData?.stage === 'FINAL_ROLES_VERIFIED' ||
+      dto.status === 'FINAL_ROLES_VERIFIED' ||
+      dto.status === 'COMPLETED';
+
+    if (isCreationWorkflow && isRemoteVerificationDone) {
+      // Remote terminal stage FINAL_ROLES_VERIFIED reached.
+      // Central snapshot transaction must now execute before emitting completion.
+      try {
+        const stagesEmitted: string[] = ['FINAL_ROLES_VERIFIED'];
+        await this.reconciliationService.persistCreationCompletionSnapshot(run, dto.resultData, (stage) => {
+          stagesEmitted.push(stage);
+        });
+
+        // Central transaction succeeded: now emit CENTRAL_SNAPSHOT_PERSISTED and COMPLETED
+        run.status = 'COMPLETED' as any;
+        run.completedAt = new Date();
+        const existingSummary = dto.resultData ? { ...dto.resultData } : {};
+        existingSummary.stage = 'COMPLETED';
+        existingSummary.stagesEmitted = stagesEmitted;
+        run.resultSummaryJson = JSON.stringify(existingSummary);
+      } catch (persistErr: any) {
+        this.logger.error(`Failed to persist verified creation snapshot for run ${run.id}: ${persistErr.message}`);
+        // Requirement 4: If Central persistence fails after remote verification, return REMOTE_COMPLETED_CENTRAL_SYNC_PENDING. Never report COMPLETED.
+        run.status = 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING' as any;
+        run.errorMessage = `Remote execution verified, but Central DB snapshot persistence failed: ${persistErr.message}`;
+        const existingSummary = dto.resultData ? { ...dto.resultData } : {};
+        existingSummary.stage = 'FINAL_ROLES_VERIFIED';
+        existingSummary.overallStatus = 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING';
+        run.resultSummaryJson = JSON.stringify(existingSummary);
       }
-    } else if (['FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+    } else {
+      if (dto.resultData?.stage) {
+        run.status = dto.resultData.stage as any;
+      } else if (dto.status) {
+        run.status = (dto.status === 'COMPLETED' ? 'SUCCEEDED' : dto.status) as any;
+      }
+
+      if (dto.errorMessage) run.errorMessage = dto.errorMessage;
+      if (dto.resultData !== undefined) run.resultSummaryJson = JSON.stringify(dto.resultData);
+      if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REQUIRES_MANUAL_INTERVENTION'].includes(run.status)) {
+        run.completedAt = new Date();
+      }
+    }
+
+    if (['FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
       this.reconciliationService.discardBuffer(runId);
     }
+
+    await this.runRepo.save(run);
 
     // Maintain active agent lease & status as BUSY while task telemetry is received
     if (run.desktopAgentId) {
       const agent = await this.agentRepo.findOne({ where: { id: run.desktopAgentId } });
       if (agent) {
         agent.lastHeartbeatAt = new Date();
-        if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+        if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'].includes(run.status)) {
           agent.status = 'ONLINE';
         } else {
           agent.status = 'BUSY';

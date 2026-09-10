@@ -1,6 +1,29 @@
 import express, { Request, Response } from 'express';
 import * as http from 'http';
 
+export interface FixtureUserRoleRecord {
+  id: number;
+  userName: string;
+  userId: string;
+  role: string;
+  status: 'A' | 'D';
+}
+
+export const fixtureClickCounters = {
+  addUserRoleSubmitCount: 0,
+  roleStatusClickCount: 0,
+  passwordResetClickCount: 0,
+  userStatusClickCount: 0,
+  createUserSubmitCount: 0,
+  reset() {
+    this.addUserRoleSubmitCount = 0;
+    this.roleStatusClickCount = 0;
+    this.passwordResetClickCount = 0;
+    this.userStatusClickCount = 0;
+    this.createUserSubmitCount = 0;
+  },
+};
+
 export function createFixtureApp(): express.Express {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
@@ -100,6 +123,29 @@ export function createFixtureApp(): express.Express {
   userRolesMap.set('nurse_ali', ['Nurse']);
   userRolesMap.set('abdul.p', ['Physician']);
   userRolesMap.set('synthetic.test.user', ['Admin']);
+
+  let userRoleIdSeq = 1;
+  const userRoleRegistry: FixtureUserRoleRecord[] = [
+    { id: userRoleIdSeq++, userName: 'System Administrator', userId: 'hmc_admin', role: 'Admin', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'System Administrator', userId: 'hmc_admin', role: 'Super User', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Sarah Al-Mansoor', userId: 'dr_sarah', role: 'Physician', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Ali Hassan', userId: 'nurse_ali', role: 'Nurse', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Abdul Qadeer Pathan', userId: 'abdul.p', role: 'Physician', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Synthetic Test User', userId: 'synthetic.test.user', role: 'Admin', status: 'A' },
+  ];
+
+  const syncRolesMapFromRegistry = () => {
+    userRolesMap.clear();
+    for (const rec of userRoleRegistry) {
+      if (rec.status === 'A') {
+        const existing = userRolesMap.get(rec.userId) || [];
+        if (!existing.includes(rec.role)) {
+          existing.push(rec.role);
+        }
+        userRolesMap.set(rec.userId, existing);
+      }
+    }
+  };
 
   const clientResources: Array<{
     resourceCode: string;
@@ -705,26 +751,41 @@ export function createFixtureApp(): express.Express {
   });
 
   const handleAddUsersPost = (req: Request, res: Response) => {
+    fixtureClickCounters.createUserSubmitCount++;
     const { username, firstName, middleName, lastName, nickName, email, mobileNumber, nationality, role, profileRole, barcodeNumber } = req.body;
     if (clientUsers.some((u) => u.username.toLowerCase() === (username || '').toLowerCase())) {
       return res.status(400).send('<div class="alert-danger">User already exists</div>');
     }
     const targetUrl = req.path.includes('MasterV9.3') ? '/MasterV9.3/users' : (req.path.includes('MasterV9.4') ? '/MasterV9.4/users' : '/users');
+    const assignedUsername = username || `user_${Date.now()}`;
+    const assignedFullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const assignedRole = role || 'Physician';
+
     clientUsers.push({
-      username: username || `user_${Date.now()}`,
+      username: assignedUsername,
       firstName: firstName || 'First',
       middleName,
       lastName: lastName || 'Last',
-      fullName: `${firstName || ''} ${lastName || ''}`.trim(),
+      fullName: assignedFullName,
       nickName,
       email: email || '',
       mobileNumber: mobileNumber || '',
       nationality: nationality || 'Other',
-      role: role || 'Physician',
+      role: assignedRole,
       profileRole: profileRole || 'Specialist',
       status: 'ACTIVE',
       barcodeNumber,
     });
+
+    userRoleRegistry.push({
+      id: userRoleIdSeq++,
+      userName: assignedFullName,
+      userId: assignedUsername,
+      role: assignedRole,
+      status: 'A',
+    });
+    syncRolesMapFromRegistry();
+
     res.redirect(targetUrl);
   };
 
@@ -736,19 +797,29 @@ export function createFixtureApp(): express.Express {
   app.post('/MasterV9.3/addUsers', handleAddUsersPost);
 
   // Client User Mutation APIs
-  app.post('/MasterV9.4/api/users/:username/toggle-status', (req: Request, res: Response) => {
-    const u = clientUsers.find((user) => user.username === req.params.username);
+  const handleToggleUserStatus = (req: Request, res: Response) => {
+    fixtureClickCounters.userStatusClickCount++;
+    const u = clientUsers.find((user) => user.username.toLowerCase() === String(req.params.username || '').toLowerCase());
     if (u) {
       u.status = u.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
       res.json({ success: true, status: u.status });
     } else {
       res.status(404).json({ error: 'User not found' });
     }
+  };
+
+  const handleResetUserPassword = (req: Request, res: Response) => {
+    fixtureClickCounters.passwordResetClickCount++;
+    const tempPassword = 'Tmp@Pass123!'; // test fixture dummy password
+    res.json({ success: true, temporaryPassword: tempPassword });
+  };
+
+  ['/api/users/:username/toggle-status', '/MasterV9.4/api/users/:username/toggle-status', '/MasterV9.3/api/users/:username/toggle-status'].forEach((p) => {
+    app.post(p, handleToggleUserStatus);
   });
 
-  app.post('/MasterV9.4/api/users/:username/reset-password', (req: Request, res: Response) => {
-    const tempPassword = `Tmp@${Math.random().toString(36).substring(2, 8)}!1`;
-    res.json({ success: true, temporaryPassword: tempPassword });
+  ['/api/users/:username/reset-password', '/MasterV9.4/api/users/:username/reset-password', '/MasterV9.3/api/users/:username/reset-password'].forEach((p) => {
+    app.post(p, handleResetUserPassword);
   });
 
   // User Role Master Screen (/addUserRole, /MasterV9.4/addUserRole, /MasterV9.3/addUserRole)
@@ -845,6 +916,9 @@ export function createFixtureApp(): express.Express {
                       'NURSE',
                       'PHYSICIAN',
                       'PHARMACIST',
+                      'CLINICAL PHARMACIST',
+                      'SURGEON',
+                      'ANESTHESIOLOGIST',
                       'LAB TECHNICIAN',
                       'OPERATOR',
                       'SUPER USER',
@@ -970,6 +1044,7 @@ export function createFixtureApp(): express.Express {
   };
 
   const handleAddUserRolePost = (req: Request, res: Response) => {
+    fixtureClickCounters.addUserRoleSubmitCount++;
     const userVal = (req.body.txtUser || req.body.username || '').toString().trim();
     if (!userVal) {
       return res.redirect(`${req.path}?error=` + encodeURIComponent('Please select a user first.'));
@@ -977,10 +1052,29 @@ export function createFixtureApp(): express.Express {
 
     const rawRoles = req.body['txtRole[]'] || req.body.txtRole || req.body.roles || [];
     const rolesArr = Array.isArray(rawRoles) ? rawRoles : (rawRoles ? [rawRoles] : []);
-    userRolesMap.set(userVal, rolesArr);
+
+    const matchedUser = clientUsers.find((u) => u.username.toLowerCase() === userVal.toLowerCase());
+    const fullName = matchedUser ? matchedUser.fullName : userVal;
+
+    for (const rName of rolesArr) {
+      const existing = userRoleRegistry.find(
+        (r) => r.userId.toLowerCase() === userVal.toLowerCase() && r.role.toLowerCase() === rName.toLowerCase()
+      );
+      if (existing) {
+        existing.status = 'A';
+      } else {
+        userRoleRegistry.push({
+          id: userRoleIdSeq++,
+          userName: fullName,
+          userId: userVal,
+          role: rName,
+          status: 'A',
+        });
+      }
+    }
+    syncRolesMapFromRegistry();
 
     // Also update clientUsers in-memory snapshot if present
-    const matchedUser = clientUsers.find((u) => u.username.toLowerCase() === userVal.toLowerCase());
     if (matchedUser && rolesArr.length > 0) {
       matchedUser.role = rolesArr.join(', ');
     }
@@ -994,6 +1088,151 @@ export function createFixtureApp(): express.Express {
   app.post('/MasterV9.4/addUserRole', handleAddUserRolePost);
   app.get('/MasterV9.3/addUserRole', handleAddUserRoleGet);
   app.post('/MasterV9.3/addUserRole', handleAddUserRolePost);
+
+  // User Role Registry Screen (/userRole, /MasterV9.4/userRole, /MasterV9.3/userRole)
+  const handleUserRoleGet = (req: Request, res: Response) => {
+    const prefix = req.path.includes('MasterV9.4') ? '/MasterV9.4' : (req.path.includes('MasterV9.3') ? '/MasterV9.3' : '');
+    const rowsHtml = userRoleRegistry
+      .map((rec, idx) => {
+        const statusHtml =
+          rec.status === 'A'
+            ? `<a href="${prefix}/changeUserRoleStatus/${rec.id}/A" title="Click to Deactive" class="btn-status-active"><i class="fa fa-check text-success"></i> Active</a>`
+            : `<a href="${prefix}/changeUserRoleStatus/${rec.id}/D" class="remove btn-status-deactive" title="Click to Active"><i class="fa fa-remove text-danger"></i> Deactive</a>`;
+        return `
+          <tr>
+            <td>${idx + 1}</td>
+            <td>${rec.userName}</td>
+            <td>${rec.userId}</td>
+            <td>${rec.role}</td>
+            <td>General</td>
+            <td>Staff</td>
+            <td>Main</td>
+            <td>admin</td>
+            <td>2026-01-01</td>
+            <td>${statusHtml}</td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>User Role Registry</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; }
+          .header { background: #1e293b; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+          .nav a { color: #94a3b8; text-decoration: none; margin-right: 1.5rem; font-weight: 500; }
+          .content { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+          .card { background: #1e293b; padding: 1.5rem; border-radius: 0.5rem; border: 1px solid #334155; }
+          .dataTables_filter { margin-bottom: 1rem; display: flex; justify-content: flex-end; }
+          .dataTables_filter input { padding: 0.5rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #fff; }
+          table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+          th { background: #0f172a; color: #94a3b8; text-align: left; padding: 0.75rem 0.5rem; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid #334155; }
+          td { padding: 0.75rem 0.5rem; border-bottom: 1px solid #1e293b; font-size: 0.85rem; }
+          a.btn-status-active { color: #10b981; text-decoration: none; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+          a.btn-status-deactive { color: #ef4444; text-decoration: none; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div style="font-weight: bold; font-size: 1.25rem; color: #38bdf8;">HMC Clinical Suite</div>
+          <div class="nav">
+            <a href="${prefix}/users">Users</a>
+            <a href="${prefix}/userRole" class="active">User Role</a>
+            <a href="${prefix}/addUserRole">Add User Role</a>
+            <a href="/login">Logout</a>
+          </div>
+        </div>
+        <div class="content">
+          <div class="card">
+            <h2>User Role Mapping Registry</h2>
+            <div class="dataTables_wrapper">
+              <div class="dataTables_filter">
+                <label>Search: <input type="search" id="roleSearch" class="form-control" placeholder="Search user or role..." oninput="filterRoleTable()" /></label>
+              </div>
+              <table id="tablaDatos" class="table table-striped table-bordered table-hover">
+                <thead>
+                  <tr>
+                    <th>S.NO</th>
+                    <th>USER NAME</th>
+                    <th>USER ID</th>
+                    <th>ROLE</th>
+                    <th>DEPARTMENT</th>
+                    <th>DESIGNATION</th>
+                    <th>BRANCH</th>
+                    <th>CREATED BY</th>
+                    <th>CREATED DATE</th>
+                    <th>STATUS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <script>
+          function filterRoleTable() {
+            var val = (document.getElementById('roleSearch').value || '').toLowerCase().trim();
+            var rows = document.querySelectorAll('#tablaDatos tbody tr');
+            rows.forEach(function(row) {
+              var text = (row.textContent || '').toLowerCase();
+              row.style.display = (!val || text.indexOf(val) > -1) ? '' : 'none';
+            });
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleChangeUserRoleStatus = (req: Request, res: Response) => {
+    fixtureClickCounters.roleStatusClickCount++;
+    const id = parseInt(String(req.params.id), 10);
+    const rec = userRoleRegistry.find((r) => r.id === id);
+    if (rec) {
+      rec.status = rec.status === 'A' ? 'D' : 'A';
+      syncRolesMapFromRegistry();
+    }
+    const prefix = req.path.includes('MasterV9.4') ? '/MasterV9.4' : (req.path.includes('MasterV9.3') ? '/MasterV9.3' : '');
+    const referer = req.header('Referer');
+    const redirectUrl = referer && referer.includes('userRole') ? referer : `${prefix}/userRole`;
+    res.redirect(redirectUrl);
+  };
+
+  ['/userRole', '/MasterV9.4/userRole', '/MasterV9.3/userRole'].forEach((p) => {
+    app.get(p, handleUserRoleGet);
+  });
+
+  ['/changeUserRoleStatus/:id/:status', '/MasterV9.4/changeUserRoleStatus/:id/:status', '/MasterV9.3/changeUserRoleStatus/:id/:status'].forEach((p) => {
+    app.get(p, handleChangeUserRoleStatus);
+    app.post(p, handleChangeUserRoleStatus);
+  });
+
+  // checkroleAddNewUser API endpoint (matching Simplex remote XHR)
+  const handleCheckroleAddNewUser = (req: Request, res: Response) => {
+    const userid = String(req.query.userid || req.query.username || '').trim().toLowerCase();
+    const activeRoles = userRoleRegistry
+      .filter((r) => r.userId.toLowerCase() === userid && r.status === 'A')
+      .map((r) => ({ Role_Name: r.role, role_name: r.role, role: r.role, status: 'Active' }));
+    res.json(activeRoles);
+  };
+  app.get('/checkroleAddNewUser', handleCheckroleAddNewUser);
+  app.get('/MasterV9.4/checkroleAddNewUser', handleCheckroleAddNewUser);
+  app.get('/MasterV9.3/checkroleAddNewUser', handleCheckroleAddNewUser);
+
+  // Click counters API for invariant testing
+  app.get('/api/test/click-counters', (_req: Request, res: Response) => {
+    res.json(fixtureClickCounters);
+  });
+  app.post('/api/test/click-counters/reset', (_req: Request, res: Response) => {
+    fixtureClickCounters.reset();
+    res.json({ success: true, counters: fixtureClickCounters });
+  });
 
   // User Role APIs
   app.get('/MasterV9.4/api/user-roles/:username', (req: Request, res: Response) => {

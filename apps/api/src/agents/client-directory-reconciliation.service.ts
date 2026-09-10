@@ -21,6 +21,7 @@ import {
   SyncUserBatchResponse,
   ScrapedUserBatchItem,
   ClientUserSyncSummary,
+  CreationWorkflowStage,
 } from '@hmc/shared';
 
 interface RunBatchBuffer {
@@ -490,9 +491,14 @@ export class ClientDirectoryReconciliationService {
    * Persists verified Central snapshot for single user creation / multi-role completion.
    * Invoked strictly via authenticated automation telemetry/completion command path.
    * Fully idempotent with single-flight concurrency mutex and conflict detection.
+   * Emits CENTRAL_SNAPSHOT_PERSISTED and COMPLETED only after DB save transaction succeeds.
    */
-  async persistCreationCompletionSnapshot(run: AutomationRun, resultData?: any): Promise<void> {
-    if (!run || !run.clientId) return;
+  async persistCreationCompletionSnapshot(
+    run: AutomationRun,
+    resultData?: any,
+    onStage?: (stage: CreationWorkflowStage) => void
+  ): Promise<{ stagesEmitted: CreationWorkflowStage[]; snapshot: ClientUserSnapshot | null }> {
+    if (!run || !run.clientId) return { stagesEmitted: [], snapshot: null };
 
     let params: any = {};
     try {
@@ -501,7 +507,7 @@ export class ClientDirectoryReconciliationService {
 
     const dto = params.payload || params;
     const targetUsername = (dto.username || params.username || '').trim();
-    if (!targetUsername) return;
+    if (!targetUsername) return { stagesEmitted: [], snapshot: null };
 
     const normUsername = targetUsername.toLowerCase();
     const lockKey = `${run.clientId}:${normUsername}`;
@@ -529,7 +535,15 @@ export class ClientDirectoryReconciliationService {
         this.logger.warn(
           `Conflicting terminal telemetry for user '${targetUsername}': existing remoteUserId '${snapshot.remoteUserId}' vs incoming '${resultData.remoteUserId}'. Telemetry conflict audit logged; verified snapshot preserved.`
         );
-        return;
+        return { stagesEmitted: [], snapshot };
+      }
+
+      // Repeated completion telemetry check: persist once, idempotent return
+      if (snapshot && snapshot.syncRunId === run.id && snapshot.lastVerifiedAt) {
+        this.logger.log(`Repeated completion telemetry for user '${targetUsername}' (run: ${run.id}): already persisted once.`);
+        onStage?.('CENTRAL_SNAPSHOT_PERSISTED');
+        onStage?.('COMPLETED');
+        return { stagesEmitted: ['CENTRAL_SNAPSHOT_PERSISTED', 'COMPLETED'], snapshot };
       }
 
       const fullName = `${dto.firstName || ''} ${dto.lastName || ''}`.trim() || targetUsername;
@@ -577,8 +591,17 @@ export class ClientDirectoryReconciliationService {
         snapshot.lastVerifiedAt = now;
       }
 
-      await this.snapshotRepo.save(snapshot);
+      const savedSnapshot = await this.snapshotRepo.save(snapshot);
       this.logger.log(`Persisted verified Central snapshot for '${targetUsername}' (run: ${run.id})`);
+
+      // Emit CENTRAL_SNAPSHOT_PERSISTED and COMPLETED only after DB save transaction succeeds
+      onStage?.('CENTRAL_SNAPSHOT_PERSISTED');
+      onStage?.('COMPLETED');
+
+      return {
+        stagesEmitted: ['CENTRAL_SNAPSHOT_PERSISTED', 'COMPLETED'],
+        snapshot: savedSnapshot,
+      };
     } finally {
       ClientDirectoryReconciliationService.completionLocks.delete(lockKey);
       releaseLock();

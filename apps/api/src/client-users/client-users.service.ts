@@ -1230,7 +1230,8 @@ export class ClientUsersService implements OnModuleInit {
           status: dto.status || 'ACTIVE',
           isPresentRemotely: true,
           creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
-          workflowStage: 'ROLES_VERIFIED',
+          overallStatus: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          workflowStage: 'FINAL_ROLES_VERIFIED',
           credentialDeliveryStatus: 'DELIVERED',
           message: 'User and roles were created successfully in Simplex. Central synchronization is pending. No duplicate creation will be attempted.',
         };
@@ -1243,7 +1244,7 @@ export class ClientUsersService implements OnModuleInit {
           creationOutcome: 'USER_CREATED_ROLE_PENDING',
           workflowStage: 'ROLE_MAPPING_SUBMITTED',
           message: parsedResult.errorMessage || 'User created successfully, but role mapping is pending. Retry role mapping without recreating the user.',
-          retryStartingPoint: 'ROLE_MAPPING',
+          retryStartingPoint: 'ROLE_STATE_INSPECTION',
           createdUser: saved,
         });
       }
@@ -2350,9 +2351,9 @@ export class ClientUsersService implements OnModuleInit {
     fullName: string;
     currentRoles: ClientUserRoleItem[];
     availableRoles: ClientUserRoleItem[];
-    dataSource: 'REMOTE_LIVE';
+    dataSource: 'REMOTE_LIVE' | 'SNAPSHOT';
     lastSyncedAt: string | null;
-    isSnapshotData: false;
+    isSnapshotData: boolean;
   }> {
     let snapshot = await this.snapshotRepo.findOne({ where: { id } });
     if (!snapshot) throw new NotFoundException('Client user not found');
@@ -2367,144 +2368,136 @@ export class ClientUsersService implements OnModuleInit {
     // Single-flight locking protection: prevents concurrent refresh collisions
     const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
 
+    let remoteRefreshSucceeded = false;
     try {
       const allAgents = await this.agentsService.getAllAgents();
       const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
       if (onlineAgents.length === 0) {
-        throw new BadRequestException({
-          code: 'DESKTOP_AGENT_OFFLINE',
-          message: 'Role refresh failed: Automation agent is offline.',
-        });
-      }
+        this.logger.warn(`Role refresh agent offline. Falling back to snapshot for ${snapshot.username}.`);
+      } else {
+        let credentials: { username: string; password: string } | undefined = undefined;
+        const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+        if (cred) {
+          const username = EnvelopeEncryption.decrypt({
+            cipherText: cred.encryptedUsername,
+            iv: cred.usernameIv,
+            tag: cred.usernameTag,
+            keyVersion: cred.keyVersion,
+          });
+          const password = EnvelopeEncryption.decrypt({
+            cipherText: cred.encryptedPassword,
+            iv: cred.passwordIv,
+            tag: cred.passwordTag,
+            keyVersion: cred.keyVersion,
+          });
+          credentials = { username, password };
+        }
 
-      let credentials: { username: string; password: string } | undefined = undefined;
-      const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
-      if (cred) {
-        const username = EnvelopeEncryption.decrypt({
-          cipherText: cred.encryptedUsername,
-          iv: cred.usernameIv,
-          tag: cred.usernameTag,
-          keyVersion: cred.keyVersion,
-        });
-        const password = EnvelopeEncryption.decrypt({
-          cipherText: cred.encryptedPassword,
-          iv: cred.passwordIv,
-          tag: cred.passwordTag,
-          keyVersion: cred.keyVersion,
-        });
-        credentials = { username, password };
-      }
-
-      const routes = this.resolveClientUserRoutes(client);
-      const run = this.runRepo.create({
-        clientId: client.id,
-        desktopAgentId: onlineAgents[0].id,
-        triggeredByUserId: user.sub,
-        runType: 'REFRESH_CLIENT_USER_ROLES' as any,
-        status: 'PENDING',
-        parametersJson: JSON.stringify({
-          taskType: 'REFRESH_CLIENT_USER_ROLES',
-          userId: user.sub,
+        const routes = this.resolveClientUserRoutes(client);
+        const run = this.runRepo.create({
           clientId: client.id,
-          clientBaseUrl: client.baseUrl,
-          clientAppPath: client.applicationPath,
-          loginRoute: routes.resolvedLoginUrl,
-          targetRoute: routes.resolvedUsersUrl,
-          userRoleRoute: routes.resolvedRoleUrl,
-          credentials,
-          payload: {
-            username: snapshot.username,
-            remoteUserId: snapshot.remoteUserId,
-          },
-        }),
-      });
+          desktopAgentId: onlineAgents[0].id,
+          triggeredByUserId: user.sub,
+          runType: 'REFRESH_CLIENT_USER_ROLES' as any,
+          status: 'PENDING',
+          parametersJson: JSON.stringify({
+            taskType: 'REFRESH_CLIENT_USER_ROLES',
+            userId: user.sub,
+            clientId: client.id,
+            clientBaseUrl: client.baseUrl,
+            clientAppPath: client.applicationPath,
+            loginRoute: routes.resolvedLoginUrl,
+            targetRoute: routes.resolvedUsersUrl,
+            userRoleRoute: routes.resolvedRoleUrl,
+            credentials,
+            payload: {
+              username: snapshot.username,
+              remoteUserId: snapshot.remoteUserId,
+            },
+          }),
+        });
 
-      const savedRun = await this.runRepo.save(run);
+        const savedRun = await this.runRepo.save(run);
 
-      // Wait for agent completion (up to 30s)
-      const startTime = Date.now();
-      let completedRun: AutomationRun | null = null;
-      while (Date.now() - startTime < 30000) {
-        await new Promise((r) => setTimeout(r, 250));
-        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
-        if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
-          completedRun = r;
-          break;
+        // Wait for agent completion (up to 30s)
+        const startTime = Date.now();
+        let completedRun: AutomationRun | null = null;
+        while (Date.now() - startTime < 30000) {
+          await new Promise((r) => setTimeout(r, 250));
+          const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+          if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+            completedRun = r;
+            break;
+          }
+        }
+
+        if (!completedRun) {
+          savedRun.status = 'TIMED_OUT';
+          savedRun.errorMessage = 'Role refresh timed out: Automation agent did not respond within 30 seconds.';
+          await this.runRepo.save(savedRun).catch(() => {});
+          this.logger.warn(`Role refresh timed out for ${snapshot.username}. Falling back to snapshot.`);
+        } else {
+          let parsedResult: any = {};
+          try {
+            parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+          } catch {}
+
+          if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT' || !parsedResult.success) {
+            const errorCode = parsedResult.errorCode || 'REMOTE_ROLE_REFRESH_FAILED';
+            const errorMsg = parsedResult.errorMessage || completedRun?.errorMessage || 'Role refresh failed on remote client portal.';
+            this.logger.warn(`Remote role refresh did not succeed for ${snapshot.username} (${errorCode}: ${errorMsg}). Falling back to snapshot roles.`);
+          } else {
+            remoteRefreshSucceeded = true;
+            // Live roles verified: normalize canonical role names and remove exact duplicates
+            const rawLiveRoles: string[] = Array.isArray(parsedResult.roles) ? parsedResult.roles : [];
+            const normalizedLiveRoles = Array.from(
+              new Set(
+                rawLiveRoles
+                  .map((r) => (typeof r === 'string' ? r.trim() : ''))
+                  .filter(Boolean)
+              )
+            );
+            const canonicalRolesString = normalizedLiveRoles.join(', ');
+
+            // Atomic persistence: update snapshot.role, lastVerifiedAt, lastSyncedAt together.
+            const updateTimestamp = new Date();
+            await this.snapshotRepo
+              .createQueryBuilder()
+              .update(ClientUserSnapshot)
+              .set({
+                role: canonicalRolesString,
+                lastVerifiedAt: updateTimestamp,
+                lastSyncedAt: updateTimestamp,
+                updatedAt: updateTimestamp,
+              })
+              .where('id = :id', { id: snapshot.id })
+              .execute();
+
+            snapshot.role = canonicalRolesString;
+            snapshot.lastVerifiedAt = updateTimestamp;
+            snapshot.lastSyncedAt = updateTimestamp;
+
+            // Record non-sensitive audit metadata
+            await this.auditRepo.save(
+              this.auditRepo.create({
+                action: 'CLIENT_USER_ROLES_REFRESHED',
+                actorUserId: user.sub,
+                actorUsername: user.username,
+                entityType: 'CLIENT_USER',
+                entityId: id,
+                result: 'SUCCESS',
+                detailsJson: JSON.stringify({
+                  clientUserId: id,
+                  username: snapshot.username,
+                  remoteUserId: snapshot.remoteUserId,
+                  liveRoles: normalizedLiveRoles,
+                  refreshedAt: new Date().toISOString(),
+                }),
+              })
+            ).catch(() => {});
+          }
         }
       }
-
-      if (!completedRun) {
-        savedRun.status = 'TIMED_OUT';
-        savedRun.errorMessage = 'Role refresh timed out: Automation agent did not respond within 30 seconds.';
-        await this.runRepo.save(savedRun).catch(() => {});
-        throw new BadRequestException({
-          code: 'CLIENT_MUTATION_TIMEOUT',
-          message: 'Role refresh timed out: Automation agent did not respond within 30 seconds.',
-        });
-      }
-
-      let parsedResult: any = {};
-      try {
-        parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
-      } catch {}
-
-      if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT' || !parsedResult.success) {
-        const errorCode = parsedResult.errorCode || 'REMOTE_ROLE_REFRESH_FAILED';
-        const errorMsg = parsedResult.errorMessage || completedRun?.errorMessage || 'Role refresh failed on remote client portal.';
-        throw new BadRequestException({
-          code: errorCode,
-          message: errorMsg,
-        });
-      }
-
-      // Live roles verified: normalize canonical role names and remove exact duplicates
-      const rawLiveRoles: string[] = Array.isArray(parsedResult.roles) ? parsedResult.roles : [];
-      const normalizedLiveRoles = Array.from(
-        new Set(
-          rawLiveRoles
-            .map((r) => (typeof r === 'string' ? r.trim() : ''))
-            .filter(Boolean)
-        )
-      );
-      const canonicalRolesString = normalizedLiveRoles.join(', ');
-
-      // Atomic persistence: update snapshot.role, lastVerifiedAt, lastSyncedAt together.
-      // If persistence fails, snapshot and lastVerifiedAt are not marked verified.
-      const updateTimestamp = new Date();
-      await this.snapshotRepo
-        .createQueryBuilder()
-        .update(ClientUserSnapshot)
-        .set({
-          role: canonicalRolesString,
-          lastVerifiedAt: updateTimestamp,
-          lastSyncedAt: updateTimestamp,
-          updatedAt: updateTimestamp,
-        })
-        .where('id = :id', { id: snapshot.id })
-        .execute();
-
-      snapshot.role = canonicalRolesString;
-      snapshot.lastVerifiedAt = updateTimestamp;
-      snapshot.lastSyncedAt = updateTimestamp;
-
-      // Record non-sensitive audit metadata (no passwords or credentials)
-      await this.auditRepo.save(
-        this.auditRepo.create({
-          action: 'CLIENT_USER_ROLES_REFRESHED',
-          actorUserId: user.sub,
-          actorUsername: user.username,
-          entityType: 'CLIENT_USER',
-          entityId: id,
-          result: 'SUCCESS',
-          detailsJson: JSON.stringify({
-            clientUserId: id,
-            username: snapshot.username,
-            remoteUserId: snapshot.remoteUserId,
-            liveRoles: normalizedLiveRoles,
-            refreshedAt: new Date().toISOString(),
-          }),
-        })
-      ).catch(() => {});
     } finally {
       // Guaranteed lock release on all outcomes
       releaseLock();
@@ -2528,9 +2521,9 @@ export class ClientUsersService implements OnModuleInit {
       fullName: snapshot.fullName,
       currentRoles,
       availableRoles,
-      dataSource: 'REMOTE_LIVE',
+      dataSource: remoteRefreshSucceeded ? 'REMOTE_LIVE' : 'SNAPSHOT',
       lastSyncedAt: snapshot.lastSyncedAt ? new Date(snapshot.lastSyncedAt).toISOString() : new Date().toISOString(),
-      isSnapshotData: false,
+      isSnapshotData: !remoteRefreshSucceeded,
     };
   }
 
@@ -3991,7 +3984,7 @@ export class ClientUsersService implements OnModuleInit {
         errorCode: 'OPERATION_TIMED_OUT',
         errorMessage: 'Role mapping timed out: Automation agent did not respond within 30 seconds.',
         failureReason: 'Role mapping timed out',
-        retryStartingPoint: 'ROLE_MAPPING',
+        retryStartingPoint: 'ROLE_STATE_INSPECTION',
       };
     }
 
@@ -4021,7 +4014,7 @@ export class ClientUsersService implements OnModuleInit {
       mappedRoles: parsedResult.mappedRoles || [],
       missingRoles: parsedResult.missingRoles || dto.roles,
       roleSelectionProgress: parsedResult.roleSelectionProgress,
-      retryStartingPoint: 'ROLE_MAPPING',
+      retryStartingPoint: 'ROLE_STATE_INSPECTION',
     };
   }
 
@@ -4235,7 +4228,7 @@ export class ClientUsersService implements OnModuleInit {
         ? parsedRoleResult.validRoles
         : (row.roles && row.roles.length > 0 ? row.roles : (row.role ? [row.role] : []));
 
-      const isRetryFromRoleMapping = row.retryStartingPoint === 'ROLE_MAPPING' || (row.action as any) === 'MAP_ROLE';
+      const isRetryFromRoleMapping = row.retryStartingPoint === 'ROLE_STATE_INSPECTION' || (row.action as any) === 'MAP_ROLE';
 
       // Execute eligible row
       if (row.action === 'CREATE' || isRetryFromRoleMapping) {
@@ -4539,7 +4532,7 @@ export class ClientUsersService implements OnModuleInit {
               credentialDeliveryStatus: rowCredentialDeliveryStatus,
               executedAt: new Date().toISOString(),
               correlationId: rowCorrelationId,
-              retryStartingPoint: 'ROLE_MAPPING',
+              retryStartingPoint: 'ROLE_STATE_INSPECTION',
               nextAction: systemPaused ? 'Batch paused due to infrastructure error' : 'Continuing to next user',
             });
           }
@@ -4579,7 +4572,7 @@ export class ClientUsersService implements OnModuleInit {
             credentialDeliveryStatus: rowCredentialDeliveryStatus,
             executedAt: new Date().toISOString(),
             correlationId: rowCorrelationId,
-            retryStartingPoint: 'ROLE_MAPPING',
+            retryStartingPoint: 'ROLE_STATE_INSPECTION',
             nextAction: systemPaused ? 'Batch paused due to infrastructure error' : 'Continuing to next user',
           });
         }
