@@ -415,7 +415,11 @@ export function createFixtureApp(): express.Express {
             fetch('/MasterV9.4/api/users/' + username + '/reset-password', { method: 'POST' })
               .then(res => res.json())
               .then(data => {
-                alert('Password reset: Temporary password is ' + data.temporaryPassword);
+                if (data && data.temporaryPassword) {
+                  alert('Password reset: Temporary password is ' + data.temporaryPassword);
+                } else {
+                  alert((data && data.message) || 'Password Reseted Successfully');
+                }
               });
           }
         </script>

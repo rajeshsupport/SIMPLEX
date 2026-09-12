@@ -856,6 +856,13 @@ export class AutomationWorker {
               .catch(() => {});
           };
 
+          const addUsersUrl = resolveClientRoute({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            route: task.payload?.addUsersRoute || task.addUsersRoute,
+            fallbackRoute: '/addUsers',
+          });
+
           reportProgress(`Logging in to selected Simplex client…`);
           reportProgress(`Opening Users screen…`);
           reportProgress(`Searching for '${task.payload.username}'…`);
@@ -863,6 +870,7 @@ export class AutomationWorker {
 
           const resetRes = await UserManagementExecutor.resetUserPassword(mutationPage, {
             usersListUrl,
+            addUsersUrl,
             username: task.payload.username,
             remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
             loginUrl,

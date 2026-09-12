@@ -1434,64 +1434,126 @@ export class UserManagementExecutor {
       }
       await page.waitForTimeout(600);
 
-      const searchBox = page.locator('input[type="search"], .dataTables_filter input').first();
+      const searchBox = page.locator('input[type="search"], .dataTables_filter input, input#roleSearch').first();
       if (await searchBox.isVisible().catch(() => false)) {
         await searchBox.fill(username).catch(() => {});
         await page.waitForTimeout(600);
       }
 
-      return await page.evaluate(({ uname, uId }) => {
-        const trs = Array.from(document.querySelectorAll('table tbody tr'));
-        const cleanUser = uname.toLowerCase().trim();
-        const cleanId = (uId || '').toLowerCase().trim();
-        const records: Array<{ role: string; isActive: boolean; href: string | null }> = [];
+      const allRecords: Array<{ role: string; isActive: boolean; href: string | null }> = [];
+      let pageIdx = 0;
+      const maxPages = 20;
 
-        for (const tr of trs) {
-          const tds = Array.from(tr.querySelectorAll('td')).map((t) => t.innerText.trim());
-          if (tds.length < 4) continue;
-          const rowUserName = (tds[1] || '').toLowerCase();
-          const rowUserId = (tds[2] || '').toLowerCase();
-          const rowRole = (tds[3] || '').trim();
+      while (pageIdx < maxPages) {
+        pageIdx++;
+        const pageRecords = await page.evaluate(({ uname, uId }) => {
+          const trs = Array.from(document.querySelectorAll('table tbody tr'));
+          const cleanUser = uname.toLowerCase().trim();
+          const cleanId = (uId || '').toLowerCase().trim();
+          const records: Array<{ role: string; isActive: boolean; href: string | null }> = [];
 
-          const matchesUser =
-            (cleanId && rowUserId === cleanId) ||
-            rowUserId === cleanUser ||
-            rowUserName === cleanUser ||
-            rowUserId.includes(cleanUser);
+          for (const tr of trs) {
+            if ((tr as HTMLElement).style.display === 'none') continue;
+            const tds = Array.from(tr.querySelectorAll('td')).map((t) => t.innerText.trim());
+            if (tds.length < 4) continue;
+            const rowUserId = (tds[2] || '').toLowerCase().trim();
+            const rowRole = (tds[3] || '').trim();
 
-          if (matchesUser && rowRole) {
+            const isSynthetic = cleanId.startsWith('remote_');
+            const dataId = (tr.getAttribute('data-id') || tr.getAttribute('data-user-id') || '').toLowerCase().trim();
             const statusLink = tr.querySelector('td:nth-child(10) a') || tr.querySelector('a.btn-status-active, a.btn-status-deactive, a.remove');
-            const href = statusLink ? statusLink.getAttribute('href') : null;
-            const title = statusLink ? (statusLink.getAttribute('title') || '').toLowerCase() : '';
-            const icon = statusLink ? (statusLink.querySelector('i')?.className || '') : '';
-            const statusText = (tds[9] || '').toLowerCase();
-            const isDeactive =
-              statusText.includes('deactive') ||
-              statusText.includes('inactive') ||
-              (href && href.endsWith('/D')) ||
-              icon.includes('remove') ||
-              icon.includes('close') ||
-              title.includes('click to active');
+            const href = statusLink ? (statusLink.getAttribute('href') || '') : '';
+            const hrefIdMatch = href.match(/\/changeUserRoleStatus\/(\d+)/i);
+            const rowRemoteId = dataId || (hrefIdMatch ? hrefIdMatch[1].toLowerCase() : '');
 
-            const isActive = !isDeactive && (
-              statusText.includes('active') ||
-              (href && href.endsWith('/A')) ||
-              icon.includes('check') ||
-              title.includes('click to deactive')
-            );
+            let matchesUser = false;
+            if (isSynthetic) {
+              // 3.a: remote_<exactUsername> synthetic Central ID correctly matches a live username-only /userRole row
+              matchesUser = rowUserId === cleanUser;
+            } else if (cleanId) {
+              // 3.b: Authoritative remote ID provided: genuine mismatch must fail closed
+              if (rowRemoteId && cleanId !== rowRemoteId && (/^\d+$/.test(cleanId) || /^\d+$/.test(rowRemoteId))) {
+                matchesUser = false;
+              } else if (cleanId === rowRemoteId || cleanId === rowUserId) {
+                matchesUser = true;
+              } else if (rowUserId === cleanUser && cleanId === cleanUser) {
+                matchesUser = true;
+              } else {
+                matchesUser = false;
+              }
+            } else {
+              matchesUser = rowUserId === cleanUser;
+            }
 
-            records.push({
-              role: rowRole,
-              isActive: Boolean(isActive),
-              href,
-            });
+            if (matchesUser && rowRole) {
+              const statusLink = tr.querySelector('td:nth-child(10) a') || tr.querySelector('a.btn-status-active, a.btn-status-deactive, a.remove');
+              const href = statusLink ? statusLink.getAttribute('href') : null;
+              const title = statusLink ? (statusLink.getAttribute('title') || '').toLowerCase() : '';
+              const icon = statusLink ? (statusLink.querySelector('i')?.className || '') : '';
+              const statusText = (tds[9] || '').toLowerCase();
+              const isDeactive =
+                statusText.includes('deactive') ||
+                statusText.includes('inactive') ||
+                (href && href.endsWith('/D')) ||
+                icon.includes('remove') ||
+                icon.includes('close') ||
+                title.includes('click to active');
+
+              const isActive = !isDeactive && (
+                statusText.includes('active') ||
+                (href && href.endsWith('/A')) ||
+                icon.includes('check') ||
+                title.includes('click to deactive')
+              );
+
+              records.push({
+                role: rowRole,
+                isActive: Boolean(isActive),
+                href,
+              });
+            }
+          }
+          return records;
+        }, { uname: username, uId: remoteUserId || '' });
+
+        for (const r of pageRecords) {
+          if (!allRecords.some((existing) => existing.role.toUpperCase() === r.role.toUpperCase() && existing.isActive === r.isActive)) {
+            allRecords.push(r);
           }
         }
-        return records;
-      }, { uname: username, uId: remoteUserId || '' });
+
+        const nextButton = page.locator(
+          '.paginate_button.next:not(.disabled), li.next:not(.disabled) a, #tablaDatos_next:not(.disabled), a:has-text("Next"):not(.disabled)'
+        ).first();
+
+        const canGoNext = (await nextButton.count().catch(() => 0)) > 0 &&
+                          (await nextButton.isVisible().catch(() => false)) &&
+                          (await nextButton.isEnabled().catch(() => false));
+
+        if (!canGoNext) break;
+
+        await nextButton.click().catch(() => {});
+        await page.waitForTimeout(600);
+      }
+
+      return allRecords;
     };
 
     const initialRecords = await inspectRegistry();
+
+    if (initialRecords.length === 0 && remoteUserId && !remoteUserId.startsWith('remote_')) {
+      return {
+        success: false,
+        username,
+        finalActiveRoles: [],
+        diff: { existingActiveRoles: [], rolesToActivate: [], newRolesToAdd: [], rolesToDeactivate: [], rolesUnchanged: [], finalActiveRoleSet: requestedFinalActiveRoles },
+        clicksDispatched: { activateClicks: 0, deactivateClicks: 0, addUserRoleSubmits: 0 },
+        overallStatus: 'PARTIAL_FAILED',
+        errorCode: 'AUTHORITATIVE_REMOTE_ID_MISMATCH',
+        errorMessage: `Authoritative remote ID '${remoteUserId}' does not match target user '${username}' on /userRole.`,
+        retryStartingPoint: 'ROLE_STATE_INSPECTION',
+      };
+    }
     const existingActiveRoles: string[] = [];
     const existingInactiveRoles: string[] = [];
 
@@ -4714,16 +4776,20 @@ export class UserManagementExecutor {
 
         // Check if dialog provides a specific temporary/generated/default password
         const passMatch =
-          msg.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
+          msg.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/) ||
           msg.match(
-            /(?:default\s+password(?:\s+is)?|temporary\s+password(?:\s+is)?|new\s+password(?:\s+is)?|initial\s+password(?:\s+is)?|password\s+is|reset\s+to(?:\s+default(?:\s+password)?)?)\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
+            /(?:default\s+password|temporary\s+password|new\s+password|initial\s+password|password\s+is|reset\s+to\s+default(?:\s+password)?)\s*[:=-]\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]{4,})['"]?/i
           ) ||
           msg.match(
-            /password\s+reset(?:\s+successfully)?\.?\s*(?:default\s+password\s+is|password\s+is|default\s+is)?\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
+            /(?:default|temporary|new|initial)\s+password\s+is\s+['"]?([A-Za-z0-9!@#$%^&*()_+=-]{4,})['"]?/i
           );
         if (passMatch) {
-          explicitResetPassword = (passMatch[1] || passMatch[0]).trim();
-          isResetConfirmed = true;
+          const candidate = (passMatch[1] || passMatch[0]).trim();
+          const lowerCand = candidate.toLowerCase();
+          if (!['successfully', 'success', 'reset', 'reseted', 'updated', 'confirm', 'failed', 'true', 'false', 'undefined', 'null', 'none'].includes(lowerCand)) {
+            explicitResetPassword = candidate;
+            isResetConfirmed = true;
+          }
         }
 
         // Recognize safe positive messages
@@ -4878,76 +4944,126 @@ export class UserManagementExecutor {
               lower.includes('success')
             ) {
               const passMatch =
-                t.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/i) ||
-                t.match(
-                  /(?:default\s+password(?:\s+is)?|temporary\s+password(?:\s+is)?|new\s+password(?:\s+is)?|initial\s+password(?:\s+is)?|password\s+is|reset\s+to(?:\s+default(?:\s+password)?)?)\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
-                ) ||
-                t.match(
-                  /password\s+reset(?:\s+successfully)?\.?\s*(?:default\s+password\s+is|password\s+is|default\s+is)?\s*[:=]?\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]+)['"]?/i
-                );
-              return {
-                success: true,
-                text: t,
-                password: passMatch ? (passMatch[1] || passMatch[0]).trim() : undefined,
-              };
+              t.match(/Tmp@[A-Za-z0-9!@#$%^&*()_+=-]+/) ||
+              t.match(
+                /(?:default\s+password|temporary\s+password|new\s+password|initial\s+password|password\s+is|reset\s+to\s+default(?:\s+password)?)\s*[:=-]\s*['"]?([A-Za-z0-9!@#$%^&*()_+=-]{4,})['"]?/i
+              ) ||
+              t.match(
+                /(?:default|temporary|new|initial)\s+password\s+is\s+['"]?([A-Za-z0-9!@#$%^&*()_+=-]{4,})['"]?/i
+              );
+            if (passMatch) {
+              const candidate = (passMatch[1] || passMatch[0]).trim();
+              const lowerCand = candidate.toLowerCase();
+              if (!['successfully', 'success', 'reset', 'reseted', 'updated', 'confirm', 'failed', 'true', 'false', 'undefined', 'null', 'none'].includes(lowerCand)) {
+                return {
+                  success: true,
+                  text: t,
+                  password: candidate,
+                };
+              }
             }
+            return { success: true, text: t };
           }
+        }
 
-          const tempPassElem = document.querySelector(
-            '.temp-password, [data-testid="temporary-password"], #tempPassword, .default-password'
-          );
-          if (tempPassElem && tempPassElem.textContent?.trim()) {
-            return {
-              success: true,
-              text: tempPassElem.textContent.trim(),
-              password: tempPassElem.textContent.trim(),
-            };
-          }
-          return null;
+        const tempPassElem = document.querySelector(
+          '.temp-password, [data-testid="temporary-password"], #tempPassword, .default-password'
+        );
+        if (tempPassElem && tempPassElem.textContent?.trim()) {
+          return {
+            success: true,
+            text: tempPassElem.textContent.trim(),
+            password: tempPassElem.textContent.trim(),
+          };
+        }
+        return null;
+      })
+      .catch(() => null);
+
+    if (domCheck?.success) {
+      isResetConfirmed = true;
+      if (domCheck.password) {
+        explicitResetPassword = domCheck.password;
+      }
+      break;
+    }
+
+    if (isResetConfirmed && explicitResetPassword) break;
+    await page.waitForTimeout(150);
+  }
+
+  page.off('dialog', dialogHandler);
+
+  // 9. Confirm positive completion
+  // Invariant: Do not wait for username or status row to change after reset; those values normally remain unchanged.
+  if (isResetConfirmed) {
+    let deliveredPassword = explicitResetPassword;
+
+    // A. Check input fields on the current screen (e.g. #txtUserPassword on Edit User screen)
+    if (!deliveredPassword && !page.isClosed()) {
+      const inputVal = await page
+        .evaluate(() => {
+          const pwdInput = document.querySelector(
+            '#txtUserPassword, #txtPassword, input[name*="password" i], input[type="password"]'
+          ) as HTMLInputElement | null;
+          return pwdInput?.value ? pwdInput.value.trim() : null;
         })
         .catch(() => null);
 
-      if (domCheck?.success) {
-        isResetConfirmed = true;
-        if (domCheck.password) {
-          explicitResetPassword = domCheck.password;
+      if (inputVal && inputVal.length >= 4) {
+        const lower = inputVal.toLowerCase();
+        if (!['successfully', 'success', 'reset', 'reseted', 'updated'].includes(lower)) {
+          deliveredPassword = inputVal;
         }
-        break;
       }
-
-      if (isResetConfirmed) break;
-      await page.waitForTimeout(150);
     }
 
-    page.off('dialog', dialogHandler);
+    // B. If password not revealed in dialog or Edit screen, inspect Add User screen solely to read live default password (0 create clicks)
+    if (!deliveredPassword && !page.isClosed()) {
+      const candidateAddUsersUrl =
+        (isObj && (arg1 as any).addUsersUrl) ||
+        usersListUrl.replace(/\/users\b/i, '/addUsers');
 
-    // 9. Confirm positive completion
-    // Invariant: Do not wait for username or status row to change after reset; those values normally remain unchanged.
-    if (isResetConfirmed) {
-      const deliveredPassword =
-        explicitResetPassword ||
-        this.getCachedClientDefaultPassword(usersListUrl);
-
-      if (deliveredPassword) {
-        this.recordClientDefaultPassword(usersListUrl, deliveredPassword);
+      if (candidateAddUsersUrl && candidateAddUsersUrl !== usersListUrl) {
+        try {
+          onProgress?.(`Inspecting Add User screen to capture live default password with 0 create clicks…`);
+          await page.goto(candidateAddUsersUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+          const readPassword = await this.captureLiveDefaultPassword(page);
+          if (readPassword) {
+            deliveredPassword = readPassword;
+          }
+        } catch {}
       }
+    }
 
+    if (!deliveredPassword) {
       return {
-        success: true,
+        success: false,
         username,
-        status: 'REMOTE_PASSWORD_RESET_CONFIRMED',
-        temporaryPassword: deliveredPassword,
-        defaultPassword: deliveredPassword,
-        message: `Password Reset Successful`,
+        errorCode: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
+        errorMessage: `Password reset was executed on Simplex, but the temporary password could not be verified from the remote portal.`,
+        retryStartingPoint: 'USER_LOOKUP',
       };
     }
 
+    this.recordClientDefaultPassword(usersListUrl, deliveredPassword);
+
     return {
-      success: false,
+      success: true,
       username,
-      errorCode: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
-      errorMessage: `Password reset for user '${username}' could not be verified on remote client.`,
-      retryStartingPoint: 'USER_LOOKUP',
+      status: 'REMOTE_PASSWORD_RESET_CONFIRMED',
+      temporaryPassword: deliveredPassword,
+      defaultPassword: deliveredPassword,
+      message: `Password Reset Successful`,
     };
+  }
+
+  return {
+    success: false,
+    username,
+    errorCode: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
+    errorMessage: `Password reset for user '${username}' could not be verified on remote client.`,
+    retryStartingPoint: 'USER_LOOKUP',
+  };
   }
 }

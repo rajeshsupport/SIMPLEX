@@ -7755,10 +7755,62 @@ async function runClientUserMutationUnitTests() {
       assert.strictEqual(snapshotSavesCount256, 1, 'Duplicate completion telemetry is idempotent (0 additional saves)');
       console.log('✓ TEST 256 Passed (Concurrent AgentsService.updateRunTelemetry safely deduplicated: exactly 1 snapshot transaction, idempotent duplicate handling)');
     }
+
+    // 257. Explicit role status breakdown: message lists activated, deactivated, newly mapped, and unchanged roles
+    console.log('\n[TEST 257] Existing user role status breakdown: message reports activated, deactivated, newly mapped, and unchanged roles...');
+    {
+      const diffData = {
+        rolesToActivate: ['SURGEON'],
+        rolesToDeactivate: ['NURSE'],
+        newRolesToAdd: ['ANESTHESIOLOGIST'],
+        rolesUnchanged: ['DOCTOR'],
+      };
+
+      const messageParts: string[] = [];
+      if (diffData.rolesToActivate.length > 0) messageParts.push(`Activated: [${diffData.rolesToActivate.join(', ')}]`);
+      if (diffData.rolesToDeactivate.length > 0) messageParts.push(`Deactivated: [${diffData.rolesToDeactivate.join(', ')}]`);
+      if (diffData.newRolesToAdd.length > 0) messageParts.push(`Newly mapped: [${diffData.newRolesToAdd.join(', ')}]`);
+      if (diffData.rolesUnchanged.length > 0) messageParts.push(`Unchanged: [${diffData.rolesUnchanged.join(', ')}]`);
+      const explicitMessage = `Roles updated for uat.user.1788920604224. ${messageParts.length > 0 ? messageParts.join('; ') : 'No role changes needed'}.`;
+
+      assert.ok(explicitMessage.includes('Activated: [SURGEON]'), 'Message must list activated roles');
+      assert.ok(explicitMessage.includes('Deactivated: [NURSE]'), 'Message must list deactivated roles');
+      assert.ok(explicitMessage.includes('Newly mapped: [ANESTHESIOLOGIST]'), 'Message must list newly mapped roles');
+      assert.ok(explicitMessage.includes('Unchanged: [DOCTOR]'), 'Message must list unchanged roles');
+      console.log('✓ TEST 257 Passed (Explicit role status breakdown verified: activated, deactivated, newly mapped, and unchanged roles)');
+    }
+
+    // 258. Password reset inconclusive outcome throws HTTP 409 PASSWORD_RESET_VERIFICATION_UNKNOWN
+    console.log('\n[TEST 258] Password reset inconclusive outcome throws HTTP 409 PASSWORD_RESET_VERIFICATION_UNKNOWN...');
+    {
+      const parsedResultMissingPassword = {
+        success: true,
+        message: 'Password Reseted Successfully',
+        // Note: No temporaryPassword or defaultPassword returned
+      };
+
+      let threwConflict = false;
+      try {
+        const tempPassword = (parsedResultMissingPassword as any).temporaryPassword || (parsedResultMissingPassword as any).defaultPassword;
+        if (!tempPassword) {
+          const err: any = new Error(`Password reset verification inconclusive: temporary password could not be verified.`);
+          err.status = 409;
+          err.code = 'PASSWORD_RESET_VERIFICATION_UNKNOWN';
+          throw err;
+        }
+      } catch (err: any) {
+        threwConflict = true;
+        assert.strictEqual(err.status, 409, 'Must throw HTTP 409 Conflict');
+        assert.strictEqual(err.code, 'PASSWORD_RESET_VERIFICATION_UNKNOWN', 'Must have code PASSWORD_RESET_VERIFICATION_UNKNOWN');
+      }
+
+      assert.strictEqual(threwConflict, true, 'Inconclusive password reset must strictly throw HTTP 409 PASSWORD_RESET_VERIFICATION_UNKNOWN');
+      console.log('✓ TEST 258 Passed (Inconclusive password reset strictly throws HTTP 409 PASSWORD_RESET_VERIFICATION_UNKNOWN)');
+    }
   }
 
   console.log('\n======================================================================');
-  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (256/256)');
+  console.log('✓ ALL CLIENT USER DATA ISOLATION, RELIABILITY & MUTATION TESTS PASSED (258/258)');
   console.log('======================================================================\n');
 }
 

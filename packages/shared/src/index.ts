@@ -21,6 +21,13 @@ export * from './schemas/workflow.schema.js';
 
 // Utilities
 export * from './utils/url-resolver.js';
+export {
+  parseAndValidateRoles,
+  computeRoleDiff,
+  computeBidirectionalRoleDiff,
+  toRoleItems,
+} from './utils/role-parser.js';
+export type { RoleDiffResult } from './utils/role-parser.js';
 export * from './utils/role-parser.js';
 export * from './utils/security-redactor.js';
 export * from './utils/resource-workbook.js';

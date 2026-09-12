@@ -2397,6 +2397,47 @@ async function runClientUsersTests() {
       await t106Context.close().catch(() => {});
     }
 
+    // TEST 106A: Synthetic Central ID (remote_<username>) matches live username-only /userRole row
+    console.log('\n[TEST 106A] Synthetic Central ID (remote_<username>) matches live username-only /userRole row...');
+    const t106aContext = await browser!.newContext();
+    const t106aPage = await t106aContext.newPage();
+    try {
+      const res106a = await UserManagementExecutor.executeRoleWorkflow(t106aPage, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        remoteUserId: 'remote_abdul.p',
+        requestedRoles: ['DOCTOR'],
+      });
+      assert.strictEqual(res106a.success, true);
+      assert.strictEqual(res106a.username, 'abdul.p');
+      console.log('✓ TEST 106A Passed (Synthetic Central ID correctly matches live username-only /userRole row)');
+    } finally {
+      await t106aPage.close().catch(() => {});
+      await t106aContext.close().catch(() => {});
+    }
+
+    // TEST 106B: Genuine Authoritative Remote ID Mismatch Fails Closed with 0 Clicks
+    console.log('\n[TEST 106B] Genuine Authoritative Remote ID Mismatch Fails Closed with 0 Clicks...');
+    fixtureClickCounters.reset();
+    const t106bContext = await browser!.newContext();
+    const t106bPage = await t106bContext.newPage();
+    try {
+      const res106b = await UserManagementExecutor.executeRoleWorkflow(t106bPage, {
+        roleUrl: `${BASE_URL}/MasterV9.4/userRole`,
+        username: 'abdul.p',
+        remoteUserId: 'authoritative_mismatch_9999',
+        requestedRoles: ['DOCTOR', 'SURGEON'],
+      });
+      assert.strictEqual(res106b.success, false);
+      assert.strictEqual(res106b.errorCode, 'AUTHORITATIVE_REMOTE_ID_MISMATCH');
+      assert.strictEqual(fixtureClickCounters.roleStatusClickCount, 0, 'Zero status clicks on authoritative ID mismatch');
+      assert.strictEqual(fixtureClickCounters.addUserRoleSubmitCount, 0, 'Zero submit clicks on authoritative ID mismatch');
+      console.log('✓ TEST 106B Passed (Authoritative remote ID mismatch strictly fails closed with 0 clicks)');
+    } finally {
+      await t106bPage.close().catch(() => {});
+      await t106bContext.close().catch(() => {});
+    }
+
     // TEST 107: Existing User Role Management — Activation of inactive role on /userRole (1 click)
     console.log('\n[TEST 107] Existing User Role Management — Activation of inactive role on /userRole (1 click)...');
     fixtureClickCounters.reset();
@@ -2416,7 +2457,9 @@ async function runClientUsersTests() {
       });
       assert.strictEqual(res107.success, true);
       assert.strictEqual(fixtureClickCounters.roleStatusClickCount - clicksBefore, 1, 'Exactly 1 click dispatched to activate SURGEON on /userRole');
-      console.log('✓ TEST 107 Passed (Activation of inactive role dispatched 1 click)');
+      assert.strictEqual(res107.clicksDispatched.addUserRoleSubmits, 0, 'Never visit /addUserRole for inactive role reactivation');
+      assert.ok(res107.diff.rolesToActivate.includes('SURGEON'), 'SURGEON must be in rolesToActivate');
+      console.log('✓ TEST 107 Passed (Activation of inactive role dispatched 1 click on /userRole, 0 on /addUserRole)');
     } finally {
       await t107Page.close().catch(() => {});
       await t107Context.close().catch(() => {});
@@ -2562,6 +2605,64 @@ async function runClientUsersTests() {
       await t114Page.close().catch(() => {});
       await t114Context.close().catch(() => {});
     }
+
+    // TEST 114A: Password Reset Regex & Live Capture — "Password Reseted Successfully" does NOT capture "ed"
+    console.log('\n[TEST 114A] Password Reset Regex & Live Capture — "Password Reseted Successfully" does NOT capture "ed"...');
+    const t114aContext = await browser!.newContext();
+    const t114aPage = await t114aContext.newPage();
+    try {
+      await t114aPage.route('**/*reset-password*', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ message: 'Password Reseted Successfully' }),
+        });
+      });
+
+      const res114a = await UserManagementExecutor.resetUserPassword(t114aPage, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        username: 'abdul.p',
+      });
+      assert.strictEqual(res114a.success, true);
+      assert.notStrictEqual(res114a.temporaryPassword, 'ed', 'Temporary password must NEVER be "ed"');
+      assert.strictEqual(res114a.temporaryPassword, 'FixedDefaultPassword', 'Must capture live default password from Add User screen with 0 create clicks');
+      console.log('✓ TEST 114A Passed (Toast "Password Reseted Successfully" did not capture "ed" and read default password from /addUsers)');
+    } finally {
+      await t114aPage.close().catch(() => {});
+      await t114aContext.close().catch(() => {});
+    }
+
+    // TEST 114B: Password Reset Fallback Failure — Inconclusive outcome returns PASSWORD_RESET_VERIFICATION_UNKNOWN
+    console.log('\n[TEST 114B] Password Reset Fallback Failure — Inconclusive outcome returns PASSWORD_RESET_VERIFICATION_UNKNOWN...');
+    const t114bContext = await browser!.newContext();
+    const t114bPage = await t114bContext.newPage();
+    try {
+      await t114bPage.route('**/*reset-password*', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ message: 'Password Reseted Successfully' }),
+        });
+      });
+      // Block addUsers so live password cannot be read
+      await t114bPage.route('**/addUsers', async (route) => {
+        await route.abort('failed');
+      });
+
+      const res114b = await UserManagementExecutor.resetUserPassword(t114bPage, {
+        usersListUrl: `${BASE_URL}/MasterV9.4/users`,
+        addUsersUrl: `${BASE_URL}/MasterV9.4/addUsers`,
+        username: 'abdul.p',
+      });
+      assert.strictEqual(res114b.success, false);
+      assert.strictEqual(res114b.errorCode, 'PASSWORD_RESET_VERIFICATION_UNKNOWN');
+      console.log('✓ TEST 114B Passed (Unverifiable password returns PASSWORD_RESET_VERIFICATION_UNKNOWN)');
+    } finally {
+      await t114bPage.close().catch(() => {});
+      await t114bContext.close().catch(() => {});
+    }
+
 
     // TEST 115: Password Reset Uncertainty — Inconclusive outcome returns PASSWORD_RESET_VERIFICATION_UNKNOWN, 0 second clicks
     console.log('\n[TEST 115] Password Reset Uncertainty — Inconclusive outcome returns PASSWORD_RESET_VERIFICATION_UNKNOWN...');

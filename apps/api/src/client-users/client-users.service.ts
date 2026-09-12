@@ -1970,6 +1970,13 @@ export class ClientUsersService implements OnModuleInit {
         message = parsedResult.message;
       }
 
+      if (!tempPassword) {
+        throw new ConflictException({
+          code: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
+          message: `Password reset verification inconclusive for '${snapshot.username}': temporary password could not be verified from remote client portal.`,
+        });
+      }
+
       const deliveryRes = ClientUsersService.storeEphemeralCredential({
         initiatingOperatorId: user.sub,
         clientId: client.id,
@@ -2034,6 +2041,10 @@ export class ClientUsersService implements OnModuleInit {
     username: string;
     rolesAdded: string[];
     rolesRemoved?: string[];
+    rolesActivated?: string[];
+    rolesDeactivated?: string[];
+    rolesNewlyMapped?: string[];
+    rolesUnchanged?: string[];
     existingRoles: string[];
     currentRoles: string[];
     message: string;
@@ -2275,14 +2286,30 @@ export class ClientUsersService implements OnModuleInit {
         })
       );
 
+      const rolesActivated: string[] = parsedResult.diff?.rolesToActivate || [];
+      const rolesDeactivated: string[] = parsedResult.diff?.rolesToDeactivate || diff.rolesRemoved || [];
+      const rolesNewlyMapped: string[] = parsedResult.diff?.newRolesToAdd || diff.rolesToAdd || [];
+      const rolesUnchanged: string[] = parsedResult.diff?.rolesUnchanged || [];
+
+      const messageParts: string[] = [];
+      if (rolesActivated.length > 0) messageParts.push(`Activated: [${rolesActivated.join(', ')}]`);
+      if (rolesDeactivated.length > 0) messageParts.push(`Deactivated: [${rolesDeactivated.join(', ')}]`);
+      if (rolesNewlyMapped.length > 0) messageParts.push(`Newly mapped: [${rolesNewlyMapped.join(', ')}]`);
+      if (rolesUnchanged.length > 0) messageParts.push(`Unchanged: [${rolesUnchanged.join(', ')}]`);
+      const explicitMessage = `Roles updated for ${snapshot.username}. ${messageParts.length > 0 ? messageParts.join('; ') : 'No role changes needed'}.`;
+
       return {
         success: true,
         username: snapshot.username,
         rolesAdded: diff.rolesToAdd,
         rolesRemoved: diff.rolesRemoved,
+        rolesActivated,
+        rolesDeactivated,
+        rolesNewlyMapped,
+        rolesUnchanged,
         existingRoles: diff.existingRoles,
         currentRoles: diff.resultingRoles,
-        message: `Successfully updated roles for ${snapshot.username}. Added: ${diff.rolesToAdd.length}, Removed: ${diff.rolesRemoved.length}.`,
+        message: explicitMessage,
       };
     } finally {
       releaseLock();
