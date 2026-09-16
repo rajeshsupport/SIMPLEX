@@ -17,7 +17,7 @@ services:
 
   # 2. Central API Backend (Pre-compiled container, Zero source code exposed)
   simplex_api:
-    image: ${SIMPLEX_API_IMAGE:-simplex-central-api:latest}
+    image: ${SIMPLEX_API_IMAGE:-ghcr.io/rajeshsupport/simplex/simplex-api:latest}
     container_name: simplex_central_api
     restart: always
     ports:
@@ -43,7 +43,7 @@ services:
 
   # 3. Web Operations Console (Pre-built Static SPA via Nginx)
   simplex_web:
-    image: ${SIMPLEX_WEB_IMAGE:-simplex-central-web:latest}
+    image: ${SIMPLEX_WEB_IMAGE:-ghcr.io/rajeshsupport/simplex/simplex-web:latest}
     container_name: simplex_central_web
     restart: always
     ports:
