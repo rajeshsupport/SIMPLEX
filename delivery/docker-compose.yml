@@ -11,7 +11,7 @@ services:
       SA_PASSWORD: "${MSSQL_PASSWORD:-Rajesh@123}"
       MSSQL_PID: "Developer"
     ports:
-      - "${MSSQL_DOCKER_PORT:-14333}:1433"
+      - "${MSSQL_PORT:-14333}:1433"
     volumes:
       - simplex_mssql_data:/var/opt/mssql
 
@@ -26,7 +26,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       MSSQL_HOST: ${MSSQL_HOST:-simplex_db}
-      MSSQL_PORT: ${MSSQL_PORT:-1433}
+      MSSQL_PORT: 1433
       MSSQL_DATABASE: ${MSSQL_DATABASE:-SIMPLEX_CENTRAL_DB}
       MSSQL_USER: ${MSSQL_USER:-sa}
       MSSQL_PASSWORD: "${MSSQL_PASSWORD:-Rajesh@123}"
