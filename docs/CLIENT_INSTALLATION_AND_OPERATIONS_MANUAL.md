@@ -1,269 +1,406 @@
 # SIMPLEX Central Operations Console
-## Client Quickstart, Installation & Operations Manual
-### Official Multi-Platform Deployment Guide (Windows, Linux & macOS)
+## Production Deployment, Hosting & Client Operations Manual
+### Official Multi-Platform Guide (Windows, Linux & macOS) · Version 1.0.0
 
 ---
 
-### Executive Overview
+### Executive Summary
 
-This manual provides non-technical, step-by-step instructions to obtain, install, launch, update, and operate the **SIMPLEX Central Operations Console** on **Windows**, **Linux**, and **macOS**.
+The **SIMPLEX Central Operations Console** is an enterprise automation, multi-client credential orchestration, and desktop agent management system. This document serves as the authoritative operational manual for system administrators, IT engineers, and enterprise clients deploying and maintaining the application.
 
-The application is distributed as a turnkey, self-contained containerized package using **Docker**. End-users and IT administrators do not need to manually configure Node.js, Python, or database engines. All components run in secure, isolated containers with persistent storage and strict data sandboxing.
+The system is delivered as a pre-compiled, containerized software bundle using **Docker**. End-users never interact with raw source code, development runtimes, or complex build toolchains. 
 
 ```
 +----------------------------------------------------------------------------------------------------+
-|                                    SIMPLEX 1-CLICK ARCHITECTURE                                    |
+|                                    SIMPLEX DEPLOYMENT TOPOLOGY                                     |
 |                                                                                                    |
-|  [ 1. Install Docker ] ──► [ 2. Obtain ZIP Package ] ──► [ 3. Run Launcher ]                      |
-|                                                                     │                              |
-|                                                                     ▼                              |
-|                                                [ Docker Auto-Pulls Pre-Built Images ]              |
-|                                                ├── mcr.microsoft.com/mssql/server:2022-latest      |
-|                                                ├── ghcr.io/rajeshsupport/simplex/simplex-api       |
-|                                                └── ghcr.io/rajeshsupport/simplex/simplex-web       |
-|                                                                     │                              |
-|                                                                     ▼                              |
-|  [ 5. 1-Click Update ] ◄── [ 4. Open Browser: http://localhost:5173 (Single Isolated DB) ]        |
+|    ┌───────────────────────────────────┐               ┌──────────────────────────────────┐        |
+|    │   TOPOLOGY A: STANDALONE HOST     │               │   TOPOLOGY B: EXISTING MSSQL     │        |
+|    │   (No existing database server)   │               │   (Host already has SQL Server)  │        |
+|    ├───────────────────────────────────┤               ├──────────────────────────────────┤        |
+|    │ • Docker runs MS SQL 2022         │               │ • Uses Existing MS SQL on Host   │        |
+|    │ • Isolated volume storage         │               │ • Runs init-db.sql (Sandbox)     │        |
+|    │ • Docker runs Central API         │               │ • Docker runs API + Web Only     │        |
+|    │ • Docker runs Web Console (Nginx) │               │ • Ultra-lightweight (300 MB RAM) │        |
+|    └───────────────────────────────────┘               └──────────────────────────────────┘        |
 +----------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 1. How to Obtain the SIMPLEX Delivery Package (`simplex-delivery.zip`)
+## 1. Choosing Your Deployment Topology
 
-The delivery package `simplex-delivery.zip` is extremely lightweight (~10 KB) because it contains only the operational orchestration files, environment configs, and 1-click launchers. All heavy application binaries and database engines are pulled securely from the official registry.
+The application supports two primary enterprise deployment topologies depending on whether your host machine already runs Microsoft SQL Server:
 
-Clients can obtain the package through either of the following two standard methods:
+### Topology A: Standalone Docker Host (Turnkey Automatic Installation)
+* **When to choose**: The server or host machine does NOT have Microsoft SQL Server installed.
+* **How it works**: Docker runs the official Microsoft SQL Server 2022 container alongside the API and Web containers.
+* **Footprint**: ~2 GB RAM, 100% turnkey. The user simply executes `start.bat` or `./start.sh`.
 
-### Method A: Direct Download via Official GitHub Release (Recommended)
-1. Open your web browser and visit the official repository releases page:
-   👉 **https://github.com/rajeshsupport/SIMPLEX/releases**
-2. Under the latest release (e.g. `v1.0.0`), click on **`simplex-delivery.zip`** to download it directly.
-3. *Alternative command line download (Linux/Mac)*:
-   ```bash
-   curl -L -O https://github.com/rajeshsupport/SIMPLEX/raw/main/simplex-delivery.zip
-   ```
-
-### Method B: Direct Sharing from Software Vendor
-If the client is operating in a closed network, intranet, or prefers direct delivery:
-* The software vendor (Rajesh / PKV Global) will share `simplex-delivery.zip` via **Email attachment**, **Google Drive / OneDrive / Dropbox secure link**, or via a **USB flash drive**.
-* Save the file to your computer (e.g., `Downloads` or `Desktop`).
+### Topology B: Shared Host with Existing Microsoft SQL Server (Enterprise Mode)
+* **When to choose**: The server already has an active Microsoft SQL Server instance hosting other enterprise or clinical databases.
+* **How it works**: Docker runs ONLY the API and Web Console containers (~300 MB RAM total). The containers connect to the host's existing SQL Server via `host.docker.internal:1433`.
+* **Zero Database Contamination Guarantee**: Our automated database provisioning script applies strict `DENY VIEW ANY DATABASE` rules. The SIMPLEX application has **ZERO visibility** into any other corporate or clinical databases on that server.
 
 ---
 
-## 2. Package Contents & How Docker Pulls the Images
+## 2. Database Security & Isolation Architecture
 
-When you extract `simplex-delivery.zip`, you will find the following clean launcher files:
+When deploying onto an existing SQL Server instance containing sensitive databases (e.g. Hospital Information Systems, Payroll, Clinical Records), strict database-level sandboxing is enforced.
 
-| File Name | Platform | Description |
-| :--- | :--- | :--- |
-| **`start.bat`** | Windows | 1-Click Launcher that verifies Docker, starts all services, and opens the browser. |
-| **`stop.bat`** | Windows | 1-Click Stopper to safely pause all services. |
-| **`update.bat`** | Windows | 1-Click Updater to pull the latest patches without losing any data. |
-| **`start.sh`** | Linux & macOS | 1-Command Launcher for Unix systems. |
-| **`stop.sh`** | Linux & macOS | 1-Command Stopper for Unix systems. |
-| **`update.sh`** | Linux & macOS | 1-Command Updater for Unix systems. |
-| **`docker-compose.yml`** | All OS | Production service definitions for Database, API, and Web UI. |
-| **`init-db.sql`** | All OS | Database security isolation script ensuring access strictly to `SIMPLEX_CENTRAL_DB`. |
-| **`.env`** | All OS | Configurable ports and security tokens. |
-| **`CLIENT_INSTRUCTIONS.txt`** | All OS | Quick reference text file. |
+### The Automated Sandboxing Script (`init-db.sql`)
+Run the following idempotent provisioning script once in **SQL Server Management Studio (SSMS)** or via `sqlcmd`:
 
-> **How Image Download Works**:
-> When `start.bat` or `start.sh` is executed for the first time, Docker reads `docker-compose.yml` and automatically pulls the official pre-compiled Docker images from Microsoft and GitHub Container Registry. The client does not need to build, compile, or install anything manually.
+```sql
+-- ============================================================================
+-- SIMPLEX Central Operations Console - Database Isolation & Sandboxing
+-- ============================================================================
+
+USE [master];
+GO
+
+-- 1. Create Dedicated Application Database (if not exists)
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'SIMPLEX_CENTRAL_DB')
+BEGIN
+    PRINT 'Creating dedicated database [SIMPLEX_CENTRAL_DB]...';
+    CREATE DATABASE [SIMPLEX_CENTRAL_DB];
+END
+GO
+
+-- 2. Create Dedicated Sandboxed Login
+IF NOT EXISTS (SELECT name FROM sys.server_principals WHERE name = N'simplex_app_user')
+BEGIN
+    PRINT 'Creating isolated login [simplex_app_user]...';
+    CREATE LOGIN [simplex_app_user] 
+    WITH PASSWORD = N'SimplexApp@Secure2026!', 
+         CHECK_POLICY = OFF, 
+         CHECK_EXPIRATION = OFF;
+END
+GO
+
+-- 3. Grant Control ONLY on SIMPLEX_CENTRAL_DB
+USE [SIMPLEX_CENTRAL_DB];
+GO
+IF NOT EXISTS (SELECT name FROM sys.database_principals WHERE name = N'simplex_app_user')
+BEGIN
+    CREATE USER [simplex_app_user] FOR LOGIN [simplex_app_user];
+    ALTER ROLE [db_owner] ADD MEMBER [simplex_app_user];
+END
+GO
+
+-- 4. CRITICAL SECURITY RULE: Deny visibility to all other databases on this server!
+USE [master];
+GO
+PRINT 'Enforcing strict database sandboxing...';
+DENY VIEW ANY DATABASE TO [simplex_app_user];
+GO
+
+PRINT '✓ SIMPLEX Database and Sandboxed Login Provisioned Successfully!';
+GO
+```
+
+#### Security Guarantee:
+* **Zero Cross-Database Visibility**: When `simplex_app_user` queries `sys.databases`, only `SIMPLEX_CENTRAL_DB` and `master` appear. All other existing clinical/enterprise databases remain completely invisible.
+* **Permission Rejection**: Even if an unauthorized query attempts `SELECT * FROM HospitalBilling.dbo.Invoices`, SQL Server strictly terminates the request with a permission denied error.
 
 ---
 
-## 3. Dedicated Database Isolation & Zero Data Exposure Guarantee
+## 3. Production File Specifications
 
-A common security requirement in enterprise and hospital environments is ensuring that the application only touches its own dedicated database and never accesses other corporate or clinical databases.
+The distribution package contains clean, human-readable operational orchestration files:
 
-1. **Single Isolated Database (`SIMPLEX_CENTRAL_DB`)**:
-   * The containerized Microsoft SQL Server instance runs in complete isolation.
-   * None of your vendor's development databases, test fixtures, or external records exist in this container.
-   * Only one database is created: **`SIMPLEX_CENTRAL_DB`**.
-2. **Strict User Sandboxing (`DENY VIEW ANY DATABASE`)**:
-   * The application connects using a restricted user `simplex_app_user` with permissions limited exclusively to `SIMPLEX_CENTRAL_DB`.
-   * Even if deployed on an existing shared enterprise SQL Server, the script [init-db.sql](file:///Users/sharmila/Music/SIMPLEX/delivery/init-db.sql) enforces `DENY VIEW ANY DATABASE`, ensuring the application cannot see or query any other database on that server.
+### 3.1 Production Environment Configuration (`.env`)
+```ini
+# ======================================================================
+# SIMPLEX Central Operations Console - Production Environment
+# ======================================================================
+
+# Database Connection Settings
+# For Topology A (Docker DB): Use MSSQL_HOST=simplex_db
+# For Topology B (Existing DB): Use MSSQL_HOST=host.docker.internal
+MSSQL_HOST=simplex_db
+MSSQL_PORT=1433
+MSSQL_DATABASE=SIMPLEX_CENTRAL_DB
+MSSQL_USER=sa
+MSSQL_PASSWORD=Rajesh@123
+
+# Service Ports
+API_PORT=3000
+WEB_PORT=5173
+
+# Pre-Built Official Container Images (GitHub Container Registry)
+SIMPLEX_API_IMAGE=ghcr.io/rajeshsupport/simplex/simplex-api:latest
+SIMPLEX_WEB_IMAGE=ghcr.io/rajeshsupport/simplex/simplex-web:latest
+
+# Cryptographic Master Keys
+ENCRYPTION_MASTER_KEY=e8b839655f46a7be7e3c15c6b7582b1c853f6517a942bcba5e7e600d89e574ac
+JWT_SECRET=simplex_jwt_secret_production_2026_super_secure_token
+JWT_REFRESH_SECRET=simplex_jwt_refresh_production_2026_super_secure_token
+AGENT_SHARED_SECRET=simplex_agent_shared_key_2026
+```
 
 ---
 
-## 4. WINDOWS Installation & Operation Guide (Windows 10 / 11 / Server)
+### 3.2 Orchestration File: Topology A (Standalone with Database)
+File: **`docker-compose.yml`**
+```yaml
+version: '3.8'
 
-### Step 4.1: Install Docker Desktop on Windows
+services:
+  # 1. Dedicated MSSQL Database Container
+  simplex_db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: simplex_mssql_db
+    restart: always
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "${MSSQL_PASSWORD:-Rajesh@123}"
+      MSSQL_PID: "Developer"
+    ports:
+      - "${MSSQL_PORT:-1433}:1433"
+    volumes:
+      - simplex_mssql_data:/var/opt/mssql
+
+  # 2. Central API Backend (Pre-compiled Container)
+  simplex_api:
+    image: ${SIMPLEX_API_IMAGE:-ghcr.io/rajeshsupport/simplex/simplex-api:latest}
+    container_name: simplex_central_api
+    restart: always
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      MSSQL_HOST: simplex_db
+      MSSQL_PORT: 1433
+      MSSQL_DATABASE: ${MSSQL_DATABASE:-SIMPLEX_CENTRAL_DB}
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: "${MSSQL_PASSWORD:-Rajesh@123}"
+      MSSQL_ENCRYPT: "false"
+      MSSQL_TRUST_SERVER_CERTIFICATE: "true"
+      PORT: 3000
+      NODE_ENV: production
+      API_BASE_URL: http://localhost:${API_PORT:-3000}
+      WEB_BASE_URL: http://localhost:${WEB_PORT:-5173}
+      ENCRYPTION_MASTER_KEY: "${ENCRYPTION_MASTER_KEY}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_REFRESH_SECRET: "${JWT_REFRESH_SECRET}"
+      AGENT_SHARED_SECRET: "${AGENT_SHARED_SECRET}"
+    depends_on:
+      - simplex_db
+
+  # 3. Web Operations Console (Pre-built React SPA via Nginx)
+  simplex_web:
+    image: ${SIMPLEX_WEB_IMAGE:-ghcr.io/rajeshsupport/simplex/simplex-web:latest}
+    container_name: simplex_central_web
+    restart: always
+    ports:
+      - "${WEB_PORT:-5173}:80"
+    depends_on:
+      - simplex_api
+
+volumes:
+  simplex_mssql_data:
+    name: simplex_production_db_data
+```
+
+---
+
+### 3.3 Orchestration File: Topology B (Host with Existing MSSQL)
+File: **`docker-compose.existing-mssql.yml`**
+```yaml
+version: '3.8'
+
+services:
+  # 1. Central API Backend (Connects directly to Host's Existing SQL Server)
+  simplex_api:
+    image: ${SIMPLEX_API_IMAGE:-ghcr.io/rajeshsupport/simplex/simplex-api:latest}
+    container_name: simplex_central_api
+    restart: always
+    ports:
+      - "${API_PORT:-3000}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MSSQL_HOST: host.docker.internal
+      MSSQL_PORT: ${MSSQL_PORT:-1433}
+      MSSQL_DATABASE: ${MSSQL_DATABASE:-SIMPLEX_CENTRAL_DB}
+      MSSQL_USER: ${MSSQL_USER:-simplex_app_user}
+      MSSQL_PASSWORD: "${MSSQL_PASSWORD:-SimplexApp@Secure2026!}"
+      MSSQL_ENCRYPT: "false"
+      MSSQL_TRUST_SERVER_CERTIFICATE: "true"
+      PORT: 3000
+      NODE_ENV: production
+      API_BASE_URL: http://localhost:${API_PORT:-3000}
+      WEB_BASE_URL: http://localhost:${WEB_PORT:-5173}
+      ENCRYPTION_MASTER_KEY: "${ENCRYPTION_MASTER_KEY}"
+      JWT_SECRET: "${JWT_SECRET}"
+      JWT_REFRESH_SECRET: "${JWT_REFRESH_SECRET}"
+      AGENT_SHARED_SECRET: "${AGENT_SHARED_SECRET}"
+
+  # 2. Web Operations Console
+  simplex_web:
+    image: ${SIMPLEX_WEB_IMAGE:-ghcr.io/rajeshsupport/simplex/simplex-web:latest}
+    container_name: simplex_central_web
+    restart: always
+    ports:
+      - "${WEB_PORT:-5173}:80"
+    depends_on:
+      - simplex_api
+```
+
+---
+
+## 4. How Clients Obtain the Delivery ZIP Package
+
+The delivery package `simplex-delivery.zip` is intentionally ultra-lightweight (~10 KB) because it contains only the operational launchers and configurations.
+
+### Option 1: Direct Vendor Sharing (Standard Enterprise Method)
+* The software vendor provides `simplex-delivery.zip` via **Email attachment**, **Secure Cloud Link (Google Drive / OneDrive)**, or **USB Pen Drive**.
+* Save and extract the ZIP file to your preferred directory (e.g. `C:\SIMPLEX` on Windows or `/opt/simplex` on Linux).
+
+### Option 2: Direct Download via GitHub Releases
+* Visit the official release repository:
+  👉 **https://github.com/rajeshsupport/SIMPLEX/releases**
+* Click on **`simplex-delivery.zip`** to download directly.
+* Or download via command line:
+  ```bash
+  curl -L -O https://github.com/rajeshsupport/SIMPLEX/raw/main/simplex-delivery.zip
+  ```
+
+---
+
+## 5. Operating System Step-by-Step Installation Guides
+
+### 5.1 WINDOWS Guide (Windows 10 / 11 / Windows Server)
+
+#### Step 1: Install Docker Desktop for Windows
 1. Download **Docker Desktop for Windows**:
    👉 **https://www.docker.com/products/docker-desktop/**
-2. Run `Docker Desktop Installer.exe`.
-3. Ensure **"Use WSL 2 instead of Hyper-V"** is checked (recommended).
-4. Restart your computer if prompted.
-5. Open **Docker Desktop** from the Start Menu.
-6. Wait until the whale icon in the bottom-right Windows taskbar turns steady green with status: **"Engine running"**.
+2. Run `Docker Desktop Installer.exe`. Ensure the **"Use WSL 2"** option is enabled.
+3. Restart your computer if prompted.
+4. Launch Docker Desktop and wait until the whale icon in the bottom-right taskbar turns green with **"Engine running"**.
 
-### Step 4.2: Extract the Package
+#### Step 2: Extract the Package
 1. Right-click `simplex-delivery.zip` and select **Extract All...**.
-2. Choose a destination folder (e.g. `C:\SIMPLEX` or `Desktop\SIMPLEX`).
-3. Click **Extract**.
+2. Select destination folder (e.g., `C:\SIMPLEX`).
 
-### Step 4.3: Launch the Application (1-Click)
-1. Ensure Docker Desktop is running.
-2. Inside the extracted folder, **Double-Click `start.bat`**.
-3. A command window will launch, verify Docker, download the latest images automatically, and initialize the system.
-4. Your default web browser will automatically open to:
-   👉 **http://localhost:5173**
+#### Step 3: Launch the Application (1-Click)
+1. Double-click on **`start.bat`**.
+2. The command prompt will automatically:
+   * Verify Docker health.
+   * Download pre-built images from GitHub Container Registry.
+   * Launch Database, API, and Web Console.
+   * Automatically open your default web browser to:
+     👉 **http://localhost:5173**
 
-### Step 4.4: How to Update When a Bug-Fix or Patch is Released
-When the vendor notifies you of a new update:
-1. Open your `SIMPLEX` folder.
-2. **Double-Click `update.bat`**.
-3. Docker will pull the updated container and restart the application in 15–20 seconds.
-4. **Data Guarantee**: All database records, clients, and users are stored in the persistent volume `simplex_production_db_data` and are **100% PRESERVED**.
-
-### Step 4.5: How to Stop
-* Double-click **`stop.bat`** to safely halt the application.
+#### Step 4: Maintenance Operations
+* **To Stop**: Double-click **`stop.bat`**.
+* **To Apply Updates**: Double-click **`update.bat`** (Downloads new patches in 15 seconds; database records are 100% preserved).
 
 ---
 
-## 5. LINUX Installation & Operation Guide (Ubuntu / Debian / RHEL)
+### 5.2 LINUX Guide (Ubuntu 22.04 / 24.04, Debian, RHEL)
 
-### Step 5.1: Install Docker Engine on Linux
-Open your terminal and run the standard official Docker installation:
+#### Step 1: Install Docker on Linux
+Execute the standard official Docker installation:
 ```bash
-# 1. Update package index and install prerequisites
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg
+# Update repositories and install dependencies
+sudo apt-get update && sudo apt-get install -y ca-certificates curl gnupg
 
-# 2. Add Docker official GPG key
+# Add Docker GPG key
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
-# 3. Add repository to Apt sources
+# Add Apt repository
 echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-# 4. Install Docker Engine and Docker Compose Plugin
+# Install Docker Engine and Compose Plugin
 sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-# 5. Enable non-root user access (Optional but recommended)
+# Grant user privileges
 sudo usermod -aG docker $USER
 ```
-*(Log out and log back in for user group permissions to take effect).*
 
-### Step 5.2: Extract and Set Permissions
+#### Step 2: Extract and Launch
 ```bash
-# Unzip delivery archive
 unzip simplex-delivery.zip -d ~/simplex
 cd ~/simplex
-
-# Grant executable permissions to shell scripts
 chmod +x *.sh
-```
-
-### Step 5.3: Launch the Application (1-Command)
-```bash
 ./start.sh
 ```
-Open your web browser and navigate to:
-👉 **http://localhost:5173** *(or `http://<server-ip>:5173` if accessing over LAN/Server).*
+Open your browser and navigate to:
+👉 **http://localhost:5173** *(or `http://<SERVER_IP>:5173`)*
 
-### Step 5.4: How to Apply Updates / Bug Fixes
-```bash
-cd ~/simplex
-./update.sh
-```
-*Pulls updated containers and restarts seamlessly. All database data remains 100% intact.*
-
-### Step 5.5: How to Stop
-```bash
-cd ~/simplex
-./stop.sh
-```
+#### Step 3: Maintenance Operations
+* **To Stop**: `./stop.sh`
+* **To Apply Updates**: `./update.sh`
 
 ---
 
-## 6. macOS Installation & Operation Guide (Apple Silicon & Intel)
+### 5.3 macOS Guide (Apple Silicon M1/M2/M3/M4 & Intel)
 
-### Step 6.1: Install Docker Desktop for Mac
+#### Step 1: Install Docker Desktop for Mac
 1. Download **Docker Desktop for Mac**:
    👉 **https://www.docker.com/products/docker-desktop/**
-   * Select **"Mac with Apple Silicon"** for M1 / M2 / M3 / M4 Macs.
-   * Select **"Mac with Intel chip"** for Intel-based Macs.
-2. Open the downloaded `.dmg` file and drag **Docker** to your **Applications** folder.
-3. Open **Docker** from Applications and accept the agreement.
-4. Wait until the whale icon in the top menu bar indicates **"Docker Desktop is running"**.
+   * Select **"Mac with Apple Silicon"** for M-series chips.
+   * Select **"Mac with Intel chip"** for Intel Macs.
+2. Drag Docker to your **Applications** folder and start it.
+3. Verify the whale icon in the top menu bar says **"Docker Desktop is running"**.
 
-### Step 6.2: Extract the Package
-1. Double-click `simplex-delivery.zip` in Finder to extract it.
-2. Open **Terminal** (`Cmd + Space`, type `Terminal`, press Enter).
-3. Navigate to the extracted folder:
+#### Step 2: Extract and Launch
+1. Double-click `simplex-delivery.zip` to extract.
+2. Open Terminal (`Cmd + Space` -> type `Terminal` -> Enter):
    ```bash
-   cd ~/Downloads/simplex-delivery   # (or your extracted folder path)
+   cd ~/Downloads/simplex-delivery
    chmod +x *.sh
+   ./start.sh
    ```
-
-### Step 6.3: Launch the Application
-```bash
-./start.sh
-```
-Open your web browser to:
-👉 **http://localhost:5173**
-
-### Step 6.4: How to Apply Updates / Bug Fixes
-```bash
-./update.sh
-```
-
-### Step 6.5: How to Stop
-```bash
-./stop.sh
-```
+3. Open web browser to: **http://localhost:5173**
 
 ---
 
-## 7. Default Login Credentials & Access Points
+## 6. Access Endpoints & Default Credentials
 
-| Service / Component | URL / Endpoint | Default Credentials | Description |
+| Component | Network Endpoint | Default Credentials | Description |
 | :--- | :--- | :--- | :--- |
-| **Web Operations Portal** | `http://localhost:5173` | Username: `admin`<br/>Password: `Rajesh@123` | Main dashboard for operations, users, and clients. |
-| **Backend REST API** | `http://localhost:3000/api/v1` | Bearer Token / Session | Orchestration and management backend. |
-| **Swagger API Documentation** | `http://localhost:3000/api/docs` | Public / Authorize Header | Interactive API specification and test console. |
-| **Database Engine** | `localhost:1433` | Host: `simplex_db`<br/>Database: `SIMPLEX_CENTRAL_DB` | Dedicated Microsoft SQL Server 2022 instance. |
+| **Web Operations Portal** | `http://localhost:5173` | Username: `admin`<br/>Password: `Rajesh@123` | Main operational dashboard. |
+| **Central REST API** | `http://localhost:3000/api/v1` | Bearer Token / Session | Orchestration and scheduling engine. |
+| **Swagger API Docs** | `http://localhost:3000/api/docs` | Public / Authorize Header | Interactive API documentation. |
+| **Database Server** | `localhost:1433` | Host: `simplex_db` / Port: `1433`<br/>DB: `SIMPLEX_CENTRAL_DB` | Microsoft SQL Server 2022 instance. |
 
 > [!NOTE]
-> Upon your first login, it is strongly recommended to navigate to **Settings -> Security** and update the default administrator password.
+> Upon your initial login, navigate to **Settings -> Security** to change the default administrator password.
 
 ---
 
-## 8. 1-Click Over-The-Air Update Mechanism (Zero Data Loss)
+## 7. Over-The-Air (OTA) Updates with Zero Data Loss
 
-When software enhancements or bug fixes are deployed:
-1. The developer pushes verified code changes to GitHub.
-2. GitHub Actions automatically packages and pushes the new container image to GitHub Container Registry.
-3. The client executes `update.bat` (Windows) or `./update.sh` (Linux/Mac).
-4. Docker detects the new image tag, downloads only the updated binary layers, and restarts the containers.
-5. **Persistent Data Assurance**: The Microsoft SQL database volume (`simplex_production_db_data`) is decoupled from the application containers. User accounts, clients, audit logs, and configurations are **never overwritten or deleted** during updates.
-
----
-
-## 9. Frequently Asked Questions (FAQ) & Troubleshooting
-
-### Q1: When running `start.bat`, it reports "Docker is not running". What should I do?
-* **Solution**: Docker Desktop has not completed its startup. Open Docker Desktop and verify the status indicator in the bottom-left corner is green (**"Engine running"**). Then re-run `start.bat`.
-
-### Q2: Can multiple operators access the portal from different computers on the same network?
-* **Solution**: Yes! Find the LAN IP address of the host machine (e.g. `192.168.1.100` via `ipconfig` on Windows or `ifconfig` on Linux/Mac). Other operators on the same network can access the portal via `http://192.168.1.100:5173`.
-
-### Q3: What if port 5173 or 3000 is already in use by another application?
-* **Solution**: Open the `.env` file in any text editor.
-  * Change `WEB_PORT=5173` to `WEB_PORT=8080` (or any available port).
-  * Change `API_PORT=3000` to `API_PORT=3001`.
-  * Save the file and execute `start.bat` (or `./start.sh`). The portal will be available on the new port.
-
-### Q4: Can I run this in an offline (air-gapped) environment without internet?
-* **Solution**: Yes. The vendor can export the pre-built Docker containers into a single `.tar.gz` bundle (`docker save`). You can import it on the offline machine using `docker load -i simplex-offline-images.tar.gz` and then run `start.bat` without internet connectivity.
+Whenever the software vendor publishes bug fixes or enhancements:
+1. The vendor pushes verified code to GitHub.
+2. GitHub Actions automatically builds and tags the new public Docker image (`ghcr.io/rajeshsupport/simplex/...:latest`).
+3. The client simply executes:
+   * **Windows**: Double-click `update.bat`
+   * **Linux/Mac**: Run `./update.sh`
+4. Docker pulls the updated container layers and restarts the services within 15–30 seconds.
+5. **Data Protection Guarantee**: The database volume (`simplex_production_db_data`) is decoupled from application containers. Registered clients, hospital credentials, users, and audit histories are **never modified or lost** during updates.
 
 ---
 
-**SIMPLEX Central Operations Console** · Official Technical Documentation · Copyright © 2026. All rights reserved.
+## 8. Frequently Asked Questions (FAQ)
+
+### Q1: Our server already has Microsoft SQL Server. Will there be port conflicts?
+* **Answer**: If you use **Topology B**, the Docker database container is completely disabled. The API connects directly to your existing SQL Server over port 1433 via `host.docker.internal`. Zero port conflicts occur.
+
+### Q2: Can multiple hospital staff members access the portal across our LAN?
+* **Answer**: Yes. Obtain the local IP address of the host machine (e.g. `192.168.1.100`). Any authorized computer on the hospital Wi-Fi or LAN can access the web console via `http://192.168.1.100:5173`.
+
+### Q3: What if port 5173 or 3000 is occupied by another local service?
+* **Answer**: Open `.env` in any text editor. Modify `WEB_PORT=8080` and `API_PORT=3001`. Save and run `start.bat` (or `./start.sh`). The portal will then serve on `http://localhost:8080`.
+
+---
+
+**SIMPLEX Central Operations Console** · Enterprise Deployment Manual · Copyright © 2026. All rights reserved.
