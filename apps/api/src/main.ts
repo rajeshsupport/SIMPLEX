@@ -4,7 +4,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
-import { EnvelopeEncryption, runMigrations, runSeeds, AppDataSource, ApplicationUser, Role } from '@hmc/database';
+import { EnvelopeEncryption, runMigrations, runSeeds, AppDataSource, ApplicationUser, Role, ensureDatabaseExists } from '@hmc/database';
 import * as argon2 from 'argon2';
 
 // Load environment variables
@@ -82,6 +82,9 @@ async function bootstrap() {
     return defaultJsonParser(req, res, next);
   });
   server.use(defaultUrlEncodedParser);
+
+  // 1. Ensure target database exists on SQL Server instance
+  await ensureDatabaseExists();
 
   const app = await NestFactory.create(AppModule, new ExpressAdapter(server), { bodyParser: false });
 
