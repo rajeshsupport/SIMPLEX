@@ -88,8 +88,8 @@ export class AgentsService {
       if (activeRun) {
         // A claimed, actively leased job must never be classified as OFFLINE solely because a normal heartbeat is temporarily delayed.
         status = 'BUSY';
-      } else if (lastHeartbeatMs > 15000) {
-        // Disconnect grace period (15s) expired and no active task lease
+      } else if (Math.abs(lastHeartbeatMs) > 15000) {
+        // Disconnect grace period (15s) expired or clock skew anomaly and no active task lease
         status = 'OFFLINE';
       }
 

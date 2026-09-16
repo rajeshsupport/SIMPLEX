@@ -1,0 +1,13 @@
+{
+  "name": "@hmc/automation",
+  "version": "1.0.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@hmc/shared": "file:../shared",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "playwright": "^1.49.1",
+    "xlsx": "^0.18.5"
+  }
+}
