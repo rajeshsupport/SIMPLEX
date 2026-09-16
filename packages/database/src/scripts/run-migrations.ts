@@ -4,6 +4,10 @@ import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialS
 import { AddUserDisableFields1700000000001 } from '../migrations/1700000000001-AddUserDisableFields.js';
 import { AddClientUserRoleRoute1700000000002 } from '../migrations/1700000000002-AddClientUserRoleRoute.js';
 import { AddClientResources1700000000003 } from '../migrations/1700000000003-AddClientResources.js';
+import { AlignClientResourceSnapshotsSchema1700000000004 } from '../migrations/1700000000004-AlignClientResourceSnapshotsSchema.js';
+import { AddClientUserLastVerifiedAt1700000000005 } from '../migrations/1700000000005-AddClientUserLastVerifiedAt.js';
+import { ExpandClientUserSnapshotRole1700000000006 } from '../migrations/1700000000006-ExpandClientUserSnapshotRole.js';
+import { AddClientResourceWorkflowColumns1700000000007 } from '../migrations/1700000000007-AddClientResourceWorkflowColumns.js';
 
 export async function runMigrations(): Promise<void> {
   console.log('[MIGRATION] Initializing DataSource for migrations...');
@@ -19,14 +23,21 @@ export async function runMigrations(): Promise<void> {
     { timestamp: 1700000000001, name: 'AddUserDisableFields1700000000001', instance: new AddUserDisableFields1700000000001() },
     { timestamp: 1700000000002, name: 'AddClientUserRoleRoute1700000000002', instance: new AddClientUserRoleRoute1700000000002() },
     { timestamp: 1700000000003, name: 'AddClientResources1700000000003', instance: new AddClientResources1700000000003() },
+    { timestamp: 1700000000004, name: 'AlignClientResourceSnapshotsSchema1700000000004', instance: new AlignClientResourceSnapshotsSchema1700000000004() },
+    { timestamp: 1700000000005, name: 'AddClientUserLastVerifiedAt1700000000005', instance: new AddClientUserLastVerifiedAt1700000000005() },
+    { timestamp: 1700000000006, name: 'ExpandClientUserSnapshotRole1700000000006', instance: new ExpandClientUserSnapshotRole1700000000006() },
+    { timestamp: 1700000000007, name: 'AddClientResourceWorkflowColumns1700000000007', instance: new AddClientResourceWorkflowColumns1700000000007() },
   ];
 
   try {
-    // Create migrations table if not exists
+    // Create migrations table if not exists in dbo schema
     await queryRunner.query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'migrations')
+      IF NOT EXISTS (
+        SELECT * FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'migrations'
+      )
       BEGIN
-        CREATE TABLE migrations (
+        CREATE TABLE [dbo].[migrations] (
           id INT IDENTITY(1,1) PRIMARY KEY,
           timestamp BIGINT NOT NULL,
           name NVARCHAR(255) NOT NULL,
@@ -37,7 +48,7 @@ export async function runMigrations(): Promise<void> {
 
     for (const mig of migrationsList) {
       const existing: any[] = await queryRunner.query(
-        'SELECT * FROM migrations WHERE name = @0',
+        'SELECT * FROM [dbo].[migrations] WHERE name = @0',
         [mig.name]
       );
 
@@ -45,7 +56,7 @@ export async function runMigrations(): Promise<void> {
         console.log(`[MIGRATION] Executing ${mig.name}...`);
         await mig.instance.up(queryRunner);
         await queryRunner.query(
-          'INSERT INTO migrations (timestamp, name) VALUES (@0, @1)',
+          'INSERT INTO [dbo].[migrations] (timestamp, name) VALUES (@0, @1)',
           [mig.timestamp, mig.name]
         );
         console.log(`[MIGRATION] Migration ${mig.name} applied successfully.`);

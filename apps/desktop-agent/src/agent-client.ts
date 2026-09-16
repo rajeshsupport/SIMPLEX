@@ -3,6 +3,8 @@ import {
   AgentHeartbeatPayload,
   AgentTaskAssignment,
   AutomationRunStepTelemetry,
+  SyncUserBatchDto,
+  SyncUserBatchResponse,
 } from '@hmc/shared';
 
 export class AgentClient {
@@ -45,6 +47,13 @@ export class AgentClient {
             'RESET_CLIENT_USER_PASSWORD',
             'CREATE_USER',
             'EDIT_AND_UPDATE_CLIENT',
+            'PROCESS_RESOURCE_WORKFLOW',
+            'PROCESS_RESOURCE_ROW_WORKFLOW',
+            'CREATE_CLIENT_RESOURCE',
+            'CREATE_RESOURCE',
+            'MAP_RESOURCE_USER',
+            'INSPECT_CREATE_FORM_METADATA',
+            'INSPECT_FORM_OPTIONS',
           ],
         }),
       });
@@ -92,6 +101,13 @@ export class AgentClient {
           'RESET_CLIENT_USER_PASSWORD',
           'CREATE_USER',
           'EDIT_AND_UPDATE_CLIENT',
+          'PROCESS_RESOURCE_WORKFLOW',
+          'PROCESS_RESOURCE_ROW_WORKFLOW',
+          'CREATE_CLIENT_RESOURCE',
+          'CREATE_RESOURCE',
+          'MAP_RESOURCE_USER',
+          'INSPECT_CREATE_FORM_METADATA',
+          'INSPECT_FORM_OPTIONS',
         ],
         systemMetrics: {
           memoryFreeMb: Math.round(os.freemem() / 1024 / 1024),
@@ -135,6 +151,25 @@ export class AgentClient {
     } catch (err) {
       console.error('[AGENT_CLIENT] Telemetry dispatch failed:', err);
     }
+  }
+
+  public async sendSyncBatch(runId: string, dto: SyncUserBatchDto): Promise<SyncUserBatchResponse> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (this.agentId) headers['x-agent-id'] = this.agentId;
+    if (this.token) headers['x-agent-token'] = this.token;
+
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/agents/runs/${runId}/client-users/sync-batches`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(dto),
+    });
+    if (!res.ok) {
+      const err: any = await res.json().catch(() => ({ message: res.statusText }));
+      throw new Error(err.message || `Failed to send sync batch: ${res.status}`);
+    }
+    return (await res.json()) as SyncUserBatchResponse;
   }
 
   public getStatus() {

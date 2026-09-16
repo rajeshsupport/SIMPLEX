@@ -325,18 +325,19 @@ async function runClientResourceManagementTests() {
   assert.ok(templateBuffer.length > 0, 'Template Buffer must not be empty');
 
   const readWb = XLSX.read(templateBuffer, { type: 'buffer' });
-  assert.strictEqual(readWb.SheetNames.length, 10, 'Workbook must contain exactly 10 sheets');
+  assert.strictEqual(readWb.SheetNames.length, 11, 'Workbook must contain exactly 11 sheets');
   assert.strictEqual(readWb.SheetNames[0], 'Resource Import');
   assert.strictEqual(readWb.SheetNames[1], 'Instructions');
-  assert.strictEqual(readWb.SheetNames[2], 'Resource Types');
-  assert.strictEqual(readWb.SheetNames[3], 'Specialties');
-  assert.strictEqual(readWb.SheetNames[4], 'Departments');
-  assert.strictEqual(readWb.SheetNames[5], 'Services');
-  assert.strictEqual(readWb.SheetNames[6], 'Branches');
-  assert.strictEqual(readWb.SheetNames[7], 'Nationalities');
-  assert.strictEqual(readWb.SheetNames[8], 'Roles');
-  assert.strictEqual(readWb.SheetNames[9], 'Template Info');
-  console.log('✓ TEST 4.1 Passed: 10-sheet workbook template generated successfully.');
+  assert.strictEqual(readWb.SheetNames[2], 'EMR Forms');
+  assert.strictEqual(readWb.SheetNames[3], 'Resource Types');
+  assert.strictEqual(readWb.SheetNames[4], 'Specialties');
+  assert.strictEqual(readWb.SheetNames[5], 'Departments');
+  assert.strictEqual(readWb.SheetNames[6], 'Services');
+  assert.strictEqual(readWb.SheetNames[7], 'Branches');
+  assert.strictEqual(readWb.SheetNames[8], 'Nationalities');
+  assert.strictEqual(readWb.SheetNames[9], 'Roles');
+  assert.strictEqual(readWb.SheetNames[10], 'Template Info');
+  console.log('✓ TEST 4.1 Passed: 11-sheet workbook template generated successfully.');
 
   console.log('\n[TEST 4.2] Validating Client ID Binding & Security Hash in Template Info...');
   const parseResult = parseAndValidateResourceWorkbook(templateBuffer, clientId);

@@ -1,6 +1,31 @@
 import express, { Request, Response } from 'express';
 import * as http from 'http';
 
+export interface FixtureUserRoleRecord {
+  id: number;
+  userName: string;
+  userId: string;
+  role: string;
+  status: 'A' | 'D';
+}
+
+export const fixtureClickCounters = {
+  addUserRoleSubmitCount: 0,
+  roleStatusClickCount: 0,
+  passwordResetClickCount: 0,
+  userStatusClickCount: 0,
+  createUserSubmitCount: 0,
+  addResourceUserSubmitCount: 0,
+  reset() {
+    this.addUserRoleSubmitCount = 0;
+    this.roleStatusClickCount = 0;
+    this.passwordResetClickCount = 0;
+    this.userStatusClickCount = 0;
+    this.createUserSubmitCount = 0;
+    this.addResourceUserSubmitCount = 0;
+  },
+};
+
 export function createFixtureApp(): express.Express {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
@@ -92,6 +117,19 @@ export function createFixtureApp(): express.Express {
       status: 'ACTIVE',
       barcodeNumber: 'BC-0005',
     },
+    {
+      username: 'dr_samir',
+      firstName: 'Samir',
+      lastName: 'Ahmad',
+      fullName: 'Dr. Samir Ahmad',
+      email: 'dr.samir@hospital.example.com',
+      mobileNumber: '0504445577',
+      nationality: 'Saudi Arabia',
+      role: 'Physician',
+      profileRole: 'Specialist',
+      status: 'ACTIVE',
+      barcodeNumber: 'BC-0006',
+    },
   ];
 
   const userRolesMap = new Map<string, string[]>();
@@ -100,6 +138,29 @@ export function createFixtureApp(): express.Express {
   userRolesMap.set('nurse_ali', ['Nurse']);
   userRolesMap.set('abdul.p', ['Physician']);
   userRolesMap.set('synthetic.test.user', ['Admin']);
+
+  let userRoleIdSeq = 1;
+  const userRoleRegistry: FixtureUserRoleRecord[] = [
+    { id: userRoleIdSeq++, userName: 'System Administrator', userId: 'hmc_admin', role: 'Admin', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'System Administrator', userId: 'hmc_admin', role: 'Super User', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Sarah Al-Mansoor', userId: 'dr_sarah', role: 'Physician', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Ali Hassan', userId: 'nurse_ali', role: 'Nurse', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Abdul Qadeer Pathan', userId: 'abdul.p', role: 'Physician', status: 'A' },
+    { id: userRoleIdSeq++, userName: 'Synthetic Test User', userId: 'synthetic.test.user', role: 'Admin', status: 'A' },
+  ];
+
+  const syncRolesMapFromRegistry = () => {
+    userRolesMap.clear();
+    for (const rec of userRoleRegistry) {
+      if (rec.status === 'A') {
+        const existing = userRolesMap.get(rec.userId) || [];
+        if (!existing.includes(rec.role)) {
+          existing.push(rec.role);
+        }
+        userRolesMap.set(rec.userId, existing);
+      }
+    }
+  };
 
   const clientResources: Array<{
     resourceCode: string;
@@ -198,6 +259,7 @@ export function createFixtureApp(): express.Express {
     if (username === 'invalid_user' || username === 'bad_user' || password === 'WrongPassword!' || password === 'WrongPassword123!') {
       return res.redirect(`${loginPath}?error=` + encodeURIComponent('Invalid credentials'));
     }
+    res.setHeader('Set-Cookie', 'session_auth=true; Path=/');
     res.redirect('/hmc/dashboard');
   };
 
@@ -369,7 +431,11 @@ export function createFixtureApp(): express.Express {
             fetch('/MasterV9.4/api/users/' + username + '/reset-password', { method: 'POST' })
               .then(res => res.json())
               .then(data => {
-                alert('Password reset: Temporary password is ' + data.temporaryPassword);
+                if (data && data.temporaryPassword) {
+                  alert('Password reset: Temporary password is ' + data.temporaryPassword);
+                } else {
+                  alert((data && data.message) || 'Password Reseted Successfully');
+                }
               });
           }
         </script>
@@ -705,26 +771,41 @@ export function createFixtureApp(): express.Express {
   });
 
   const handleAddUsersPost = (req: Request, res: Response) => {
+    fixtureClickCounters.createUserSubmitCount++;
     const { username, firstName, middleName, lastName, nickName, email, mobileNumber, nationality, role, profileRole, barcodeNumber } = req.body;
     if (clientUsers.some((u) => u.username.toLowerCase() === (username || '').toLowerCase())) {
       return res.status(400).send('<div class="alert-danger">User already exists</div>');
     }
     const targetUrl = req.path.includes('MasterV9.3') ? '/MasterV9.3/users' : (req.path.includes('MasterV9.4') ? '/MasterV9.4/users' : '/users');
+    const assignedUsername = username || `user_${Date.now()}`;
+    const assignedFullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const assignedRole = role || 'Physician';
+
     clientUsers.push({
-      username: username || `user_${Date.now()}`,
+      username: assignedUsername,
       firstName: firstName || 'First',
       middleName,
       lastName: lastName || 'Last',
-      fullName: `${firstName || ''} ${lastName || ''}`.trim(),
+      fullName: assignedFullName,
       nickName,
       email: email || '',
       mobileNumber: mobileNumber || '',
       nationality: nationality || 'Other',
-      role: role || 'Physician',
+      role: assignedRole,
       profileRole: profileRole || 'Specialist',
       status: 'ACTIVE',
       barcodeNumber,
     });
+
+    userRoleRegistry.push({
+      id: userRoleIdSeq++,
+      userName: assignedFullName,
+      userId: assignedUsername,
+      role: assignedRole,
+      status: 'A',
+    });
+    syncRolesMapFromRegistry();
+
     res.redirect(targetUrl);
   };
 
@@ -736,19 +817,29 @@ export function createFixtureApp(): express.Express {
   app.post('/MasterV9.3/addUsers', handleAddUsersPost);
 
   // Client User Mutation APIs
-  app.post('/MasterV9.4/api/users/:username/toggle-status', (req: Request, res: Response) => {
-    const u = clientUsers.find((user) => user.username === req.params.username);
+  const handleToggleUserStatus = (req: Request, res: Response) => {
+    fixtureClickCounters.userStatusClickCount++;
+    const u = clientUsers.find((user) => user.username.toLowerCase() === String(req.params.username || '').toLowerCase());
     if (u) {
       u.status = u.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
       res.json({ success: true, status: u.status });
     } else {
       res.status(404).json({ error: 'User not found' });
     }
+  };
+
+  const handleResetUserPassword = (req: Request, res: Response) => {
+    fixtureClickCounters.passwordResetClickCount++;
+    const tempPassword = 'Tmp@Pass123!'; // test fixture dummy password
+    res.json({ success: true, temporaryPassword: tempPassword });
+  };
+
+  ['/api/users/:username/toggle-status', '/MasterV9.4/api/users/:username/toggle-status', '/MasterV9.3/api/users/:username/toggle-status'].forEach((p) => {
+    app.post(p, handleToggleUserStatus);
   });
 
-  app.post('/MasterV9.4/api/users/:username/reset-password', (req: Request, res: Response) => {
-    const tempPassword = `Tmp@${Math.random().toString(36).substring(2, 8)}!1`;
-    res.json({ success: true, temporaryPassword: tempPassword });
+  ['/api/users/:username/reset-password', '/MasterV9.4/api/users/:username/reset-password', '/MasterV9.3/api/users/:username/reset-password'].forEach((p) => {
+    app.post(p, handleResetUserPassword);
   });
 
   // User Role Master Screen (/addUserRole, /MasterV9.4/addUserRole, /MasterV9.3/addUserRole)
@@ -845,6 +936,9 @@ export function createFixtureApp(): express.Express {
                       'NURSE',
                       'PHYSICIAN',
                       'PHARMACIST',
+                      'CLINICAL PHARMACIST',
+                      'SURGEON',
+                      'ANESTHESIOLOGIST',
                       'LAB TECHNICIAN',
                       'OPERATOR',
                       'SUPER USER',
@@ -970,6 +1064,7 @@ export function createFixtureApp(): express.Express {
   };
 
   const handleAddUserRolePost = (req: Request, res: Response) => {
+    fixtureClickCounters.addUserRoleSubmitCount++;
     const userVal = (req.body.txtUser || req.body.username || '').toString().trim();
     if (!userVal) {
       return res.redirect(`${req.path}?error=` + encodeURIComponent('Please select a user first.'));
@@ -977,10 +1072,29 @@ export function createFixtureApp(): express.Express {
 
     const rawRoles = req.body['txtRole[]'] || req.body.txtRole || req.body.roles || [];
     const rolesArr = Array.isArray(rawRoles) ? rawRoles : (rawRoles ? [rawRoles] : []);
-    userRolesMap.set(userVal, rolesArr);
+
+    const matchedUser = clientUsers.find((u) => u.username.toLowerCase() === userVal.toLowerCase());
+    const fullName = matchedUser ? matchedUser.fullName : userVal;
+
+    for (const rName of rolesArr) {
+      const existing = userRoleRegistry.find(
+        (r) => r.userId.toLowerCase() === userVal.toLowerCase() && r.role.toLowerCase() === rName.toLowerCase()
+      );
+      if (existing) {
+        existing.status = 'A';
+      } else {
+        userRoleRegistry.push({
+          id: userRoleIdSeq++,
+          userName: fullName,
+          userId: userVal,
+          role: rName,
+          status: 'A',
+        });
+      }
+    }
+    syncRolesMapFromRegistry();
 
     // Also update clientUsers in-memory snapshot if present
-    const matchedUser = clientUsers.find((u) => u.username.toLowerCase() === userVal.toLowerCase());
     if (matchedUser && rolesArr.length > 0) {
       matchedUser.role = rolesArr.join(', ');
     }
@@ -994,6 +1108,151 @@ export function createFixtureApp(): express.Express {
   app.post('/MasterV9.4/addUserRole', handleAddUserRolePost);
   app.get('/MasterV9.3/addUserRole', handleAddUserRoleGet);
   app.post('/MasterV9.3/addUserRole', handleAddUserRolePost);
+
+  // User Role Registry Screen (/userRole, /MasterV9.4/userRole, /MasterV9.3/userRole)
+  const handleUserRoleGet = (req: Request, res: Response) => {
+    const prefix = req.path.includes('MasterV9.4') ? '/MasterV9.4' : (req.path.includes('MasterV9.3') ? '/MasterV9.3' : '');
+    const rowsHtml = userRoleRegistry
+      .map((rec, idx) => {
+        const statusHtml =
+          rec.status === 'A'
+            ? `<a href="${prefix}/changeUserRoleStatus/${rec.id}/A" title="Click to Deactive" class="btn-status-active"><i class="fa fa-check text-success"></i> Active</a>`
+            : `<a href="${prefix}/changeUserRoleStatus/${rec.id}/D" class="remove btn-status-deactive" title="Click to Active"><i class="fa fa-remove text-danger"></i> Deactive</a>`;
+        return `
+          <tr>
+            <td>${idx + 1}</td>
+            <td>${rec.userName}</td>
+            <td>${rec.userId}</td>
+            <td>${rec.role}</td>
+            <td>General</td>
+            <td>Staff</td>
+            <td>Main</td>
+            <td>admin</td>
+            <td>2026-01-01</td>
+            <td>${statusHtml}</td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>User Role Registry</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; }
+          .header { background: #1e293b; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+          .nav a { color: #94a3b8; text-decoration: none; margin-right: 1.5rem; font-weight: 500; }
+          .content { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+          .card { background: #1e293b; padding: 1.5rem; border-radius: 0.5rem; border: 1px solid #334155; }
+          .dataTables_filter { margin-bottom: 1rem; display: flex; justify-content: flex-end; }
+          .dataTables_filter input { padding: 0.5rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #fff; }
+          table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+          th { background: #0f172a; color: #94a3b8; text-align: left; padding: 0.75rem 0.5rem; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid #334155; }
+          td { padding: 0.75rem 0.5rem; border-bottom: 1px solid #1e293b; font-size: 0.85rem; }
+          a.btn-status-active { color: #10b981; text-decoration: none; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+          a.btn-status-deactive { color: #ef4444; text-decoration: none; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div style="font-weight: bold; font-size: 1.25rem; color: #38bdf8;">HMC Clinical Suite</div>
+          <div class="nav">
+            <a href="${prefix}/users">Users</a>
+            <a href="${prefix}/userRole" class="active">User Role</a>
+            <a href="${prefix}/addUserRole">Add User Role</a>
+            <a href="/login">Logout</a>
+          </div>
+        </div>
+        <div class="content">
+          <div class="card">
+            <h2>User Role Mapping Registry</h2>
+            <div class="dataTables_wrapper">
+              <div class="dataTables_filter">
+                <label>Search: <input type="search" id="roleSearch" class="form-control" placeholder="Search user or role..." oninput="filterRoleTable()" /></label>
+              </div>
+              <table id="tablaDatos" class="table table-striped table-bordered table-hover">
+                <thead>
+                  <tr>
+                    <th>S.NO</th>
+                    <th>USER NAME</th>
+                    <th>USER ID</th>
+                    <th>ROLE</th>
+                    <th>DEPARTMENT</th>
+                    <th>DESIGNATION</th>
+                    <th>BRANCH</th>
+                    <th>CREATED BY</th>
+                    <th>CREATED DATE</th>
+                    <th>STATUS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <script>
+          function filterRoleTable() {
+            var val = (document.getElementById('roleSearch').value || '').toLowerCase().trim();
+            var rows = document.querySelectorAll('#tablaDatos tbody tr');
+            rows.forEach(function(row) {
+              var text = (row.textContent || '').toLowerCase();
+              row.style.display = (!val || text.indexOf(val) > -1) ? '' : 'none';
+            });
+          }
+        </script>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleChangeUserRoleStatus = (req: Request, res: Response) => {
+    fixtureClickCounters.roleStatusClickCount++;
+    const id = parseInt(String(req.params.id), 10);
+    const rec = userRoleRegistry.find((r) => r.id === id);
+    if (rec) {
+      rec.status = rec.status === 'A' ? 'D' : 'A';
+      syncRolesMapFromRegistry();
+    }
+    const prefix = req.path.includes('MasterV9.4') ? '/MasterV9.4' : (req.path.includes('MasterV9.3') ? '/MasterV9.3' : '');
+    const referer = req.header('Referer');
+    const redirectUrl = referer && referer.includes('userRole') ? referer : `${prefix}/userRole`;
+    res.redirect(redirectUrl);
+  };
+
+  ['/userRole', '/MasterV9.4/userRole', '/MasterV9.3/userRole'].forEach((p) => {
+    app.get(p, handleUserRoleGet);
+  });
+
+  ['/changeUserRoleStatus/:id/:status', '/MasterV9.4/changeUserRoleStatus/:id/:status', '/MasterV9.3/changeUserRoleStatus/:id/:status'].forEach((p) => {
+    app.get(p, handleChangeUserRoleStatus);
+    app.post(p, handleChangeUserRoleStatus);
+  });
+
+  // checkroleAddNewUser API endpoint (matching Simplex remote XHR)
+  const handleCheckroleAddNewUser = (req: Request, res: Response) => {
+    const userid = String(req.query.userid || req.query.username || '').trim().toLowerCase();
+    const activeRoles = userRoleRegistry
+      .filter((r) => r.userId.toLowerCase() === userid && r.status === 'A')
+      .map((r) => ({ Role_Name: r.role, role_name: r.role, role: r.role, status: 'Active' }));
+    res.json(activeRoles);
+  };
+  app.get('/checkroleAddNewUser', handleCheckroleAddNewUser);
+  app.get('/MasterV9.4/checkroleAddNewUser', handleCheckroleAddNewUser);
+  app.get('/MasterV9.3/checkroleAddNewUser', handleCheckroleAddNewUser);
+
+  // Click counters API for invariant testing
+  app.get('/api/test/click-counters', (_req: Request, res: Response) => {
+    res.json(fixtureClickCounters);
+  });
+  app.post('/api/test/click-counters/reset', (_req: Request, res: Response) => {
+    fixtureClickCounters.reset();
+    res.json({ success: true, counters: fixtureClickCounters });
+  });
 
   // User Role APIs
   app.get('/MasterV9.4/api/user-roles/:username', (req: Request, res: Response) => {
@@ -1254,6 +1513,9 @@ export function createFixtureApp(): express.Express {
   };
 
   const handleAddResourceParentDetailsGet = (req: Request, res: Response) => {
+    if (req.query.requireAuth === 'true' && !req.headers.cookie?.includes('session_auth=true')) {
+      return res.redirect('/login');
+    }
     res.send(`
       <!DOCTYPE html>
       <html lang="en">
@@ -1275,21 +1537,33 @@ export function createFixtureApp(): express.Express {
           <h2 class="screen-title">ADD-RESOURCE DETAILS</h2>
           ${req.query.msg ? `<div class="alert-success" id="successMsg">${req.query.msg}</div>` : ''}
           ${req.query.error ? `<div class="alert-danger" id="errorMsg" style="background: #7f1d1d; color: #fca5a5; padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem;">${req.query.error}</div>` : ''}
-          <form method="POST" action="${req.path}" id="addResourceForm">
+          <form method="POST" action="${req.path}" id="addResourceParent" class="form-horizontal fv-form fv-form-bootstrap">
+            <!-- FormValidation hidden submit button -->
+            <button type="submit" class="fv-hidden-submit" style="display: none; width: 0px; height: 0px;" onclick="window.onControlClicked && window.onControlClicked('hidden')"></button>
             <div class="field">
               <label for="txtResourceName">Resource Name *</label>
               <input type="text" id="txtResourceName" name="resourceName" required />
+              <input type="hidden" id="txtResource" name="txtResource" />
             </div>
             <div class="field">
               <label for="ddlIsHuman">Is Resource Human *</label>
-              <select id="ddlIsHuman" name="isResourceHuman">
+              <label><input type="radio" id="txtResourceHumanYES" name="txtResourceHuman" value="Y" checked> Yes</label>
+              <label><input type="radio" id="txtResourceHumanNO" name="txtResourceHuman" value="N"> No</label>
+              <select id="ddlIsHuman" name="isResourceHuman" style="display: none;">
                 <option value="Yes">Yes</option>
                 <option value="No">No</option>
               </select>
             </div>
             <div class="field">
-              <label for="ddlResourceType">Resource Type *</label>
-              <select id="ddlResourceType" name="resourceType">
+              <label for="txtResourceTypeName">Resource Type *</label>
+              <select id="txtResourceTypeName" name="txtResourceTypeName">
+                <option value="Consultant Physician">Consultant Physician</option>
+                <option value="Specialist">Specialist</option>
+                <option value="Staff Nurse">Staff Nurse</option>
+                <option value="Room / Facility">Room / Facility</option>
+                <option value="Equipment">Equipment</option>
+              </select>
+              <select id="ddlResourceType" name="resourceType" style="display: none;">
                 <option value="Consultant Physician">Consultant Physician</option>
                 <option value="Specialist">Specialist</option>
                 <option value="Staff Nurse">Staff Nurse</option>
@@ -1298,37 +1572,160 @@ export function createFixtureApp(): express.Express {
               </select>
             </div>
             <div class="field">
-              <label for="ddlSpecialty">Specialty *</label>
-              <select id="ddlSpecialty" name="specialty">
+              <label for="txtSpecialityName">Specialty *</label>
+              <input type="text" id="txtSpecialityName" name="txtSpecialityName" class="form-control ui-autocomplete-input" autocomplete="off" placeholder="Type to search specialty..." />
+              <input type="hidden" id="txtSpecialityId" name="txtSpecialityId" />
+              <input type="hidden" id="txtSpecialityHiddenName" name="txtSpecialityHiddenName" />
+              <select id="ddlSpecialty" name="specialty" style="display: none;">
                 <option value="Cardiology">Cardiology</option>
                 <option value="Neurology">Neurology</option>
                 <option value="Pediatrics">Pediatrics</option>
                 <option value="Radiology">Radiology</option>
                 <option value="General">General</option>
               </select>
+              <!-- Live-identical autocomplete popup container -->
+              <ul class="ui-autocomplete ui-front ui-menu ui-widget ui-widget-content ui-corner-all serviceGirdDetails pres_custom_class" id="specAutocompleteMenu" style="display: none; background: #1e293b; border: 1px solid #475569; position: absolute; z-index: 9999;">
+                <table class="table table-striped table-hover" width="100%" id="specialityID" style="font-size: 11px; color: #fff;">
+                  <thead>
+                    <tr style="background: #d17519;">
+                      <th style="display: none;">Speciality Code</th>
+                      <th>Speciality Name</th>
+                    </tr>
+                  </thead>
+                  <tbody id="loaditems">
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Pediatrics', 'PEDIA')"><td style="display: none;">PEDIA</td><td>Pediatrics</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Cardiology', 'CARDIO')"><td style="display: none;">CARDIO</td><td>Cardiology</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Neurology', 'NEURO')"><td style="display: none;">NEURO</td><td>Neurology</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Orthopaedic', 'ORHTO')"><td style="display: none;">ORHTO</td><td>Orthopaedic</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Orthopedics', 'ORTHO')"><td style="display: none;">ORTHO</td><td>Orthopedics</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Dermatology', 'DERM')"><td style="display: none;">DERM</td><td>Dermatology</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Internal Medicine', 'INTMED')"><td style="display: none;">INTMED</td><td>Internal Medicine</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Radiology', 'RAD')"><td style="display: none;">RAD</td><td>Radiology</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('General', 'GEN')"><td style="display: none;">GEN</td><td>General</td></tr>
+                    <tr class="ui-menu-item" role="presentation" onclick="specialityID('Obstetrics and Gynaecology', 'OBSGYN')"><td style="display: none;">OBSGYN</td><td>Obstetrics and Gynaecology</td></tr>
+                  </tbody>
+                </table>
+              </ul>
             </div>
             <div class="field">
-              <label for="txtDepartment">Departments *</label>
-              <input type="text" id="txtDepartment" name="departments" value="ALL" />
+              <label for="txtDepartmentName">Departments *</label>
+              <input type="text" id="txtDepartmentName" name="txtDepartmentName" class="form-control ui-autocomplete-input" autocomplete="off" placeholder="Click for departments..." />
+              <input type="hidden" id="txtDepartmentId" name="txtDepartmentId" />
+              <input type="hidden" id="txtDepartmentHiddenName" name="txtDepartmentHiddenName" />
+              <input type="hidden" id="txtDepartment" name="departments" value="ALL" />
+              <!-- Live-identical department popup container -->
+              <ul class="ui-autocomplete ui-front ui-menu ui-widget ui-widget-content ui-corner-all serviceGirdDetails pres_custom_class" id="deptAutocompleteMenu" style="display: none; background: #1e293b; border: 1px solid #475569; position: absolute; z-index: 9999;">
+                <table class="table table-striped table-hover" width="100%" id="departmentID" style="font-size: 11px; color: #fff;">
+                  <thead>
+                    <tr style="background: #d17519;">
+                      <th style="display: none;">Department Code</th>
+                      <th>Department Name</th>
+                      <th>Select All<input type="checkbox" name="checkallcheckbox" id="checkallcheckbox" class="checkallcheckbox" onclick="checkallcheckboxs()" style="margin-left: 5px;"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="loaditem">
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">1</td><td>Pediatrics</td><td><input type="checkbox" name="txtSplSubDept" value="1,Pediatrics" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">2</td><td>Cardiology</td><td><input type="checkbox" name="txtSplSubDept" value="2,Cardiology" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">20</td><td>Cardiology Dept</td><td><input type="checkbox" name="txtSplSubDept" value="20,Cardiology Dept" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">3</td><td>General Medicine</td><td><input type="checkbox" name="txtSplSubDept" value="3,General Medicine" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">4</td><td>Neurology Dept</td><td><input type="checkbox" name="txtSplSubDept" value="4,Neurology Dept" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">5</td><td>Neurology</td><td><input type="checkbox" name="txtSplSubDept" value="5,Neurology" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">6</td><td>Administration</td><td><input type="checkbox" name="txtSplSubDept" value="6,Administration" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">7</td><td>Radiology</td><td><input type="checkbox" name="txtSplSubDept" value="7,Radiology" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">8</td><td>Dental</td><td><input type="checkbox" name="txtSplSubDept" value="8,Dental" class="txtdepartmentbrachsno" /></td></tr>
+                    <tr class="ui-menu-item" role="presentation"><td style="display: none;">9</td><td>Dermatology</td><td><input type="checkbox" name="txtSplSubDept" value="9,Dermatology" class="txtdepartmentbrachsno" /></td></tr>
+                  </tbody>
+                </table>
+              </ul>
             </div>
             <div class="field">
-              <label for="txtColorCode">Color Identification Code</label>
-              <input type="text" id="txtColorCode" name="colorIdentificationCode" value="FFFFFF" />
+              <label for="Color_Identification_Code">Color Identification Code</label>
+              <input type="text" id="Color_Identification_Code" name="Color_Identification_Code" value="FFFFFF" />
+              <input type="hidden" id="txtColorCode" name="colorIdentificationCode" value="FFFFFF" />
             </div>
             <div class="field">
-              <label for="txtServices">Services *</label>
-              <input type="text" id="txtServices" name="services" value="ALL" />
+              <label for="serviceRes">Services *</label>
+              <label><input type="checkbox" id="serviceRes" name="serviceRes" checked value="on" /> Select All Services</label>
+              <input type="hidden" id="txtServices" name="services" value="ALL" />
             </div>
             <div class="field">
-              <label for="txtOperatingFrom">Operating From *</label>
-              <input type="text" id="txtOperatingFrom" name="operatingFrom" value="00:00" />
+              <label for="txtResOperHoursFrom">Operating From *</label>
+              <input type="text" id="txtResOperHoursFrom" name="txtResOperHoursFrom" value="00:00" />
+              <input type="hidden" id="txtOperatingFrom" name="operatingFrom" value="00:00" />
             </div>
             <div class="field">
-              <label for="txtOperatingTo">Operating To *</label>
-              <input type="text" id="txtOperatingTo" name="operatingTo" value="23:55" />
+              <label for="txtResOperHoursTo">Operating To *</label>
+              <input type="text" id="txtResOperHoursTo" name="txtResOperHoursTo" value="23:55" />
+              <input type="hidden" id="txtOperatingTo" name="operatingTo" value="23:55" />
             </div>
-            <button type="submit" id="btnSave">Save</button>
+            ${req.query.missingControl === 'true' ? `
+              <!-- Intentionally omitted submit controls to test missing control gate -->
+            ` : req.query.ambiguousControl === 'true' ? `
+              <input type="button" class="btn btn-info" value="ADD" id="submitForm" onclick="window.onControlClicked && window.onControlClicked('visible'); this.form.submit();">
+              <button type="submit" class="btn btn-primary" id="btnSave" onclick="window.onControlClicked && window.onControlClicked('visible');">Save</button>
+            ` : `
+              <input type="button" class="btn btn-info" value="ADD" id="submitForm" onclick="window.onControlClicked && window.onControlClicked('visible'); this.form.submit();">
+            `}
           </form>
+          <script>
+            // Synchronize mirror inputs
+            document.getElementById('txtResourceName')?.addEventListener('input', function() {
+              const el = document.getElementById('txtResource');
+              if (el) el.value = this.value;
+            });
+            document.getElementById('txtSpecialityName')?.addEventListener('focus', function() {
+              document.getElementById('specAutocompleteMenu').style.display = 'block';
+            });
+            document.getElementById('txtSpecialityName')?.addEventListener('input', function() {
+              document.getElementById('specAutocompleteMenu').style.display = 'block';
+              const filter = this.value.toLowerCase();
+              const rows = document.querySelectorAll('#loaditems tr');
+              rows.forEach(r => {
+                const text = r.cells[1]?.textContent?.toLowerCase() || '';
+                r.style.display = text.includes(filter) ? '' : 'none';
+              });
+            });
+            document.getElementById('txtDepartmentName')?.addEventListener('focus', function() {
+              document.getElementById('deptAutocompleteMenu').style.display = 'block';
+            });
+            function specialityID(name, id) {
+              document.getElementById('txtSpecialityName').value = name;
+              document.getElementById('txtSpecialityHiddenName').value = name;
+              document.getElementById('txtSpecialityId').value = id;
+              document.getElementById('specAutocompleteMenu').style.display = 'none';
+            }
+            function checkallcheckboxs() {
+              const chk = document.getElementById('checkallcheckbox').checked;
+              const boxes = document.querySelectorAll('.txtdepartmentbrachsno');
+              let names = [];
+              let ids = [];
+              boxes.forEach(b => {
+                b.checked = chk;
+                if (chk) {
+                  const parts = b.value.split(',');
+                  ids.push(parts[0]);
+                  names.push(parts[1]);
+                }
+              });
+              document.getElementById('txtDepartmentName').value = names.join(',');
+              document.getElementById('txtDepartmentHiddenName').value = names.join(',');
+              document.getElementById('txtDepartmentId').value = ids.join(',');
+            }
+            document.querySelectorAll('.txtdepartmentbrachsno').forEach(b => {
+              b.addEventListener('change', function() {
+                let names = [];
+                let ids = [];
+                document.querySelectorAll('.txtdepartmentbrachsno:checked').forEach(cb => {
+                  const parts = cb.value.split(',');
+                  ids.push(parts[0]);
+                  names.push(parts[1]);
+                });
+                document.getElementById('txtDepartmentName').value = names.join(',');
+                document.getElementById('txtDepartmentHiddenName').value = names.join(',');
+                document.getElementById('txtDepartmentId').value = ids.join(',');
+              });
+            });
+          </script>
         </div>
       </body>
       </html>
@@ -1336,7 +1733,12 @@ export function createFixtureApp(): express.Express {
   };
 
   const handleAddResourceParentDetailsPost = (req: Request, res: Response) => {
-    const { resourceName, isResourceHuman, resourceType, specialty, departments, services } = req.body;
+    const resourceName = req.body.resourceName || req.body.txtResource;
+    const isResourceHuman = req.body.isResourceHuman || req.body.txtResourceHuman;
+    const resourceType = req.body.resourceType || req.body.txtResourceTypeName;
+    const specialty = req.body.specialty || req.body.txtSpecialityName || req.body.txtSpecialityHiddenName;
+    const departments = req.body.departments || req.body.txtDepartmentName || req.body.txtDepartmentHiddenName;
+    const services = req.body.services || req.body.serviceRes;
     const exists = clientResources.find((r) => r.resourceName.toLowerCase() === (resourceName || '').toLowerCase());
     if (exists) {
       return res.redirect(`${req.path}?error=` + encodeURIComponent(`Duplicate resource '${resourceName}' already exists`));
@@ -1384,7 +1786,9 @@ export function createFixtureApp(): express.Express {
       <body>
         <div class="card">
           <h2 class="screen-title">ADD-RESOURCE USER DETAILS</h2>
-          <form method="POST" action="${req.path}" id="addParentResourceUserForm">
+          <form method="POST" action="${req.path}" id="addParentResourceUser" class="form-horizontal fv-form fv-form-bootstrap">
+            <!-- FormValidation hidden submit button -->
+            <button type="submit" class="fv-hidden-submit" style="display: none; width: 0px; height: 0px;"></button>
             <div class="field">
               <label for="ddlUser">User Name *</label>
               <select id="ddlUser" name="username">
@@ -1403,7 +1807,7 @@ export function createFixtureApp(): express.Express {
                 Is Shown in Registration *
               </label>
             </div>
-            <button type="submit" id="btnSave">ADD</button>
+            <button type="submit" id="btnSSDB" class="btn btn-info">ADD</button>
           </form>
         </div>
         <table id="tblResourceUserMappings">
@@ -1432,25 +1836,509 @@ export function createFixtureApp(): express.Express {
   };
 
   const handleAddParentResourceUserPost = (req: Request, res: Response) => {
+    fixtureClickCounters.addResourceUserSubmitCount++;
     const { resourceCode, username } = req.body;
-    const target = clientResources.find((r) => r.resourceCode === resourceCode || r.resourceName === resourceCode);
+    let target = clientResources.find((r) => r.resourceCode === resourceCode || r.resourceName === resourceCode);
     if (target) {
       target.linkedUsername = username;
+    } else if (resourceCode && username) {
+      clientResources.push({
+        resourceCode,
+        resourceName: resourceCode,
+        linkedUsername: username,
+        specialization: 'General',
+        department: 'ALL',
+        status: 'ACTIVE',
+      });
     }
+    res.redirect(req.path);
+  };
+
+  const handleParentResourceUserGet = (req: Request, res: Response) => {
     res.send(`
       <!DOCTYPE html>
-      <html>
-      <head><title>ADD-RESOURCE USER DETAILS</title></head>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>RESOURCE USER</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
+          table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: #1e293b; }
+          th, td { padding: 0.75rem; border: 1px solid #334155; text-align: left; }
+        </style>
+      </head>
       <body>
-        <div class="alert-success" id="successMsg">Resource user mapped successfully.</div>
-        <script>setTimeout(() => { window.location.href = '${req.path}'; }, 100);</script>
+        <h2>RESOURCE USER DETAILS</h2>
+        <div id="tablaDatos_filter">
+          <input type="search" placeholder="SEARCH" />
+        </div>
+        <table id="tablaDatos">
+          <thead>
+            <tr>
+              <th>S.NO</th>
+              <th>USER NAME</th>
+              <th>RESOURCE NAME</th>
+              <th>STATUS</th>
+              <th>ACTION</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${clientResources.filter((r) => r.linkedUsername).map((r, idx) => `
+              <tr data-resource-id="${r.resourceCode}" data-username="${r.linkedUsername}">
+                <td>${idx + 1}</td>
+                <td>${r.linkedUsername}</td>
+                <td>${r.resourceName || r.resourceCode}</td>
+                <td>ACTIVE</td>
+                <td></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
       </body>
       </html>
     `);
   };
 
+  // Mock EMR Form Master (30 forms across multiple pages)
+  const mockEmrForms = Array.from({ length: 30 }, (_, idx) => {
+    const num = idx + 1;
+    const formCode = `EMR-${String(num).padStart(3, '0')}`;
+    const names = [
+      'Initial Consultation Note',
+      'Cardiology Evaluation Form',
+      'Follow-up Progress Note',
+      'Emergency Triage Record',
+      'Discharge Summary',
+      'Inpatient Admission Assessment',
+      'Pediatric Well-Child Examination',
+      'Neurological Examination Form',
+      'Pre-Operative Assessment',
+      'Post-Anesthesia Care Note',
+      'Radiology Request & Findings',
+      'Pathology Biopsy Record',
+      'General Physical Exam',
+      'Ophthalmology Vision Assessment',
+      'Orthopedic Joint Examination',
+      'OP - CLINICIANS',
+    ];
+    const formName = names[idx % names.length] + (num > names.length ? ` (Version ${Math.floor(num / names.length) + 1})` : '');
+    const group = idx % 2 === 0 ? 'Clinical Documentation' : 'Specialist Assessment';
+    const encType = idx % 3 === 0 ? 'Inpatient' : idx % 3 === 1 ? 'Outpatient' : 'Emergency';
+    return {
+      formId: formCode,
+      formName,
+      group,
+      encounterType: encType,
+      isDefault: num === 1,
+      isAssigned: false,
+      status: 'ACTIVE',
+    };
+  });
+
+  const formAssignments: Record<string, string[]> = {};
+  const formTransfers: Array<{ branch: string; username: string; forms: string[]; defaultForm: string }> = [];
+  const eclaimUsers: Array<{ username: string; resourceCode: string; providerId: string; facilityId: string; licenseNo: string }> = [];
+
+  const handleEmrPanelSelectionGet = (req: Request, res: Response) => {
+    const page = parseInt(req.query.page as string || '1', 10);
+    const limit = 10;
+    const search = ((req.query.search as string) || '').toLowerCase();
+    const filtered = mockEmrForms.filter((f) => !search || f.formName.toLowerCase().includes(search) || f.formId.toLowerCase().includes(search));
+    const totalPages = Math.ceil(filtered.length / limit);
+    const startIndex = (page - 1) * limit;
+    const pageItems = filtered.slice(startIndex, startIndex + limit);
+
+    const assignedUser = (req.query.assignedUser as string) || '';
+
+    const rowsHtml = pageItems.map((f) => `
+      <tr data-form-id="${f.formId}" class="form-row">
+        <td><input type="checkbox" name="selectedForms" value="${f.formId}" class="chk-select-form" ${f.isAssigned ? 'checked' : ''} /></td>
+        <td class="form-code">${f.formId}</td>
+        <td class="form-name">${f.formName}</td>
+        <td class="form-group">${f.group}</td>
+        <td class="form-encounter">${f.encounterType}</td>
+        <td><input type="radio" name="defaultForm" value="${f.formId}" class="rad-default-form" ${f.isDefault ? 'checked' : ''} /></td>
+        <td><span class="badge badge-active">${f.status}</span></td>
+      </tr>
+    `).join('');
+
+    const paginationHtml = Array.from({ length: totalPages }, (_, i) => i + 1)
+      .map((p) => `<a href="?page=${p}&search=${encodeURIComponent(search)}" class="page-link ${p === page ? 'active' : ''}">${p}</a>`)
+      .join(' ');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>EMR PANEL SELECTION</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.75rem; border: 1px solid #334155; margin-bottom: 2rem; }
+          table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+          th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #334155; }
+          th { background: #0f172a; color: #38bdf8; }
+          .badge-active { background: rgba(34, 197, 94, 0.2); color: #4ade80; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; }
+          .pagination { margin-top: 1rem; display: flex; gap: 0.5rem; }
+          .page-link { color: #38bdf8; padding: 0.25rem 0.5rem; text-decoration: none; border: 1px solid #334155; border-radius: 0.25rem; }
+          .page-link.active { background: #0284c7; color: #fff; }
+          input, select { padding: 0.5rem; background: #0f172a; border: 1px solid #334155; color: #fff; border-radius: 0.25rem; }
+          button { background: #0284c7; color: white; border: none; padding: 0.5rem 1rem; border-radius: 0.25rem; cursor: pointer; font-weight: 600; }
+          .field { margin-bottom: 1rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2 class="screen-title">EMR Form Master & Panel Selection</h2>
+          <div style="margin-bottom: 1rem; display: flex; gap: 1rem; align-items: center;">
+            <input type="text" id="txtSearchForm" name="search" placeholder="Search forms..." value="${search}" />
+            ${req.query.useAutocomplete === 'true'
+              ? '<input type="text" id="txtUserName" name="username" class="form-control text-uppercase ui-autocomplete-input" autocomplete="off" />'
+              : `<select id="ddlUserSelect" name="username" form="emrPanelForm">
+                  ${clientUsers.map((u) => `<option value="${u.username}" ${u.username === assignedUser ? 'selected' : ''}>${u.username} (${u.fullName})</option>`).join('')}
+                </select>`}
+          </div>
+          <form method="POST" action="${req.path}/assign" id="emrPanelForm">
+            <table id="tblEmrForms" class="table-emr-forms">
+              <thead>
+                <tr>
+                  <th>Select</th>
+                  <th>Form Code</th>
+                  <th>Form Name</th>
+                  <th>Group</th>
+                  <th>Encounter Type</th>
+                  <th>Is Default</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml}
+              </tbody>
+            </table>
+            <div class="pagination" id="paginationControls">
+              ${paginationHtml}
+            </div>
+            <div style="margin-top: 1.5rem; display: flex; gap: 1rem;">
+              <button type="submit" id="btnAssignForms" data-testid="btn-assign-forms">Save & Assign Forms</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card" id="sectionTransferGroupForm">
+          <h2>Transfer Group Form to Other Branch User</h2>
+          <form method="POST" action="${req.path}/transfer" id="formTransferGroup">
+            <div class="field">
+              <label for="ddlTransferBranch">Target Branch *</label>
+              <select id="ddlTransferBranch" name="targetBranchId">
+                <option value="BR-001">Main Hospital Campus</option>
+                <option value="BR-002">City Center Medical Clinic</option>
+                <option value="BR-003">West Branch</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="ddlTransferUser">Exact User *</label>
+              <select id="ddlTransferUser" name="username">
+                ${clientUsers.map((u) => `<option value="${u.username}">${u.username} (${u.fullName})</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label for="ddlTransferDefaultForm">Default Form Indicator *</label>
+              <select id="ddlTransferDefaultForm" name="defaultFormIndicator">
+                <option value="S" selected>S</option>
+                <option value="Yes">Yes</option>
+                <option value="No">No</option>
+              </select>
+            </div>
+            <button type="submit" id="btnTransferGroupForm" data-testid="btn-transfer-group-form">Transfer Group Forms</button>
+          </form>
+          ${req.query.transferSuccess ? '<div class="alert-success" id="transferSuccessMsg" style="margin-top:1rem; background:#064e3b; color:#6ee7b7; padding:0.75rem; border-radius:0.375rem;">Forms transferred successfully!</div>' : ''}
+          ${req.query.assignSuccess ? '<div class="alert-success" id="assignSuccessMsg" style="margin-top:1rem; background:#064e3b; color:#6ee7b7; padding:0.75rem; border-radius:0.375rem;">Forms assigned successfully!</div>' : ''}
+        </div>
+
+        <!-- Real Simplex-compatible EMR Table and Transfer Modal -->
+        <div class="card" id="sectionSimplexEmr">
+          <table id="tablaDatos" class="table table-striped table-bordered">
+            <thead>
+              <tr>
+                <th>Select</th>
+                <th>Form Name</th>
+                <th>Assign</th>
+                <th>Is Default</th>
+                <th>Encounter Type</th>
+                <th>Action</th>
+                <th>Group</th>
+                <th>Search</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${mockEmrForms.map((f, idx) => `
+                <tr>
+                  <td><input type="checkbox" name="emrGFEA_${idx + 1}" class="GFEACheck" id="GFEACheck_${idx + 1}" value="${f.formId}" data-form-id="${f.formId}" /></td>
+                  <td>${f.formName}</td>
+                  <td><span class="fa fa-check"></span></td>
+                  <td>${f.isDefault ? 'Yes' : 'No'}</td>
+                  <td>${f.encounterType || 'ALL'}</td>
+                  <td><a href="#"><span class="fa fa-edit"></span></a></td>
+                  <td>${f.group || 'Clinical'}</td>
+                  <td><span class="fa fa-search"></span></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          <span id="gfeaTransfer" title="Transfer Form" style="cursor:pointer; padding: 6px 12px; background:#0284c7; border-radius:4px;"><i class="fa fa-share-alt"></i> Transfer Form</span>
+        </div>
+
+        <div id="gfeaTransferModal" style="display:none; position:fixed; top:20%; left:30%; background:#1e293b; padding:2rem; border:1px solid #475569; border-radius:8px; z-index:9999;">
+          <div id="transferBody">
+            <form id="postAssignFormUsers">
+              <div><input type="text" id="txtBranchField_0" name="res[0][txtBranchName]" /></div>
+              <div><input type="hidden" id="branchCode_0" name="res[0][branchCode]" /></div>
+              <div><input type="radio" id="same" name="defAssign" value="same" checked /></div>
+              <div><input type="text" id="txtUserNameMulti" name="res[0][txtUserNameMulti]" /></div>
+              <div><input type="hidden" id="userId_0" name="res[0][userMultiId]" /></div>
+              <div><select name="res[0][selectedForm]"><option value="OP - CLINICIANS">OP - CLINICIANS</option></select></div>
+              <div><input type="radio" id="def_yes" name="res[0][default]" value="yes" /> Yes</div>
+              <div><input type="radio" id="def_no" name="res[0][default]" value="no" checked /> No</div>
+              <div style="margin-top:10px;"><button type="button" id="transfer_GFA">Add</button></div>
+            </form>
+          </div>
+        </div>
+
+        <script>
+          // Minimal window.$ fixture
+          window.$ = function(selector) {
+            var elements = typeof selector === 'string' ? Array.from(document.querySelectorAll(selector)) : (Array.isArray(selector) ? selector : (selector ? [selector] : []));
+            return {
+              length: elements.length,
+              each: function(cb) { elements.forEach(function(el, i) { cb.call(el, i, el); }); return this; },
+              val: function(v) {
+                if (v !== undefined) { elements.forEach(function(el) { el.value = v; }); return this; }
+                return elements[0] ? elements[0].value : '';
+              },
+              click: function(fn) {
+                if (fn) { elements.forEach(function(el) { el.addEventListener('click', fn); }); }
+                else if (elements[0]) { elements[0].click(); }
+                return this;
+              },
+              modal: function(action) {
+                if (action === 'hide') { elements.forEach(function(el) { el.style.display = 'none'; }); }
+                else { elements.forEach(function(el) { el.style.display = 'block'; }); }
+                return this;
+              },
+              serialize: function() {
+                var formEl = elements[0];
+                if (!formEl) return '';
+                var formData = new FormData(formEl);
+                var params = new URLSearchParams();
+                for (var pair of formData.entries()) {
+                  params.append(pair[0], pair[1]);
+                }
+                return params.toString();
+              }
+            };
+          };
+          window.$.ajax = function(opts) {
+            var method = (opts.type || 'GET').toUpperCase();
+            var url = opts.url;
+            var fetchOpts = { method: method };
+            if (method === 'GET') {
+              if (opts.data) {
+                var params = new URLSearchParams();
+                for (var k in opts.data) params.append(k, opts.data[k]);
+                url += (url.indexOf('?') === -1 ? '?' : '&') + params.toString();
+              }
+            } else if (method === 'POST') {
+              if (opts.data) {
+                var bodyParams;
+                if (typeof opts.data === 'string') {
+                  bodyParams = opts.data;
+                } else {
+                  bodyParams = new URLSearchParams();
+                  for (var k in opts.data) bodyParams.append(k, opts.data[k]);
+                }
+                fetchOpts.body = bodyParams;
+              }
+            }
+            fetch(url, fetchOpts)
+              .then(function(r) {
+                var ct = r.headers.get('content-type') || '';
+                if (ct.includes('application/json')) return r.json();
+                return r.text();
+              })
+              .then(function(d) { if (opts.success) opts.success(d); })
+              .catch(function(err) { if (opts.error) opts.error(err); });
+          };
+
+          document.getElementById('gfeaTransfer')?.addEventListener('click', function() {
+            document.getElementById('gfeaTransferModal').style.display = 'block';
+          });
+          document.getElementById('transfer_GFA')?.addEventListener('click', function() {
+            document.getElementById('gfeaTransferModal').style.display = 'none';
+          });
+        </script>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleEmrPanelSelectionPost = (req: Request, res: Response) => {
+    const { username, selectedForms, defaultForm } = req.body;
+    const forms = Array.isArray(selectedForms) ? selectedForms : selectedForms ? [selectedForms] : [];
+    formAssignments[username || 'default'] = forms;
+    mockEmrForms.forEach((f) => {
+      if (forms.includes(f.formId)) f.isAssigned = true;
+      if (f.formId === defaultForm) f.isDefault = true;
+    });
+    res.redirect(`${req.baseUrl || ''}/emrPanelSelection?assignSuccess=true&assignedUser=${encodeURIComponent(username || '')}`);
+  };
+
+  const handleEmrTransferPost = (req: Request, res: Response) => {
+    const { targetBranchId, username, defaultFormIndicator, selectedForms } = req.body;
+    const forms = Array.isArray(selectedForms) ? selectedForms : selectedForms ? [selectedForms] : ['EMR-001', 'EMR-002'];
+    formTransfers.push({
+      branch: targetBranchId || 'BR-001',
+      username: username || 'user',
+      forms,
+      defaultForm: defaultFormIndicator || 'S',
+    });
+    res.redirect(`${req.baseUrl || ''}/emrPanelSelection?transferSuccess=true`);
+  };
+
+  let eclaimSubmitCount = 0;
+  app.get('/api/test/eclaim-submits', (req: Request, res: Response) => {
+    res.json({ count: eclaimSubmitCount });
+  });
+  app.post('/api/test/eclaim-submits/reset', (req: Request, res: Response) => {
+    eclaimSubmitCount = 0;
+    res.json({ count: eclaimSubmitCount });
+  });
+
+  const handleAddEclaimUserGet = (req: Request, res: Response) => {
+    let tableUsers = clientUsers;
+    if (req.query.userScenario === 'similar') {
+      tableUsers = [
+        { username: 'resourestewo2', fullName: 'Dr. Resourestewo Two' },
+        { username: 'resourestewo_other', fullName: 'Dr. Resourestewo Other' },
+      ] as any;
+    } else if (req.query.userScenario === 'duplicate') {
+      tableUsers = [
+        { username: 'resourestewo', fullName: 'Dr. Resourestewo Primary' },
+        { username: 'resourestewo', fullName: 'Dr. Resourestewo Secondary' },
+      ] as any;
+    } else if (req.query.userScenario === 'exact_with_similar') {
+      tableUsers = [
+        { username: 'resourestewo2', fullName: 'Dr. Resourestewo Two' },
+        { username: 'resourestewo', fullName: 'Dr. Resourestewo Exact' },
+        { username: 'resourestewo_admin', fullName: 'Dr. Resourestewo Admin' },
+      ] as any;
+    } else if (req.query.userScenario === 'none') {
+      tableUsers = [
+        { username: 'completely_different_user', fullName: 'Dr. Different User' },
+      ] as any;
+    }
+
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>ADD-USER ECLAIM DETAILS</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
+          .card { background: #1e293b; padding: 2rem; border-radius: 0.75rem; border: 1px solid #334155; max-width: 600px; margin: 0 auto; }
+          .field { margin-bottom: 1rem; }
+          label { display: block; margin-bottom: 0.5rem; font-size: 0.875rem; color: #94a3b8; }
+          input, select { width: 100%; box-sizing: border-box; padding: 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #fff; }
+          button { width: 100%; padding: 0.75rem; background: #0284c7; color: #fff; border: none; border-radius: 0.375rem; font-weight: 600; cursor: pointer; }
+          .alert-success { background: #064e3b; color: #6ee7b7; padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2 class="screen-title">eClaim User Configuration</h2>
+          ${req.query.success ? `<div class="alert-success" id="successMsg">eClaim configuration saved successfully${req.query.savedUser ? ` for user ${req.query.savedUser}` : ''}.</div>` : ''}
+          ${req.query.missingForm === 'true' ? `
+            <!-- Intentionally missing form container to test preflight rejection -->
+            <div id="noFormContainer">No form rendered</div>
+          ` : `
+            <form method="POST" action="${req.path}" id="addUserEclaim" class="form-horizontal fv-form fv-form-bootstrap">
+              <!-- FormValidation hidden submit button -->
+              <button type="submit" class="fv-hidden-submit" style="display: none; width: 0px; height: 0px;"></button>
+              
+              ${req.query.missingFields === 'true' ? `
+                <!-- Missing required eClaim selectors -->
+                <div class="field">
+                  <input type="text" id="unrelatedInput" name="unrelated" value="test" />
+                </div>
+              ` : `
+                <div class="field">
+                  <label for="txtUserEclaimLink">eClaim Link *</label>
+                  <input type="text" id="txtUserEclaimLink" name="txtUserEclaimLink" value="link123" />
+                </div>
+                <div class="field">
+                  <label for="txtUserEclaimName">eClaim Name *</label>
+                  <input type="text" id="txtUserEclaimName" name="txtUserEclaimName" value="name123" />
+                </div>
+                <div class="field">
+                  <label for="txtUserEclaimPassword">eClaim Password *</label>
+                  <input type="password" id="txtUserEclaimPassword" name="txtUserEclaimPassword" value="pwd123" />
+                </div>
+                <div class="field">
+                  <label for="txtUserEclaimlicensNo">License Number *</label>
+                  <input type="text" id="txtUserEclaimlicensNo" name="txtUserEclaimlicensNo" value="LIC-77889" />
+                </div>
+                <div class="field">
+                  <label for="txtEclaimUserInsComSNo">Insurance Company</label>
+                  <select id="txtEclaimUserInsComSNo" name="txtEclaimUserInsComSNo">
+                    <option value="Tawuniya">Tawuniya</option>
+                    <option value="Bupa">Bupa</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="txtActualLicenseNo">Actual License No</label>
+                  <input type="text" id="txtActualLicenseNo" name="txtActualLicenseNo" value="ACT-999" />
+                </div>
+                <table class="table table-striped table table-hover table-responsive" id="tblEclaimUsers">
+                  <thead><tr><th>User</th><th>Select*</th></tr></thead>
+                  <tbody>
+                    ${tableUsers.map((u) => `
+                      <tr>
+                        <td>${u.fullName}</td>
+                        <td><input type="radio" name="txtEclaimUser" value="${u.username}" /></td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              `}
+
+              ${req.query.missingSubmit === 'true' ? `
+                <!-- Missing visible submit control -->
+              ` : `
+                <button type="button" id="showhide" data-val="1">Show</button>
+                <button type="button" id="showhide1" data-val="1">Show</button>
+                <button type="submit" id="sub_but" class="btn">ADD</button>
+              `}
+            </form>
+          `}
+        </div>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleAddEclaimUserPost = (req: Request, res: Response) => {
+    eclaimSubmitCount++;
+    const username = req.body.txtEclaimUser || req.body.username || req.body.txtUserEclaimName;
+    const resourceCode = req.body.resourceCode || 'RES-001';
+    const providerId = req.body.providerId || 'PRV-10023';
+    const facilityId = req.body.facilityId || 'FAC-001';
+    const licenseNo = req.body.txtUserEclaimlicensNo || req.body.licenseNo || 'LIC-77889';
+    eclaimUsers.push({ username, resourceCode, providerId, facilityId, licenseNo });
+    res.redirect(`${req.path}?success=true&savedUser=${encodeURIComponent(username)}`);
+  };
+
   // Register across various client paths
-  ['/resources', '/hmc/resources', '/MasterV9.4/resources', '/MasterV9.3/resources'].forEach((p) => {
+  ['/ResourceParent', '/MasterV9.3/ResourceParent', '/MasterV9.4/ResourceParent', '/resources', '/hmc/resources', '/MasterV9.4/resources', '/MasterV9.3/resources'].forEach((p) => {
     app.get(p, handleResourcesGet);
   });
 
@@ -1459,9 +2347,99 @@ export function createFixtureApp(): express.Express {
     app.post(p, handleAddResourceParentDetailsPost);
   });
 
+  ['/PostaddResourceParentDetails', '/MasterV9.3/PostaddResourceParentDetails', '/MasterV9.4/PostaddResourceParentDetails', '/hmc/PostaddResourceParentDetails'].forEach((p) => {
+    app.post(p, (req: Request, res: Response) => {
+      res.send('1');
+    });
+  });
+
   ['/addParentResourceUser', '/hmc/addParentResourceUser', '/MasterV9.4/addParentResourceUser', '/MasterV9.3/addParentResourceUser', '/resourceUserMapping', '/hmc/resourceUserMapping'].forEach((p) => {
     app.get(p, handleAddParentResourceUserGet);
     app.post(p, handleAddParentResourceUserPost);
+  });
+
+  ['/parentResourceUser', '/hmc/parentResourceUser', '/MasterV9.4/parentResourceUser', '/MasterV9.3/parentResourceUser'].forEach((p) => {
+    app.get(p, handleParentResourceUserGet);
+  });
+
+  ['/emrPanelSelection', '/MasterV9.3/emrPanelSelection', '/MasterV9.4/emrPanelSelection', '/hmc/emrPanelSelection', '/MasterV9.5/emrPanelSelection'].forEach((p) => {
+    app.get(p, handleEmrPanelSelectionGet);
+    app.post(`${p}/assign`, handleEmrPanelSelectionPost);
+    app.post(`${p}/transfer`, handleEmrTransferPost);
+    app.post(p, handleEmrPanelSelectionPost);
+  });
+
+  const handleGetBranchCode = (req: Request, res: Response) => {
+    res.json([
+      { id: 'GAG', value: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+      { id: 'BR-001', value: 'MAIN HOSPITAL CAMPUS' },
+    ]);
+  };
+
+  const handleGetUserforGFEATransferMulti = (req: Request, res: Response) => {
+    const term = ((req.query.term as string) || '').toLowerCase();
+    const filtered = clientUsers.filter((u) => !term || u.username.toLowerCase().includes(term) || u.fullName.toLowerCase().includes(term));
+    res.json(
+      filtered.map((u) => ({
+        category: u.username,
+        value: u.fullName,
+        label: u.fullName,
+      }))
+    );
+  };
+
+  ['/getBranchCode', '/MasterV9.3/getBranchCode'].forEach((p) => {
+    app.get(p, handleGetBranchCode);
+  });
+
+  ['/getUserforGFEATransferMulti', '/MasterV9.3/getUserforGFEATransferMulti'].forEach((p) => {
+    app.get(p, handleGetUserforGFEATransferMulti);
+  });
+
+  const handleGetUserBasedEMRPanelInsert = (req: Request, res: Response) => {
+    res.send('Form Assigned Successfully');
+  };
+
+  const handleSetEMRUserSSDB = (req: Request, res: Response) => {
+    res.send(`<table><tr><td>EMR-001</td><td>Assigned</td></tr><tr><td>EMR-002</td><td>Assigned</td></tr></table>`);
+  };
+
+  [
+    '/getUserBasedEMRPanelInsert',
+    '/MasterV9.3/getUserBasedEMRPanelInsert',
+    '/MasterV9.4/getUserBasedEMRPanelInsert',
+    '/EDSC/getUserBasedEMRPanelInsert',
+    '/hmc/getUserBasedEMRPanelInsert',
+  ].forEach((p) => {
+    app.post(p, handleGetUserBasedEMRPanelInsert);
+    app.get(p, handleGetUserBasedEMRPanelInsert);
+  });
+
+  [
+    '/setEMRUserSSDB',
+    '/MasterV9.3/setEMRUserSSDB',
+    '/MasterV9.4/setEMRUserSSDB',
+    '/EDSC/setEMRUserSSDB',
+    '/hmc/setEMRUserSSDB',
+  ].forEach((p) => {
+    app.get(p, handleSetEMRUserSSDB);
+    app.post(p, handleSetEMRUserSSDB);
+  });
+
+  [
+    '/addUserEclaim',
+    '/MasterV9.3/addUserEclaim',
+    '/MasterV9.4/addUserEclaim',
+    '/hmc/addUserEclaim',
+    '/addEclaimUser',
+    '/MasterV9.3/addEclaimUser',
+    '/MasterV9.4/addEclaimUser',
+    '/hmc/addEclaimUser',
+    '/eclaimUser',
+    '/MasterV9.3/eclaimUser',
+  ].forEach((p) => {
+    app.get(p, handleAddEclaimUserGet);
+    app.post(p, handleAddEclaimUserPost);
   });
 
   return app;

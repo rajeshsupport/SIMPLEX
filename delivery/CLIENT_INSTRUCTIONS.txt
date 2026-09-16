@@ -1,0 +1,29 @@
+======================================================================
+  SIMPLEX CENTRAL OPERATIONS CONSOLE - CLIENT USER GUIDE
+======================================================================
+
+Prerequisites:
+  - Install Docker Desktop on your machine:
+    Download from: https://www.docker.com/products/docker-desktop/
+
+How to Run the Application:
+  1. Make sure Docker Desktop is running.
+  2. Double-click "start.bat" (Windows) or run "./start.sh" (Mac/Linux).
+  3. Wait 10-15 seconds for services to initialize.
+  4. Open your web browser and go to:
+     http://localhost:5173
+
+Default Login Credentials:
+  - Username:  admin
+  - Password:  Rajesh@123
+
+How to Update When a New Version / Bug-Fix is Released:
+  1. Simply double-click "update.bat" (Windows) or run "./update.sh" (Mac/Linux).
+  2. The system will automatically download the latest update.
+  3. Your existing database data, clients, and users are 100% PRESERVED.
+     You do NOT need to re-enter anything!
+
+How to Stop the Application:
+  - Open terminal/command prompt in this folder and run:
+    docker compose down
+======================================================================

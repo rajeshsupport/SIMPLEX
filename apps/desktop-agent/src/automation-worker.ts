@@ -1,7 +1,9 @@
+import * as crypto from 'crypto';
 import { BrowserContext, Page } from 'playwright';
-import { BrowserProfileManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate } from '@hmc/automation';
-import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, normalizeClientBaseUrl } from '@hmc/shared';
+import { BrowserProfileManager, BrowserLifecycleManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate, SelectorResolver } from '@hmc/automation';
+import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, resolveClientEmrPanelUrl, resolveClientEclaimUserUrl, normalizeClientBaseUrl, resolveTaskModePolicy, isMutationTaskType } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
+
 
 function buildAbsoluteUrl(baseUrl: string, route?: string, fallbackRoute: string = '/'): string {
   return resolveClientRoute({ baseUrl, route, fallbackRoute });
@@ -36,49 +38,69 @@ export class AutomationWorker {
   private activeOperatorContexts: Map<string, BrowserContext> = new Map();
   // Single-flight task locks per client profile key
   private singleFlightTasks: Map<string, Promise<void>> = new Map();
+  private browserLifecycleManager = BrowserLifecycleManager.getInstance();
 
   constructor(private agentClient: AgentClient) {}
+
 
   public async executeTask(task: AgentTaskAssignment, onProgress?: (msg: string) => void): Promise<void> {
     const effectiveUserId = (task.payload?.userId || 'operator').replace(/[^a-zA-Z0-9_-]/g, '_');
     
-    // Determine strict profile namespace
-    const isHeadlessSync =
-      task.taskType === 'SYNC_CLIENT_USERS_HEADLESS' ||
-      task.taskType === 'SYNC_CLIENT_USERS' ||
-      task.taskType === 'SYNC_CLIENT_RESOURCES_HEADLESS' ||
-      task.taskType === 'SYNC_CLIENT_RESOURCES' ||
-      task.taskType === 'SYNC_RESOURCES';
-    const isInspectTask = task.taskType === 'INSPECT_CREATE_FORM_METADATA' || task.taskType === 'INSPECT_FORM_OPTIONS';
-    const isMutationTask = [
-      'CREATE_CLIENT_USER',
-      'CREATE_USER',
-      'EDIT_CLIENT_USER',
-      'EDIT_AND_UPDATE_CLIENT',
-      'SET_CLIENT_USER_STATUS',
-      'CHANGE_CLIENT_USER_STATUS',
-      'RESET_CLIENT_USER_PASSWORD',
-      'MAP_USER_ROLES',
-      'PROCESS_USER_FULL_WORKFLOW',
-      'CREATE_CLIENT_RESOURCE',
-      'CREATE_RESOURCE',
-      'EDIT_CLIENT_RESOURCE',
-      'SET_CLIENT_RESOURCE_STATUS',
-      'ACTIVATE_RESOURCE',
-      'DEACTIVATE_RESOURCE',
-      'MAP_RESOURCE_USER',
-      'PROCESS_RESOURCE_WORKFLOW',
-      'PROCESS_RESOURCE_ROW_WORKFLOW',
-      'IMPORT_CLIENT_RESOURCES',
-      'IMPORT_RESOURCES',
-      'IMPORT_RESOURCES_BATCH',
-    ].includes(task.taskType);
+    // Resolve immutable task mode policy — fail closed before browser launch on unknown types
+    let policy: any;
+    try {
+      policy = resolveTaskModePolicy(task.taskType, task.options);
+    } catch (policyErr: any) {
+      const errMsg = policyErr.message || `Unknown task type [${task.taskType}] rejected.`;
+      onProgress?.(`✗ Rejected task [${task.taskType}]: ${errMsg}`);
+      await this.agentClient.sendTelemetry(task.runId, {
+        status: 'FAILED',
+        errorMessage: errMsg,
+        totalDurationMs: 0,
+        resultData: {
+          success: false,
+          errorCode: 'UNCLASSIFIED_TASK_TYPE_BLOCKED',
+          errorMessage: errMsg,
+        },
+      });
+      return;
+    }
 
-    const namespace: 'interactive' | 'sync' | 'mutation' = isHeadlessSync || isInspectTask
-      ? 'sync'
-      : isMutationTask
-      ? 'mutation'
-      : 'interactive';
+    // Immutably derive effective execution mode, headedness, and leaveBrowserOpen exclusively from canonical policy
+    const effectiveIsHeaded = policy.isHeaded;
+    const effectiveExecutionMode = policy.executionMode;
+
+    const effectiveLeaveBrowserOpen =
+      policy.namespace === 'interactive'
+        ? task.options?.leaveBrowserOpen === true
+        : false;
+
+    if (policy.namespace === 'mutation') {
+      if (task.executionMode === 'HEADLESS_SYNC' || task.options?.isHeaded === false || process.env.HEADLESS === 'true') {
+        onProgress?.(`[POLICY ENFORCED] Task [${task.taskType}] is a mutation. Overriding requested headless mode to headed visible Chrome.`);
+      }
+    } else if (policy.namespace === 'read_only') {
+      if (task.executionMode === 'HEADED_MUTATION' || task.options?.isHeaded === true || process.env.HEADLESS === 'false') {
+        onProgress?.(`[POLICY ENFORCED] Task [${task.taskType}] is read-only. Enforcing headless mode.`);
+      }
+    }
+
+    const resolvedTask: AgentTaskAssignment = {
+      ...task,
+      executionMode: effectiveExecutionMode,
+      options: {
+        ...(task.options || {}),
+        isHeaded: effectiveIsHeaded,
+        leaveBrowserOpen: effectiveLeaveBrowserOpen,
+      },
+    };
+
+    const namespace: 'interactive' | 'sync' | 'mutation' =
+      policy.namespace === 'mutation'
+        ? 'mutation'
+        : policy.namespace === 'read_only'
+        ? 'sync'
+        : 'interactive';
 
     const profileKey = `${task.clientId}_${effectiveUserId}_${namespace}`;
 
@@ -89,7 +111,7 @@ export class AutomationWorker {
       return inFlight;
     }
 
-    const taskExecutionPromise = this.performTaskExecution(task, profileKey, effectiveUserId, namespace, onProgress);
+    const taskExecutionPromise = this.performTaskExecution(resolvedTask, profileKey, effectiveUserId, namespace, onProgress);
     this.singleFlightTasks.set(profileKey, taskExecutionPromise);
 
     try {
@@ -108,7 +130,14 @@ export class AutomationWorker {
   ): Promise<void> {
     const startTime = Date.now();
     const clientName = task.payload?.clientName || task.payload?.clientCode || 'Simplex Client';
-    const version = task.payload?.applicationVersion || task.workflowVersion || 'v9.4';
+    const version = SelectorResolver.normalizeVersionString(
+      task.payload?.applicationVersion || (typeof task.workflowVersion === 'object' ? (task.workflowVersion as any)?.applicableAppVersion : task.workflowVersion),
+      'v9.4'
+    );
+    const selectorProfile = SelectorResolver.normalizeSelectorProfile(
+      task.payload?.selectorProfileVersion || (typeof task.workflowVersion === 'object' ? (task.workflowVersion as any)?.applicableAppVersion : undefined),
+      'v9.3'
+    );
     let resolvedRoleUrl = 'UNKNOWN';
     try {
       resolvedRoleUrl = resolveClientRoleUrl({
@@ -121,25 +150,28 @@ export class AutomationWorker {
     }
 
     onProgress?.(`Starting task [${task.taskType}] for client [${task.clientId}] (namespace: ${namespace})...`);
-    onProgress?.(`[AUTOMATION TELEMETRY] Client ID: ${task.clientId} | Client Name: ${clientName} | Configured Base URL: ${task.clientBaseUrl} | Resolved addUserRole URL: ${resolvedRoleUrl} | Version: ${version} | Status: INITIALIZING`);
+    onProgress?.(`[AUTOMATION TELEMETRY] Client ID: ${task.clientId} | Client Name: ${clientName} | Configured Base URL: ${task.clientBaseUrl} | Resolved addUserRole URL: ${resolvedRoleUrl} | Version: ${version} | Selector Profile: ${selectorProfile} | Status: INITIALIZING`);
 
     // =========================================================================
     // 1. DEDICATED HEADLESS BACKGROUND SYNC HANDLER (namespace: 'sync')
     // =========================================================================
     if (task.taskType === 'SYNC_CLIENT_USERS_HEADLESS' || task.taskType === 'SYNC_CLIENT_USERS') {
-      let syncContext: BrowserContext | null = null;
+      let lease: any = null;
       try {
         onProgress?.(`[BACKGROUND SYNC] Launching isolated headless sync context for client [${task.clientId}]...`);
         
-        syncContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: false,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'sync',
+          isHeaded: false,
           slowMo: 0,
         });
 
-        const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
+        const syncPage = lease.primaryPage;
 
         const usersListUrl = resolveClientRoute({
           baseUrl: task.clientBaseUrl,
@@ -183,10 +215,110 @@ export class AutomationWorker {
 
         if (syncRes.success) {
           onProgress?.(`✓ [BACKGROUND SYNC COMPLETED] Scraped ${syncRes.totalScraped} users in ${totalDurationMs}ms.`);
+
+          // Byte-aware chunking: maximum 100 records per batch and strictly <= 400 KB (409,600 bytes) UTF-8 payload target
+          const scrapedUsers = syncRes.users || [];
+          const batchId = crypto.randomUUID();
+          const maxRecordsPerBatch = 100;
+          const maxPayloadBytes = 400 * 1024; // 400 KB safe target (well within 500 KB parser limit)
+
+          const batches: (typeof scrapedUsers)[] = [];
+          let currentBatch: typeof scrapedUsers = [];
+
+          for (const user of scrapedUsers) {
+            // Check trial batch byte size if adding this user
+            const trialBatch = [...currentBatch, user];
+            const trialDto = {
+              batchId,
+              runId: task.runId,
+              clientId: task.clientId,
+              sequenceNumber: batches.length + 1,
+              totalBatches: batches.length + 1,
+              isFinalBatch: false,
+              idempotencyKey: `${batchId}-${batches.length + 1}`,
+              users: trialBatch,
+            };
+            const trialBytes = Buffer.byteLength(JSON.stringify(trialDto), 'utf8');
+
+            if (currentBatch.length >= maxRecordsPerBatch || (currentBatch.length > 0 && trialBytes > maxPayloadBytes)) {
+              // Flush current batch and start new batch
+              batches.push(currentBatch);
+              currentBatch = [user];
+            } else {
+              currentBatch.push(user);
+            }
+          }
+          if (currentBatch.length > 0) {
+            batches.push(currentBatch);
+          }
+          if (batches.length === 0) {
+            batches.push([]);
+          }
+
+          // Verification & re-split pass: ensure every assembled batch fits <= 400 KB with full wrapper metadata
+          let verifiedBatches: (typeof scrapedUsers)[] = [];
+          const queue = [...batches];
+          while (queue.length > 0) {
+            const candidate = queue.shift()!;
+            if (candidate.length <= 1) {
+              verifiedBatches.push(candidate);
+              continue;
+            }
+            const candidateDto = {
+              batchId,
+              runId: task.runId,
+              clientId: task.clientId,
+              sequenceNumber: verifiedBatches.length + 1,
+              totalBatches: verifiedBatches.length + queue.length + 1,
+              isFinalBatch: queue.length === 0,
+              idempotencyKey: `${batchId}-${verifiedBatches.length + 1}`,
+              users: candidate,
+            };
+            const candidateBytes = Buffer.byteLength(JSON.stringify(candidateDto), 'utf8');
+            if (candidateBytes <= maxPayloadBytes) {
+              verifiedBatches.push(candidate);
+            } else {
+              // Exceeds 400 KB target: split candidate batch into halves and re-check
+              const mid = Math.floor(candidate.length / 2);
+              queue.unshift(candidate.slice(mid));
+              queue.unshift(candidate.slice(0, mid));
+            }
+          }
+
+          const totalBatches = verifiedBatches.length;
+          for (let i = 0; i < totalBatches; i++) {
+            const chunk = verifiedBatches[i];
+            const sequenceNumber = i + 1;
+            const isFinalBatch = sequenceNumber === totalBatches;
+            const finalDto = {
+              batchId,
+              runId: task.runId,
+              clientId: task.clientId,
+              sequenceNumber,
+              totalBatches,
+              isFinalBatch,
+              idempotencyKey: `${batchId}-${sequenceNumber}`,
+              users: chunk,
+            };
+
+            // Recalculate Buffer.byteLength(JSON.stringify(finalDto), 'utf8') immediately before transmission
+            const finalBytes = Buffer.byteLength(JSON.stringify(finalDto), 'utf8');
+            onProgress?.(
+              `[SYNC CHUNK] Dispatching byte-aware batch ${sequenceNumber}/${totalBatches} (${chunk.length} users, ${finalBytes} bytes)...`
+            );
+            await this.agentClient.sendSyncBatch(task.runId, finalDto);
+          }
+
+          // Send lightweight completion telemetry (without oversized raw users array)
           await this.agentClient.sendTelemetry(task.runId, {
             status: 'COMPLETED',
             totalDurationMs,
-            resultData: syncRes,
+            resultData: {
+              success: true,
+              totalScraped: syncRes.totalScraped,
+              stage: 'COMPLETED',
+              message: `Sync completed: ${syncRes.totalScraped} users reconciled across ${totalBatches} bounded batch(es).`,
+            },
           });
         } else {
           const safeError = sanitizeErrorMessage(syncRes.errorMessage || 'Background user synchronization failed');
@@ -213,10 +345,104 @@ export class AutomationWorker {
           },
         });
       } finally {
-        if (syncContext) {
+        if (lease) {
           try {
-            await syncContext.close();
+            await lease.close({ reason: 'SYNC_COMPLETED' });
             onProgress?.('[BACKGROUND SYNC] Headless sync context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // =========================================================================
+    // 1.1 DEDICATED HEADLESS REFRESH CLIENT USER ROLES HANDLER (namespace: 'sync')
+    // =========================================================================
+    if (task.taskType === 'REFRESH_CLIENT_USER_ROLES') {
+      let lease: any = null;
+      try {
+        onProgress?.(`[ROLE REFRESH] Launching isolated headless role refresh context for client [${task.clientId}]...`);
+
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: 'AUTOMATION_OWNED',
+          namespace: 'sync',
+          isHeaded: false,
+          slowMo: 0,
+        });
+
+        const refreshPage = lease.primaryPage;
+        const roleUrl = resolveClientRoleUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.clientAppPath || task.payload?.applicationPath,
+          userRoleRoute: task.payload?.userRoleRoute,
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: task.clientAppPath || task.payload?.applicationPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+
+        const username = task.payload?.username || (task.payload?.payload && task.payload.payload.username);
+        const remoteUserId = task.payload?.remoteUserId || (task.payload?.payload && task.payload.payload.remoteUserId);
+
+        onProgress?.(`[ROLE REFRESH] Reading assigned roles for user '${username}' on ${roleUrl}...`);
+
+        const refreshRes = await UserManagementExecutor.readUserAssignedRoles(refreshPage, {
+          roleUrl,
+          username,
+          remoteUserId,
+          loginUrl,
+          credentials: (task.credentials?.password || task.payload?.credentials?.password)
+            ? { username: (task.credentials?.username || task.payload?.credentials?.username), password: (task.credentials?.password || task.payload?.credentials?.password) }
+            : undefined,
+          onProgress: (msg: string) => {
+            onProgress?.(`[ROLE REFRESH PROGRESS] ${msg}`);
+          },
+        });
+
+        const totalDurationMs = Date.now() - startTime;
+        if (refreshRes.success) {
+          onProgress?.(`[ROLE REFRESH SUCCESS] Discovered ${refreshRes.roles.length} roles for '${username}': ${refreshRes.roles.join(', ')}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: refreshRes,
+          });
+        } else {
+          const safeError = sanitizeErrorMessage(refreshRes.errorMessage || 'Role refresh failed on remote portal');
+          onProgress?.(`[ROLE REFRESH FAILED] ${safeError}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: safeError,
+            totalDurationMs,
+            resultData: refreshRes,
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        const safeMsg = sanitizeErrorMessage(err.message || 'Background role refresh runtime failure');
+        onProgress?.(`[FATAL ROLE REFRESH ERROR] ${safeMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs,
+          resultData: {
+            success: false,
+            roles: [],
+            errorCode: 'ROLE_REFRESH_RUNTIME_ERROR',
+            errorMessage: safeMsg,
+          },
+        });
+      } finally {
+        if (lease) {
+          try {
+            await lease.close({ reason: 'SYNC_COMPLETED' });
+            onProgress?.('[ROLE REFRESH] Headless role refresh context cleanly released.');
           } catch {}
         }
       }
@@ -246,23 +472,32 @@ export class AutomationWorker {
         return;
       }
 
-      let syncContext: BrowserContext | null = null;
+      let lease: any = null;
       try {
         onProgress?.(`[BACKGROUND SYNC] Launching isolated headless resource sync context for client [${task.clientId}]...`);
-        syncContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: false,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'sync',
+          isHeaded: false,
           slowMo: 0,
         });
 
-        const syncPage = syncContext.pages()[0] || (await syncContext.newPage());
+        const syncPage = lease.primaryPage;
 
-        const resourcesUrl = resolveClientResourceUrl({
+        const directoryRoute =
+          task.payload?.resourceDirectoryRoute ||
+          (task as any).resourceDirectoryRoute ||
+          '/ResourceParent';
+
+        const resourcesUrl = resolveClientRoute({
           baseUrl: task.clientBaseUrl,
-          applicationPath: task.payload?.applicationPath,
-          quickResourceRoute: task.payload?.quickResourceRoute || '/resources',
+          applicationPath: task.payload?.applicationPath || task.clientAppPath,
+          route: directoryRoute,
+          fallbackRoute: '/ResourceParent',
         });
         const loginUrl = resolveClientRoute({
           baseUrl: task.clientBaseUrl,
@@ -313,9 +548,9 @@ export class AutomationWorker {
           resultData: { success: false, errorCode: 'CLIENT_RESOURCE_SYNC_FAILED', errorMessage: safeMsg },
         });
       } finally {
-        if (syncContext) {
+        if (lease) {
           try {
-            await syncContext.close();
+            await lease.close({ reason: 'SYNC_COMPLETED' });
           } catch {}
         }
       }
@@ -326,18 +561,21 @@ export class AutomationWorker {
     // 1.5 DEDICATED HEADLESS LIVE FORM OPTIONS INSPECTOR (namespace: 'sync')
     // =========================================================================
     if (task.taskType === 'INSPECT_CREATE_FORM_METADATA' || task.taskType === 'INSPECT_FORM_OPTIONS') {
-      let inspectContext: BrowserContext | null = null;
+      let lease: any = null;
       try {
         onProgress?.(`[INSPECT OPTIONS] Launching isolated headless browser context for client [${task.clientId}]...`);
-        inspectContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: false,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'sync',
+          isHeaded: false,
           slowMo: 0,
         });
 
-        const inspectPage = inspectContext.pages()[0] || (await inspectContext.newPage());
+        const inspectPage = lease.primaryPage;
         const appPath = task.clientAppPath || task.payload?.applicationPath;
         const addUsersUrl = resolveClientRoute({
           baseUrl: task.clientBaseUrl,
@@ -397,9 +635,9 @@ export class AutomationWorker {
           },
         });
       } finally {
-        if (inspectContext) {
+        if (lease) {
           try {
-            await inspectContext.close();
+            await lease.close({ reason: 'INSPECT_COMPLETED' });
             onProgress?.('[INSPECT OPTIONS] Headless inspect context cleanly released.');
           } catch {}
         }
@@ -407,37 +645,11 @@ export class AutomationWorker {
       return;
     }
 
+
     // =========================================================================
     // 2. REMOTE CLIENT MUTATION WORKFLOWS (VISIBLE CHROME - namespace: 'mutation')
     // =========================================================================
-    const isMutationTask = [
-      'CREATE_CLIENT_USER',
-      'CREATE_USER',
-      'EDIT_CLIENT_USER',
-      'EDIT_AND_UPDATE_CLIENT',
-      'SET_CLIENT_USER_STATUS',
-      'CHANGE_CLIENT_USER_STATUS',
-      'RESET_CLIENT_USER_PASSWORD',
-      'MAP_USER_ROLES',
-      'PROCESS_USER_FULL_WORKFLOW',
-    ].includes(task.taskType);
-
-    if (isMutationTask) {
-      if (task.executionMode === 'HEADLESS_SYNC' || task.options?.isHeaded === false) {
-        onProgress?.(`✗ Rejected task [${task.taskType}]: MUTATION_BROWSER_MODE_MISMATCH`);
-        await this.agentClient.sendTelemetry(task.runId, {
-          status: 'FAILED',
-          errorMessage: 'Mutation tasks cannot run in headless mode. Headed Chrome is required.',
-          totalDurationMs: Date.now() - startTime,
-          resultData: {
-            success: false,
-            errorCode: 'MUTATION_BROWSER_MODE_MISMATCH',
-            errorMessage: 'Mutation tasks cannot run in headless mode. Headed Chrome is required.',
-          },
-        });
-        return;
-      }
-
+    if (isMutationTaskType(task.taskType)) {
       await this.executeMutationWithLifecycle(task, effectiveUserId, startTime, onProgress);
       return;
     }
@@ -476,26 +688,30 @@ export class AutomationWorker {
     const maxAttempts = 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      let mutationContext: BrowserContext | null = null;
+      let lease: any = null;
       let contextClosed = false;
 
       try {
         onProgress?.(`Launching isolated visible Chrome mutation context (attempt ${attempt}/${maxAttempts})...`);
         
-        mutationContext = await BrowserProfileManager.launchPersistentContext({
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
           clientId: task.clientId,
           userId: effectiveUserId,
-          isHeaded: true,
+          ownerType: 'AUTOMATION_OWNED',
           namespace: 'mutation', // Isolated worker-owned mutation profile
+          isHeaded: true,
           slowMo: 50,
         });
 
-        mutationContext.on('close', () => {
+        lease.context.on('close', () => {
           contextClosed = true;
         });
 
-        const mutationPage = mutationContext.pages()[0] || (await mutationContext.newPage());
+        const mutationPage = lease.primaryPage;
         await mutationPage.bringToFront().catch(() => {});
+
 
         mutationPhase = 'PRE_ACTION';
 
@@ -621,7 +837,14 @@ export class AutomationWorker {
               status: 'FAILED',
               errorMessage: safeError,
               totalDurationMs,
-              resultData: { ...serializableResult, errorMessage: safeError },
+              resultData: {
+                ...serializableResult,
+                overallStatus: (statusRes as any).overallStatus || 'PARTIAL_FAILED',
+                statusChangeState: (statusRes as any).statusChangeState || 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+                retryStartingPoint: (statusRes as any).retryStartingPoint || 'STATUS_VERIFICATION',
+                errorCode: statusRes.errorCode || 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+                errorMessage: safeError,
+              },
             });
           }
           return;
@@ -629,13 +852,6 @@ export class AutomationWorker {
 
         // 4. Reset User Password
         if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
-          const addUsersUrl = resolveClientRoute({
-            baseUrl: task.clientBaseUrl,
-            applicationPath: appPath,
-            route: task.payload?.addUsersRoute || task.addUsersRoute,
-            fallbackRoute: '/addUsers',
-          });
-
           const reportProgress = (msg: string) => {
             onProgress?.(msg);
             this.agentClient
@@ -646,16 +862,18 @@ export class AutomationWorker {
               .catch(() => {});
           };
 
-          reportProgress(`Logging in to selected Simplex client…`);
-          reportProgress(`Capturing client default password from Add User screen…`);
-          reportProgress(`Opening Users screen…`);
-          reportProgress(`Searching for '${task.payload.username}'…`);
-          reportProgress(`Resetting password for '${task.payload.username}' in Simplex client…`);
+          const addUsersUrl = resolveClientRoute({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            route: task.payload?.addUsersRoute || task.addUsersRoute,
+            fallbackRoute: '/addUsers',
+          });
 
           const resetRes = await UserManagementExecutor.resetUserPassword(mutationPage, {
             usersListUrl,
             addUsersUrl,
             username: task.payload.username,
+            remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
             loginUrl,
             credentials: task.credentials,
             onProgress: reportProgress,
@@ -749,15 +967,22 @@ export class AutomationWorker {
         }
 
         // 6. Map User Roles Directly
-        if (task.taskType === 'MAP_USER_ROLES') {
+        if (task.taskType === 'MAP_USER_ROLES' || task.taskType === 'MAP_CLIENT_USER_ROLES') {
           const payloadData = task.payload?.payload || task.payload;
-          const roleUrl = resolveClientRoleUrl({
-            baseUrl: task.clientBaseUrl,
-            applicationPath: appPath,
-            userRoleRoute: task.payload?.userRoleRoute,
-          });
+          const roleUrl =
+            payloadData?.roleUrl ||
+            task.payload?.roleUrl ||
+            (task as any).roleUrl ||
+            resolveClientRoleUrl({
+              baseUrl: task.clientBaseUrl,
+              applicationPath: appPath,
+              userRoleRoute: payloadData?.userRoleRoute || task.payload?.userRoleRoute,
+            });
           const username = payloadData?.username || task.payload?.username;
-          const requestedRoles = payloadData?.roles || (payloadData?.role ? (Array.isArray(payloadData.role) ? payloadData.role : payloadData.role.split(',').map((s: string) => s.trim()).filter(Boolean)) : []);
+          const requestedRoles = payloadData?.resultingRoles || payloadData?.roles || (payloadData?.role ? (Array.isArray(payloadData.role) ? payloadData.role : payloadData.role.split(',').map((s: string) => s.trim()).filter(Boolean)) : []);
+          const existingRoles = payloadData?.existingRoles || [];
+          const rolesToAdd = payloadData?.rolesToAdd || [];
+          const rolesToRemove = payloadData?.rolesToRemove || [];
 
           onProgress?.(`Starting role mapping for '${username}'…`);
 
@@ -766,8 +991,12 @@ export class AutomationWorker {
             username,
             fullName: payloadData?.fullName,
             firstName: payloadData?.firstName,
-            remoteUserId: payloadData?.remoteUserId,
+            remoteUserId: payloadData?.remoteUserId || task.remoteUserId,
             requestedRoles,
+            existingRoles,
+            rolesToAdd,
+            rolesToRemove,
+            allowDeactivation: payloadData?.allowDeactivation ?? (rolesToRemove && rolesToRemove.length > 0 ? true : false),
             loginUrl,
             credentials: task.credentials,
             onProgress: (comment: string) => {
@@ -811,14 +1040,83 @@ export class AutomationWorker {
             quickResourceRoute: task.payload?.quickResourceRoute || '/addResourceParentDetails',
           });
 
-          onProgress?.(`Creating resource [${resourceDto.resourceCode}] - ${resourceDto.resourceName}...`);
+          const step1Start = new Date().toISOString();
+          onProgress?.(`[STAGE: LOGIN] Authenticating for client [${task.clientId}]...`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'RUNNING',
+            step: {
+              stepIndex: 1,
+              stepName: 'Login & Session Establishment',
+              status: 'RUNNING',
+              startedAt: step1Start,
+            },
+          }).catch(() => {});
 
+          onProgress?.(`[STAGE: OPEN_QUICK_RESOURCE] Navigating to ${addResourceUrl}...`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'RUNNING',
+            step: {
+              stepIndex: 1,
+              stepName: 'Login & Session Establishment',
+              status: 'SUCCESS',
+              startedAt: step1Start,
+              completedAt: new Date().toISOString(),
+            },
+          }).catch(() => {});
+
+          const step2Start = new Date().toISOString();
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'RUNNING',
+            step: {
+              stepIndex: 2,
+              stepName: 'Open Quick Resource (/addResourceParentDetails)',
+              status: 'RUNNING',
+              startedAt: step2Start,
+            },
+          }).catch(() => {});
+
+          let currentStepStart = new Date().toISOString();
           const createRes = await ResourceManagementExecutor.createResource(mutationPage, {
             addResourceUrl,
             resource: resourceDto,
             loginUrl,
             credentials: task.credentials,
-            onProgress: (msg: string) => onProgress?.(msg),
+            allowReuseIfExisting: task.payload?.allowReuseIfExisting ?? task.payload?.reconcileOnly ?? true,
+            onProgress: (msg: string) => {
+              onProgress?.(msg);
+              if (msg.includes('[STEP 1 NAVIGATION]')) {
+                this.agentClient.sendTelemetry(task.runId, {
+                  status: 'RUNNING',
+                  step: { stepIndex: 2, stepName: 'Open Quick Resource (/addResourceParentDetails)', status: 'SUCCESS', startedAt: step2Start, completedAt: new Date().toISOString() },
+                }).catch(() => {});
+              } else if (msg.includes('Filling resource form')) {
+                currentStepStart = new Date().toISOString();
+                this.agentClient.sendTelemetry(task.runId, {
+                  status: 'RUNNING',
+                  step: { stepIndex: 3, stepName: 'Fill Resource Details', status: 'RUNNING', startedAt: currentStepStart },
+                }).catch(() => {});
+              } else if (msg.includes('[STEP 1 SUBMIT]')) {
+                this.agentClient.sendTelemetry(task.runId, {
+                  status: 'RUNNING',
+                  step: { stepIndex: 3, stepName: 'Fill Resource Details', status: 'SUCCESS', startedAt: currentStepStart, completedAt: new Date().toISOString() },
+                }).catch(() => {});
+                currentStepStart = new Date().toISOString();
+                this.agentClient.sendTelemetry(task.runId, {
+                  status: 'RUNNING',
+                  step: { stepIndex: 4, stepName: 'Submit Visible ADD Control Once', status: 'RUNNING', startedAt: currentStepStart },
+                }).catch(() => {});
+              } else if (msg.includes('[STEP 1 VERIFY]')) {
+                this.agentClient.sendTelemetry(task.runId, {
+                  status: 'RUNNING',
+                  step: { stepIndex: 4, stepName: 'Submit Visible ADD Control Once', status: 'SUCCESS', startedAt: currentStepStart, completedAt: new Date().toISOString() },
+                }).catch(() => {});
+                currentStepStart = new Date().toISOString();
+                this.agentClient.sendTelemetry(task.runId, {
+                  status: 'RUNNING',
+                  step: { stepIndex: 5, stepName: 'Verify Remote Resource on /ResourceParent', status: 'RUNNING', startedAt: currentStepStart },
+                }).catch(() => {});
+              }
+            },
           });
 
           const serializableResult = JSON.parse(JSON.stringify(createRes));
@@ -827,9 +1125,27 @@ export class AutomationWorker {
           if (createRes.success) {
             onProgress?.(`✓ Created and verified resource '${createRes.resourceCode}' on client.`);
             await this.agentClient.sendTelemetry(task.runId, {
+              status: 'RUNNING',
+              step: {
+                stepIndex: 5,
+                stepName: 'Verify Remote Resource on /ResourceParent',
+                status: 'SUCCESS',
+                startedAt: currentStepStart,
+                completedAt: new Date().toISOString(),
+              },
+            }).catch(() => {});
+
+            await this.agentClient.sendTelemetry(task.runId, {
               status: 'COMPLETED',
               totalDurationMs,
               resultData: serializableResult,
+              step: {
+                stepIndex: 6,
+                stepName: 'Update Central Resource Snapshot',
+                status: 'SUCCESS',
+                startedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+              },
             });
           } else {
             const safeError = sanitizeErrorMessage(createRes.errorMessage || createRes.message || 'Resource creation failed');
@@ -839,6 +1155,14 @@ export class AutomationWorker {
               errorMessage: safeError,
               totalDurationMs,
               resultData: { ...serializableResult, errorMessage: safeError },
+              step: {
+                stepIndex: 5,
+                stepName: 'Verify Remote Resource on /ResourceParent',
+                status: 'FAILED',
+                startedAt: currentStepStart,
+                errorMessage: safeError,
+                completedAt: new Date().toISOString(),
+              },
             });
           }
           return;
@@ -899,18 +1223,19 @@ export class AutomationWorker {
 
         // 9. Map Resource User
         if (task.taskType === 'MAP_RESOURCE_USER') {
-          const { resourceCode, username } = task.payload;
+          const { resourceCode, username, resourceName } = task.payload;
           const mappingUrl = resolveClientResourceUserMappingUrl({
             baseUrl: task.clientBaseUrl,
             applicationPath: appPath,
             resourceUserRoute: task.payload?.resourceUserRoute || '/addParentResourceUser',
           });
 
-          onProgress?.(`Mapping resource [${resourceCode}] to user [${username}]...`);
+          onProgress?.(`Mapping resource [${resourceCode}${resourceName ? ` / ${resourceName}` : ''}] to user [${username}]...`);
 
           const mapRes = await ResourceManagementExecutor.mapResourceUser(mutationPage, {
             mappingUrl,
             resourceCode,
+            resourceName,
             username,
             loginUrl,
             credentials: task.credentials,
@@ -964,6 +1289,16 @@ export class AutomationWorker {
             applicationPath: appPath,
             resourceUserRoute: task.payload?.resourceUserRoute || '/addParentResourceUser',
           });
+          const emrPanelRoute = resolveClientEmrPanelUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            emrPanelRoute: task.payload?.emrPanelRoute || '/emrPanelSelection',
+          });
+          const eclaimUserRoute = resolveClientEclaimUserUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            eclaimUserRoute: task.payload?.eclaimUserRoute || '/addUserEclaim',
+          });
 
           onProgress?.(`Starting resource full workflow for '${payloadData.resourceName}'…`);
 
@@ -974,15 +1309,27 @@ export class AutomationWorker {
               addUsersRoute,
               addUserRoleRoute,
               resourceUserRoute,
+              emrPanelRoute,
+              eclaimUserRoute,
               loginUrl,
             },
             credentials: task.credentials,
             startStage: task.payload?.startStage,
             existingState: task.payload?.existingState,
+            emrForms: task.payload?.emrForms,
+            transferConfig: task.payload?.transferConfig,
+            eclaimConfig: task.payload?.eclaimConfig,
             onEphemeralPassword: async (evt) => {
               if (task.payload?.ephemeralDeliveryCallbackUrl) {
                 // optional webhook callback
               }
+            },
+            onStepOutcome: (stepOutcome) => {
+              onProgress?.(`[${stepOutcome.operation}] ${stepOutcome.status}: ${stepOutcome.name}`);
+              this.agentClient.sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { stepOutcome },
+              }).catch(() => {});
             },
             onProgress: (stage: string, message: string) => {
               onProgress?.(`[${stage}] ${message}`);
@@ -1026,8 +1373,8 @@ export class AutomationWorker {
         if (isTargetClosed) {
           if (mutationPhase === 'PRE_ACTION' && attempt < maxAttempts) {
             onProgress?.(`! Browser context closed before mutation dispatch. Retrying mutation (attempt ${attempt + 1}/${maxAttempts})...`);
-            if (mutationContext) {
-              try { await mutationContext.close(); } catch {}
+            if (lease) {
+              try { await lease.close({ reason: 'RETRY_PRE_ACTION' }); } catch {}
             }
             await new Promise((r) => setTimeout(r, 600));
             continue; // Retry once
@@ -1052,11 +1399,14 @@ export class AutomationWorker {
               onProgress?.(`✗ Remote mutation outcome unknown after browser closure.`);
               await this.agentClient.sendTelemetry(task.runId, {
                 status: 'FAILED',
-                errorMessage: 'REMOTE_OUTCOME_UNKNOWN: Browser closed after action was sent. Mutation could not be verified in remote snapshot.',
+                errorMessage: 'REMOTE_STATUS_VERIFICATION_UNKNOWN: Browser closed after action was sent. Mutation could not be verified in remote snapshot.',
                 totalDurationMs,
                 resultData: {
                   success: false,
-                  errorCode: 'REMOTE_OUTCOME_UNKNOWN',
+                  overallStatus: 'PARTIAL_FAILED',
+                  statusChangeState: 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
+                  errorCode: 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
+                  retryStartingPoint: 'STATUS_VERIFICATION',
                   errorMessage: 'Browser closed after action was sent. Mutation could not be verified in remote snapshot.',
                 },
               });
@@ -1094,16 +1444,17 @@ export class AutomationWorker {
         });
         return;
       } finally {
-        if (mutationContext) {
+        if (lease) {
           try {
             await new Promise((r) => setTimeout(r, 400));
-            await mutationContext.close();
+            await lease.close({ reason: 'MUTATION_FINISHED' });
             onProgress?.(`Visible Chrome mutation window closed safely.`);
           } catch {}
         }
       }
     }
   }
+
 
   /**
    * Performs read-only remote reconciliation using an isolated headless sync context.
@@ -1114,15 +1465,18 @@ export class AutomationWorker {
     usersListUrl: string,
     loginUrl: string
   ): Promise<{ reconciled: boolean; result?: any }> {
-    let syncContext: BrowserContext | null = null;
+    let lease: any = null;
     try {
-      syncContext = await BrowserProfileManager.launchPersistentContext({
+      lease = await this.browserLifecycleManager.acquireLease({
+        taskId: 'RECONCILIATION',
+        runId: `${task.runId}_reconcile`,
         clientId: task.clientId,
         userId: effectiveUserId,
-        isHeaded: false,
+        ownerType: 'AUTOMATION_OWNED',
         namespace: 'sync',
+        isHeaded: false,
       });
-      const page = syncContext.pages()[0] || (await syncContext.newPage());
+      const page = lease.primaryPage;
       const syncRes = await UserManagementExecutor.syncUsersHeadless(page, {
         usersUrl: usersListUrl,
         loginUrl,
@@ -1167,11 +1521,12 @@ export class AutomationWorker {
     } catch {
       // Reconciliation scrape failed
     } finally {
-      if (syncContext) {
-        try { await syncContext.close(); } catch {}
+      if (lease) {
+        try { await lease.close({ reason: 'RECONCILIATION_COMPLETED' }); } catch {}
       }
     }
     return { reconciled: false };
+
   }
 
   /**
@@ -1186,70 +1541,63 @@ export class AutomationWorker {
     const profileKey = `${task.clientId}_${effectiveUserId}`;
     let context: BrowserContext | null = null;
     let page: Page | null = null;
+    let isOperatorOwned = false;
+    let lease: any = null;
 
     try {
-      // Check if an active operator context already exists for this client
-      const existingContext = this.activeOperatorContexts.get(profileKey);
+      // Check if an active pre-existing operator context already exists for this client
+      let existingContext = this.activeOperatorContexts.get(profileKey);
       if (existingContext) {
         try {
-          const pages = existingContext.pages();
-          if (pages.length > 0) {
-            context = existingContext;
-            page = pages[0];
-            await page.bringToFront().catch(() => {});
-            onProgress?.(`Existing client window focused.`);
-          } else {
-            context = existingContext;
-            page = await existingContext.newPage();
-            await page.bringToFront().catch(() => {});
-            onProgress?.(`Client window reopened and authenticated.`);
-          }
+          existingContext.pages();
         } catch {
           try { await existingContext.close(); } catch {}
           this.activeOperatorContexts.delete(profileKey);
-          context = null;
-          page = null;
+          existingContext = undefined;
         }
       }
 
-      // If no valid context is open, launch persistent interactive context
-      if (!context) {
-        onProgress?.(`Opening selected client…`);
-        try {
-          context = await BrowserProfileManager.launchPersistentContext({
-            clientId: task.clientId,
-            userId: effectiveUserId,
-            isHeaded: task.options?.isHeaded ?? true,
-            namespace: 'interactive',
-            slowMo: 0,
-          });
-        } catch (err: any) {
-          const isLockErr = err.message && (err.message.includes('lock') || err.message.includes('EBUSY') || err.message.includes('Process singleton'));
-          const errCode = isLockErr ? 'PROFILE_ALREADY_IN_USE' : 'CLIENT_WINDOW_LAUNCH_FAILED';
-          const safeMsg = sanitizeErrorMessage(err.message || errCode);
-          onProgress?.(`✗ Window launch failed: ${errCode}`);
-          await this.agentClient.sendTelemetry(task.runId, {
-            status: 'FAILED',
-            errorMessage: safeMsg,
-            totalDurationMs: Date.now() - startTime,
-            resultData: { success: false, errorCode: errCode, errorMessage: safeMsg },
-          });
-          return;
-        }
+      // Pre-existing operator browser only = OPERATOR_OWNED, or explicit operator session with leaveBrowserOpen === true.
+      // Every browser launched by User/Resource automation, headed or headless = AUTOMATION_OWNED.
+      const isExplicitOperatorSession = (task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION' || task.taskType === 'INTERACTIVE_LOGIN') && task.options?.leaveBrowserOpen === true;
+      isOperatorOwned = Boolean(existingContext) || isExplicitOperatorSession;
 
+      try {
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: isOperatorOwned ? 'OPERATOR_OWNED' : 'AUTOMATION_OWNED',
+          namespace: 'interactive',
+          isHeaded: task.options?.isHeaded ?? true,
+          slowMo: 0,
+          existingContext,
+        });
+      } catch (err: any) {
+        const isLockErr = err.message && (err.message.includes('lock') || err.message.includes('EBUSY') || err.message.includes('Process singleton'));
+        const errCode = isLockErr ? 'PROFILE_ALREADY_IN_USE' : 'CLIENT_WINDOW_LAUNCH_FAILED';
+        const safeMsg = sanitizeErrorMessage(err.message || errCode);
+        onProgress?.(`✗ Window launch failed: ${errCode}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs: Date.now() - startTime,
+          resultData: { success: false, errorCode: errCode, errorMessage: safeMsg },
+        });
+        return;
+      }
+
+      context = lease.context;
+      page = lease.primaryPage;
+      if (!context || !page) return;
+      await page.bringToFront().catch(() => {});
+
+      if (isOperatorOwned) {
         this.activeOperatorContexts.set(profileKey, context);
         context.on('close', () => {
           this.activeOperatorContexts.delete(profileKey);
         });
-      }
-
-      if (!context) {
-        throw new Error('CLIENT_WINDOW_LAUNCH_FAILED');
-      }
-
-      if (!page) {
-        page = context.pages()[0] || (await context.newPage());
-        await page.bringToFront().catch(() => {});
       }
 
       const resolvedLoginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
@@ -1304,8 +1652,8 @@ export class AutomationWorker {
           resultData: { success: true, status: 'REAUTHENTICATED' },
         });
 
-        if (task.options?.leaveBrowserOpen === false) {
-          await context.close();
+        if (!isOperatorOwned) {
+          await lease.close({ reason: 'COMPLETED' });
           this.activeOperatorContexts.delete(profileKey);
         }
       } else if (result.status === 'REQUIRES_MANUAL_INTERVENTION') {
@@ -1333,7 +1681,12 @@ export class AutomationWorker {
           totalDurationMs,
           resultData: { success: false, errorCode: mappedCode, errorMessage: safeError },
         });
+        if (!isOperatorOwned) {
+          await lease.close({ reason: 'FAILED' });
+          this.activeOperatorContexts.delete(profileKey);
+        }
       }
+
     } catch (err: any) {
       const totalDurationMs = Date.now() - startTime;
       const safeMsg = sanitizeErrorMessage(err.message || 'Worker runtime error');
@@ -1343,10 +1696,19 @@ export class AutomationWorker {
         errorMessage: safeMsg,
         totalDurationMs,
       });
+    } finally {
+      if (!isOperatorOwned && lease && !lease.isClosed) {
+        await lease.close({ reason: 'AUTOMATION_OWNED_AUTO_CLOSE' }).catch(() => {});
+        this.activeOperatorContexts.delete(profileKey);
+      }
     }
   }
 
   public getActiveContextCount(): number {
     return this.activeOperatorContexts.size;
+  }
+
+  public async shutdown(): Promise<void> {
+    await this.browserLifecycleManager.closeAllAutomationOwned('AGENT_SHUTDOWN');
   }
 }

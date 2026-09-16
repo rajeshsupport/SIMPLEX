@@ -38,8 +38,8 @@ export const LoginPage: React.FC = () => {
             <Activity className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white tracking-tight">HMC Central Console</h2>
-            <p className="text-xs text-slate-400">Operations & Browser Automation Portal</p>
+            <h2 className="text-xl font-bold text-white tracking-tight">SIMPLEX Central Console</h2>
+            <p className="text-xs text-slate-400">Central Operations & Browser Automation Portal</p>
           </div>
         </div>
 

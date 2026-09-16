@@ -5,11 +5,11 @@ export const CreateClientSchema = z.object({
     .string()
     .min(2)
     .max(50)
-    .regex(/^[A-Za-z0-9_-]+$/, 'Client code must be alphanumeric, hyphens or underscores')
+    .regex(/^[A-Za-z0-9_.-]+$/, 'Client code must be alphanumeric, hyphens, dots or underscores')
     .transform((v) => v.toUpperCase()),
   clientName: z.string().min(2).max(100),
   baseUrl: z.string().url('Must be a valid URL (e.g. https://client-hmc.example.com or http://localhost:4000)'),
-  applicationPath: z.string().default('/hmc'),
+  applicationPath: z.string().default(''),
   environment: z.enum(['Production', 'Staging', 'UAT', 'Test', 'Development', 'Local']),
   applicationVersion: z.string().default('v1.0'),
   loginRoute: z.string().default('/login'),

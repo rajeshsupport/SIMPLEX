@@ -188,7 +188,7 @@ async function runSessionContinuityTests() {
     assert.strictEqual(roleMappingWithoutAuth.success, false);
     assert.strictEqual(roleMappingWithoutAuth.overallStatus, 'PARTIAL_FAILED');
     assert.strictEqual(roleMappingWithoutAuth.errorCode, 'AUTH_SESSION_EXPIRED');
-    assert.strictEqual(roleMappingWithoutAuth.retryStartingPoint, 'ROLE_MAPPING');
+    assert.strictEqual(roleMappingWithoutAuth.retryStartingPoint, 'ROLE_STATE_INSPECTION');
     assert.ok(
       roleMappingWithoutAuth.failureReason?.includes('Client administrator authentication failed before role mapping'),
       'Failure reason must be clear and descriptive'

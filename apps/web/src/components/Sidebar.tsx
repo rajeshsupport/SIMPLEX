@@ -86,8 +86,8 @@ export const Sidebar: React.FC = () => {
           <Activity className="w-5 h-5 text-white" />
         </div>
         <div>
-          <div className="font-bold text-sm tracking-wide text-white">HMC CONSOLE</div>
-          <div className="text-[10px] uppercase font-mono text-sky-400 tracking-wider">Central Automation</div>
+          <div className="font-bold text-sm tracking-wide text-white">SIMPLEX CONSOLE</div>
+          <div className="text-[10px] uppercase font-mono text-sky-400 tracking-wider">Central Operations</div>
         </div>
       </div>
 

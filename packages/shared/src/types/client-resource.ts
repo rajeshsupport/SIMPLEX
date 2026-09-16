@@ -7,7 +7,13 @@ export enum ResourceImportStage {
   RESOURCE_CREATED_USER_PENDING = 'RESOURCE_CREATED_USER_PENDING',
   USER_CREATED_ROLE_PENDING = 'USER_CREATED_ROLE_PENDING',
   ROLES_MAPPED_RESOURCE_USER_PENDING = 'ROLES_MAPPED_RESOURCE_USER_PENDING',
+  USER_CREATED_RESOURCE_MAPPING_PENDING = 'USER_CREATED_RESOURCE_MAPPING_PENDING',
   RESOURCE_USER_MAPPING_VERIFICATION_FAILED = 'RESOURCE_USER_MAPPING_VERIFICATION_FAILED',
+  RESOURCE_USER_MAPPED_ECLAIM_PENDING = 'RESOURCE_USER_MAPPED_ECLAIM_PENDING',
+  ECLAIM_COMPLETED_EMR_FORMS_PENDING = 'ECLAIM_COMPLETED_EMR_FORMS_PENDING',
+  REMOTE_VERIFICATION_COMPLETED = 'REMOTE_VERIFICATION_COMPLETED',
+  REMOTE_COMPLETED_CENTRAL_SYNC_PENDING = 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+  CENTRAL_SNAPSHOT_PERSISTED = 'CENTRAL_SNAPSHOT_PERSISTED',
   COMPLETED = 'COMPLETED',
 }
 
@@ -139,3 +145,121 @@ export interface ClientResourceFilter {
   page?: number;
   limit?: number;
 }
+
+export interface EmrFormMasterItem {
+  formId: string;
+  formName: string;
+  group?: string;
+  encounterType?: string;
+  isDefault?: boolean;
+  isAssigned?: boolean;
+  assignedUser?: string;
+  status?: string;
+  isActive?: boolean;
+}
+
+export interface EmrFormsQueryResult {
+  forms: EmrFormMasterItem[];
+  isLive: boolean;
+  emrRoute: string;
+  verified: boolean;
+  message?: string;
+}
+
+export interface EclaimUserConfig {
+  isSupported: boolean;
+  eclaimRoute?: string;
+  providerId?: string;
+  facilityId?: string;
+  licenseNumber?: string;
+  specialtyCode?: string;
+  fields?: Record<string, any>;
+}
+
+export interface BranchFormTransferInput {
+  targetBranchId: string;
+  targetBranchName?: string;
+  username: string;
+  formIds: string[];
+  defaultFormIndicator?: 'S' | 'Yes' | 'No' | boolean;
+  group?: string;
+  encounterType?: string;
+}
+
+export interface CreateIntegratedResourceInput {
+  clientId: string;
+  // Section 1: Resource Details
+  resourceName: string;
+  isResourceHuman: boolean;
+  resourceType: string;
+  specialty: string;
+  departments: string; // 'ALL' or comma-separated
+  services: string; // 'ALL' or comma-separated
+  colorIdentificationCode?: string; // default 'FFFFFF'
+  operatingFrom?: string; // default '00:00'
+  operatingTo?: string; // default '23:55'
+  branchId?: string;
+  branchName?: string;
+
+  // Section 2: Associated User Details (optional linked user creation)
+  createAssociatedUser?: boolean;
+  username?: string;
+  password?: string;
+  firstName?: string;
+  middleName?: string;
+  lastName?: string;
+  nickName?: string;
+  gender?: string;
+  dob?: string;
+  designation?: string;
+  email?: string;
+  mobileNumber?: string;
+  nationality?: string;
+  roles?: string; // comma-separated or single role
+  profileRole?: string;
+  barcodeNumber?: string;
+  reportsNumberInDays?: number;
+  signatureWidth?: number;
+  signatureHeight?: number;
+
+  // Section 3: User–Resource Mapping
+  isShownInRegistration?: boolean;
+
+  // Section 4: eClaim Configuration (optional)
+  eclaimConfig?: {
+    enabled?: boolean;
+    eclaimLink?: string;
+    eclaimName?: string;
+    eclaimPassword?: string;
+    licenseNumber?: string;
+    insuranceCompany?: string;
+    branchName?: string;
+    actualLicenseNo?: string;
+    oldEclaimName?: string;
+    oldEclaimPassword?: string;
+    oldLicenseNo?: string;
+    providerId?: string;
+    facilityId?: string;
+    specialtyCode?: string;
+  };
+
+  // Section 5: EMR Form Assignment
+  emrForms?: {
+    formIds: string[];
+    defaultFormId?: string;
+    encounterType?: string;
+    group?: string;
+  };
+
+  // Section 6: Branch/User/Form Transfer
+  transferConfig?: {
+    enabled?: boolean;
+    targetBranchId?: string;
+    targetBranchName?: string;
+    defaultFormIndicator?: 'S' | 'Yes' | 'No' | boolean;
+    formIds?: string[];
+    encounterType?: string;
+    group?: string;
+  };
+}
+

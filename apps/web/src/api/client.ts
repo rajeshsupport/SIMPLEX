@@ -1,3 +1,5 @@
+import type { EmrFormsQueryResult } from '@hmc/shared';
+
 const API_BASE = '/api/v1';
 
 export class ApiClient {
@@ -222,8 +224,17 @@ export const clientResourcesApi = {
       body: JSON.stringify(payload),
     }),
 
-  mapResourceUser: (payload: { clientId: string; remoteResourceId: string; username: string }) =>
-    ApiClient.request<{ success: boolean; message: string }>('/client-resources/map-user', {
+  mapResourceUser: (payload: { clientId: string; remoteResourceId: string; username: string; resourceName?: string }) =>
+    ApiClient.request<{
+      success?: boolean;
+      operationStatus?: string;
+      runId?: string;
+      stage?: string;
+      message?: string;
+      alreadyExists?: boolean;
+      remoteResourceId?: string;
+      username?: string;
+    }>('/client-resources/map-user', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
@@ -255,18 +266,25 @@ export const clientResourcesApi = {
   exportJobResults: (jobId: string) =>
     ApiClient.downloadBlob(`/client-resources/import-jobs/${jobId}/export-results`),
 
-  downloadTemplate: (clientId?: string, clientCode?: string) => {
+  downloadTemplate: (clientId?: string, clientCode?: string, format: '1-SHEET' | '6-SHEET' | '10-SHEET' = '1-SHEET') => {
     const q = new URLSearchParams();
     if (clientId) q.set('clientId', clientId);
     if (clientCode) q.set('clientCode', clientCode);
+    if (format) q.set('format', format);
     return ApiClient.downloadBlob(`/client-resources/template?${q.toString()}`);
   },
 
-  exportResources: (clientId: string, mode: 'ALL' | 'ACTIVE_ONLY' = 'ALL') =>
+
+  exportResources: (clientId: string, mode: 'ALL' | 'ACTIVE_ONLY' | 'INACTIVE_ONLY' = 'ALL') =>
     ApiClient.downloadBlob(`/client-resources/export?clientId=${encodeURIComponent(clientId)}&mode=${encodeURIComponent(mode)}`),
 
-  getResourceTypes: (clientId: string) =>
-    ApiClient.request<string[]>(`/client-resources/resource-types?clientId=${encodeURIComponent(clientId)}`),
+  getResourceTypes: (clientId: string, isResourceHuman?: boolean | string) => {
+    const q = new URLSearchParams({ clientId });
+    if (isResourceHuman !== undefined && isResourceHuman !== 'ALL') {
+      q.set('isResourceHuman', String(isResourceHuman));
+    }
+    return ApiClient.request<string[]>(`/client-resources/resource-types?${q.toString()}`);
+  },
 
   getSpecialties: (clientId: string) =>
     ApiClient.request<string[]>(`/client-resources/specialties?clientId=${encodeURIComponent(clientId)}`),
@@ -276,4 +294,133 @@ export const clientResourcesApi = {
 
   getServices: (clientId: string) =>
     ApiClient.request<any[]>(`/client-resources/services?clientId=${encodeURIComponent(clientId)}`),
+
+  getEmrForms: (clientId: string, username?: string) =>
+    ApiClient.request<EmrFormsQueryResult>(
+      `/client-resources/emr-forms?clientId=${encodeURIComponent(clientId)}${username ? `&username=${encodeURIComponent(username)}` : ''}`
+    ),
+
+  getEclaimOptions: (clientId: string) =>
+    ApiClient.request<{ supported: boolean; roles: string[]; facilities?: string[]; endpoint?: string }>(
+      `/client-resources/eclaim-options?clientId=${encodeURIComponent(clientId)}`
+    ),
+
+  createIntegratedResource: (payload: any) =>
+    ApiClient.request<{
+      success: boolean;
+      message: string;
+      stage: string;
+      resource?: any;
+      createdUserCredentials?: { username: string; password?: string; roles?: string[] };
+      stepOutcomes?: Array<{
+        operation: string;
+        name: string;
+        route: string;
+        status: string;
+        remoteId?: string;
+        details?: string;
+        verifiedAt?: string;
+        errorCode?: string;
+        errorMessage?: string;
+      }>;
+    }>('/client-resources/create-integrated', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  resumeIntegratedProvisioning: (payload: any) =>
+    ApiClient.request<{
+      success: boolean;
+      status?: string;
+      message: string;
+      stage: string;
+      runId?: string;
+      resource?: any;
+      stepOutcomes?: Array<{
+        operation: string;
+        name: string;
+        route: string;
+        status: string;
+        remoteId?: string;
+        details?: string;
+        verifiedAt?: string;
+        errorCode?: string;
+        errorMessage?: string;
+      }>;
+    }>('/client-resources/resume-integrated', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  getProvisioningRunStatus: (runId: string) =>
+    ApiClient.request<{
+      runId: string;
+      status: string;
+      stage: string;
+      stepOutcomes: Array<any>;
+      remoteResourceId?: string;
+      remoteUserId?: string;
+      eclaimStatus?: string;
+      assignedForms?: string[];
+      createdUserCredentials?: any;
+      resource?: any;
+      errorMessage?: string;
+      errorCode?: string;
+      completed: boolean;
+      failed: boolean;
+      inProgress: boolean;
+    }>(`/client-resources/runs/${runId}/status`),
+
+  createResourceOnly: (payload: {
+    clientId: string;
+    resourceName: string;
+    isResourceHuman?: boolean;
+    resourceType: string;
+    specialty: string;
+    departments?: string;
+    colorIdentificationCode?: string;
+    services?: string;
+    operatingFrom?: string;
+    operatingTo?: string;
+    branchId?: string;
+    allowReuseIfExisting?: boolean;
+    reconcileOnly?: boolean;
+  }) =>
+    ApiClient.request<{
+      operationStatus?: string;
+      runId?: string;
+      stage?: string;
+      message?: string;
+      resource?: any;
+      remoteResourceId?: string;
+      alreadyExists?: boolean;
+      reused?: boolean;
+    }>('/client-resources/create', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };
+
+export const clientUsersApi = {
+  mapUserRoles: (payload: {
+    clientId: string;
+    username: string;
+    roles: string[];
+    fullName?: string;
+    firstName?: string;
+    remoteUserId?: string;
+    allowDeactivation?: boolean;
+  }) =>
+    ApiClient.request<{
+      success: boolean;
+      username: string;
+      errorCode?: string;
+      errorMessage?: string;
+      roleVerificationState?: string;
+      mappedRoles?: string[];
+    }>('/client-users/map-roles', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+};
+

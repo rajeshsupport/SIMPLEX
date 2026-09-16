@@ -58,7 +58,7 @@ export class ClientUserSnapshot {
   @Column({ type: 'nvarchar', length: 100, nullable: true })
   nationality?: string | null;
 
-  @Column({ type: 'nvarchar', length: 100, nullable: true })
+  @Column({ type: 'nvarchar', length: 'MAX', nullable: true })
   role?: string | null;
 
   @Column({ type: 'nvarchar', length: 100, nullable: true })
@@ -102,6 +102,9 @@ export class ClientUserSnapshot {
 
   @Column({ type: 'datetime2' })
   lastSyncedAt!: Date;
+
+  @Column({ type: 'datetime2', nullable: true })
+  lastVerifiedAt!: Date | null;
 
   @CreateDateColumn({ type: 'datetime2' })
   createdAt!: Date;

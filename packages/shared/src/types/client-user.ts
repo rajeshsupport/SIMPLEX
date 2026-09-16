@@ -52,6 +52,7 @@ export interface ClientUser {
   remoteCreatedAt?: string | null;
   remoteUpdatedAt?: string | null;
   lastSyncedAt: string;
+  lastVerifiedAt?: string | null;
   createdAt?: string;
   updatedAt?: string;
   credentialDeliveryStatus?: CredentialDeliveryStatus;
@@ -74,6 +75,12 @@ export interface ClientCreateFormMetadata {
   roles: FormDropdownOption[];
   profileRoles: FormDropdownOption[];
   fieldMappings?: Record<string, string>;
+  diagnosisCode?:
+    | 'AUTHENTICATION_NOT_CONFIRMED'
+    | 'CUSTOM_CONTROL_NOT_NATIVE_SELECT'
+    | 'OPTIONS_LAZY_LOADED'
+    | 'SELECTOR_PROFILE_MISMATCH'
+    | 'NO_OPTIONS_AVAILABLE';
 }
 
 export interface ClientUserSyncSummary {
@@ -148,6 +155,61 @@ export interface UpdateClientUserDto {
   profileBase64?: string;
   profileFilename?: string;
   status?: ClientUserStatus;
+}
+
+export interface ClientUserRoleItem {
+  roleId: string;
+  canonicalRoleName: string;
+}
+
+export type CreationWorkflowStage =
+  | 'PREVALIDATION'
+  | 'DUPLICATE_CHECK'
+  | 'USER_CREATION_SUBMITTED'
+  | 'REMOTE_USER_CREATED'
+  | 'REMOTE_USER_VERIFIED'
+  | 'USER_CREATION_VERIFIED'
+  | 'ROLE_STATE_INSPECTION'
+  | 'ROLE_CHANGES_SUBMITTED'
+  | 'ROLES_VERIFIED'
+  | 'FINAL_ROLES_VERIFIED'
+  | 'CENTRAL_SNAPSHOT_PERSISTED'
+  | 'COMPLETED';
+
+export type CreationOutcome =
+  | 'FAILED_BEFORE_CREATION'
+  | 'CREATION_VERIFICATION_REQUIRED'
+  | 'USER_CREATED_ROLE_PENDING'
+  | 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'
+  | 'COMPLETED';
+
+export interface MapExistingUserRolesDto {
+  clientId: string;
+  roles?: (string | ClientUserRoleItem)[];
+  rolesToAdd?: (string | ClientUserRoleItem)[];
+  rolesToRemove?: (string | ClientUserRoleItem)[];
+  resultingRoles?: (string | ClientUserRoleItem)[];
+}
+
+export interface UserRoleDiff {
+  existingRoles: string[];
+  rolesToAdd: string[];
+  rolesUnchanged: string[];
+  rolesRemoved: string[];
+  rolesToRemove?: string[];
+  resultingRoles: string[];
+}
+
+export interface UserRoleChangeAuditData {
+  rolesBefore: string[];
+  rolesAdded: string[];
+  rolesRemoved: string[];
+  rolesAfter: string[];
+  targetUserId: string;
+  targetUsername: string;
+  operator: string;
+  timestamp: string;
+  correlationId: string;
 }
 
 export type UserImportAction = 'CREATE' | 'UPDATE' | 'ACTIVATE' | 'DEACTIVATE';
@@ -263,8 +325,8 @@ export type ImportProgressStage =
   | 'SUBMITTING_ROLES'
   | 'VERIFYING_ROLES'
   | 'COMPLETED';
-export type UserWorkflowOverallStatus = 'READY' | 'IN_PROGRESS' | 'COMPLETED' | 'PARTIAL_FAILED' | 'FAILED' | 'ALREADY_EXISTS' | 'CANCELLED' | 'NOT_PROCESSED' | 'SKIPPED_DUPLICATE';
-export type UserWorkflowRetryStartingPoint = 'USER_CREATION' | 'ROLE_MAPPING' | 'VALIDATION' | 'NONE';
+export type UserWorkflowOverallStatus = 'READY' | 'IN_PROGRESS' | 'COMPLETED' | 'PARTIAL_FAILED' | 'FAILED' | 'ALREADY_EXISTS' | 'CANCELLED' | 'NOT_PROCESSED' | 'SKIPPED_DUPLICATE' | 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING';
+export type UserWorkflowRetryStartingPoint = 'USER_CREATION' | 'ROLE_STATE_INSPECTION' | 'VALIDATION' | 'NONE';
 export type BatchFinalStatus = 'COMPLETED' | 'COMPLETED_WITH_ROW_ERRORS' | 'PAUSED_SYSTEM_ERROR' | 'FAILED_NO_ROWS_PROCESSED';
 
 export interface ExcelUserImportExecutionRowResult {
@@ -521,4 +583,61 @@ export function isSystemCircuitBreakerError(errorCode?: string, errorMessage?: s
     return true;
   }
   return false;
+}
+
+export interface AutomationInProgressResponse {
+  operationStatus: 'AUTOMATION_IN_PROGRESS';
+  runId: string;
+  stage?: string;
+  targetUsername: string;
+  message?: string;
+}
+
+export interface UserCreationRunStatusResponse {
+  operationStatus: 'AUTOMATION_IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+  runId: string;
+  stage?: string;
+  targetUsername?: string;
+  user?: ClientUser;
+  creationOutcome?: CreationOutcome;
+  workflowStage?: CreationWorkflowStage;
+  errorMessage?: string;
+  message?: string;
+  oneTimeCredentialEventId?: string;
+  credentialDeliveryStatus?: CredentialDeliveryStatus;
+  defaultPassword?: string;
+  temporaryPassword?: string;
+}
+
+export interface ScrapedUserBatchItem {
+  username: string;
+  fullName?: string;
+  mobileNumber?: string;
+  email?: string;
+  role?: string;
+  status?: string;
+  remoteUserId?: string;
+}
+
+export interface SyncUserBatchDto {
+  batchId: string;
+  runId: string;
+  clientId: string;
+  sequenceNumber: number;
+  totalBatches: number;
+  isFinalBatch: boolean;
+  idempotencyKey: string;
+  users: ScrapedUserBatchItem[];
+}
+
+export interface SyncUserBatchResponse {
+  success: boolean;
+  batchId: string;
+  sequenceNumber: number;
+  totalBatches: number;
+  isFinalBatch: boolean;
+  isDuplicate?: boolean;
+  receivedCount: number;
+  finalized?: boolean;
+  persistedCount?: number;
 }

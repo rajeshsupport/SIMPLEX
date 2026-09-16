@@ -1,8 +1,13 @@
 import {
   Injectable,
+  Inject,
+  forwardRef,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
+  UnauthorizedException,
+  BadGatewayException,
   Logger,
   OnModuleInit,
 } from '@nestjs/common';
@@ -51,24 +56,24 @@ import {
   isValidOneTimeEventId,
   computeOneTimeEventIdHash,
   SHA256_EMPTY_DIGEST,
+  MapExistingUserRolesDto,
+  computeRoleDiff,
+  computeBidirectionalRoleDiff,
+  RoleDiffResult,
+  CreationOutcome,
+  CreationWorkflowStage,
+  toRoleItems,
+  ClientUserRoleItem,
+  AutomationInProgressResponse,
+  UserCreationRunStatusResponse,
+  SyncUserBatchDto,
+  SyncUserBatchResponse,
+  ScrapedUserBatchItem,
+  SIMPLEX_NATIONALITIES_CATALOG,
+  SIMPLEX_ROLES_CATALOG,
 } from '@hmc/shared';
 import { AgentsService } from '../agents/agents.service.js';
-
-interface StoredEphemeralCredential {
-  oneTimeEventId: string;
-  oneTimeEventIdHash: string;
-  initiatingOperatorId: string;
-  initiatingSessionId?: string;
-  clientId: string;
-  jobId?: string;
-  rowNumber?: number;
-  username: string;
-  fullName?: string;
-  password?: string | null;
-  createdAt: number;
-  hardExpiresAt: number;
-  displayDurationSeconds: number;
-}
+import { EphemeralCredentialStore, StoredEphemeralCredential } from './ephemeral-credential.store.js';
 
 @Injectable()
 export class ClientUsersService implements OnModuleInit {
@@ -89,6 +94,7 @@ export class ClientUsersService implements OnModuleInit {
     private runRepo: Repository<AutomationRun>,
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
+    @Inject(forwardRef(() => AgentsService))
     private agentsService: AgentsService
   ) {}
 
@@ -203,6 +209,29 @@ export class ClientUsersService implements OnModuleInit {
     const page = Math.max(1, Number(query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit) || 25));
     const skip = (page - 1) * limit;
+    // Auto-hydrate snapshots from latest successful sync run if table is empty for this client
+    const existingCount = await this.snapshotRepo.count({ where: { clientId, isPresentRemotely: true } });
+    if (existingCount === 0) {
+      const latestSuccessRun = await this.runRepo.findOne({
+        where: {
+          clientId,
+          runType: In(['SYNC_CLIENT_USERS_HEADLESS', 'SYNC_CLIENT_USERS']),
+          status: In(['SUCCEEDED', 'COMPLETED']),
+        },
+        order: { createdAt: 'DESC' },
+      });
+      if (latestSuccessRun?.resultSummaryJson) {
+        try {
+          const parsed = JSON.parse(latestSuccessRun.resultSummaryJson);
+          const scraped = parsed.users || parsed.streamedUsers;
+          if (Array.isArray(scraped) && scraped.length > 0) {
+            await this.persistScrapedUsers(clientId, scraped);
+          }
+        } catch (err: any) {
+          this.logger.error(`Failed to auto-hydrate snapshots from run ${latestSuccessRun.id}: ${err.message}`);
+        }
+      }
+    }
 
     // Find latest successful syncRunId for this client
     const latestSyncRecord = await this.snapshotRepo
@@ -539,7 +568,7 @@ export class ClientUsersService implements OnModuleInit {
       } else if (
         run.desktopAgent &&
         (!run.desktopAgent.lastHeartbeatAt ||
-          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 20000)
+          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 45000)
       ) {
         run.status = 'FAILED';
         run.errorMessage = 'Sync failed: Automation agent is offline.';
@@ -556,8 +585,9 @@ export class ClientUsersService implements OnModuleInit {
     }
 
     // When run completes successfully, persist scraped users into snapshot DB
-    if ((run.status === 'SUCCEEDED' || run.status === 'COMPLETED') && resultData && resultData.users) {
-      await this.persistScrapedUsers(run.clientId, resultData.users);
+    const scrapedUsers = resultData?.users || resultData?.streamedUsers;
+    if ((run.status === 'SUCCEEDED' || run.status === 'COMPLETED') && scrapedUsers && Array.isArray(scrapedUsers) && scrapedUsers.length > 0) {
+      await this.persistScrapedUsers(run.clientId, scrapedUsers);
     }
 
     const normalizedStatus =
@@ -714,9 +744,11 @@ export class ClientUsersService implements OnModuleInit {
         snapshot.fullName = su.fullName || `${su.firstName} ${su.lastName}`.trim();
         snapshot.email = su.email;
         snapshot.mobileNumber = su.mobileNumber;
-        snapshot.nationality = su.nationality;
-        snapshot.role = su.role;
-        snapshot.profileRole = su.profileRole;
+        if (su.role && su.role.trim().toUpperCase() !== 'USER') {
+          snapshot.role = su.role;
+        } else if (!snapshot.role) {
+          snapshot.role = su.role;
+        }
         snapshot.status = su.status;
         snapshot.hasSignature = su.hasSignature || false;
         snapshot.hasStamp = su.hasStamp || false;
@@ -810,12 +842,13 @@ export class ClientUsersService implements OnModuleInit {
       if (completedRun && (completedRun.status === 'COMPLETED' || completedRun.status === 'SUCCEEDED') && completedRun.resultSummaryJson) {
         try {
           const resultData = JSON.parse(completedRun.resultSummaryJson);
-          if (resultData.users) {
-            syncSummary = await this.persistScrapedUsers(clientId, resultData.users, {
-              remoteRowsRead: resultData.remoteRowsRead,
-              remotePagesRead: resultData.remotePagesRead,
+          const scraped = resultData.users || resultData.streamedUsers;
+          if (scraped && Array.isArray(scraped) && scraped.length > 0) {
+            syncSummary = await this.persistScrapedUsers(clientId, scraped, {
+              remoteRowsRead: resultData.remoteRowsRead || resultData.count || scraped.length,
+              remotePagesRead: resultData.remotePagesRead || 1,
               remoteDuplicatesRemoved: resultData.remoteDuplicatesRemoved,
-              remoteUniqueUsers: resultData.remoteUniqueUsers,
+              remoteUniqueUsers: resultData.remoteUniqueUsers || scraped.length,
             });
           }
         } catch (err: any) {
@@ -847,21 +880,55 @@ export class ClientUsersService implements OnModuleInit {
     }
   }
 
-  private static activeMutationLocks = new Map<string, number>();
+  private static activeMutationLocks = new Map<
+    string,
+    { ownerToken: string; acquiredAt: number; lastHeartbeatAt: number; timer?: NodeJS.Timeout }
+  >();
+  private static readonly MUTATION_LOCK_STALE_TTL_MS = 60000;
 
   private acquireMutationLock(clientId: string, username: string): () => void {
     const key = `${clientId}:${username.trim().toLowerCase()}`;
     const now = Date.now();
-    const existingLockTime = ClientUsersService.activeMutationLocks.get(key);
-    if (existingLockTime && now - existingLockTime < 45000) {
-      throw new BadRequestException({
-        code: 'OPERATION_IN_PROGRESS',
-        message: `Another mutation operation is already in progress for user '${username}'.`,
-      });
+    const existing = ClientUsersService.activeMutationLocks.get(key);
+
+    if (existing) {
+      if (now - existing.lastHeartbeatAt < ClientUsersService.MUTATION_LOCK_STALE_TTL_MS) {
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'OPERATION_IN_PROGRESS',
+          message: `Another mutation operation is already in progress for user '${username}'.`,
+        });
+      }
+      // Recover stale lock from dead process/unhandled crash
+      if (existing.timer) clearInterval(existing.timer);
     }
-    ClientUsersService.activeMutationLocks.set(key, now);
+
+    const ownerToken = crypto.randomUUID();
+    const lockEntry = {
+      ownerToken,
+      acquiredAt: now,
+      lastHeartbeatAt: now,
+      timer: undefined as NodeJS.Timeout | undefined,
+    };
+
+    // Lifecycle heartbeat renewal: holds the lock until task terminal state calls release
+    lockEntry.timer = setInterval(() => {
+      const current = ClientUsersService.activeMutationLocks.get(key);
+      if (current && current.ownerToken === ownerToken) {
+        current.lastHeartbeatAt = Date.now();
+      } else {
+        clearInterval(lockEntry.timer);
+      }
+    }, 15000);
+
+    ClientUsersService.activeMutationLocks.set(key, lockEntry);
+
     return () => {
-      ClientUsersService.activeMutationLocks.delete(key);
+      if (lockEntry.timer) clearInterval(lockEntry.timer);
+      const current = ClientUsersService.activeMutationLocks.get(key);
+      if (current && current.ownerToken === ownerToken) {
+        ClientUsersService.activeMutationLocks.delete(key);
+      }
     };
   }
 
@@ -872,13 +939,19 @@ export class ClientUsersService implements OnModuleInit {
     dto: CreateClientUserDto,
     user: JwtPayload,
     options?: { skipPostSync?: boolean }
-  ): Promise<ClientUser & { credentialDeliveryStatus?: CredentialDeliveryStatus; oneTimeCredentialEventId?: string }> {
+  ): Promise<ClientUser & { credentialDeliveryStatus?: CredentialDeliveryStatus; oneTimeCredentialEventId?: string; creationOutcome?: CreationOutcome; workflowStage?: CreationWorkflowStage; defaultPassword?: string; temporaryPassword?: string }> {
     const client = await this.clientRepo.findOne({ where: { id: dto.clientId } });
     if (!client) throw new NotFoundException(`Client ${dto.clientId} not found`);
 
     if (!user.isSuperAdmin && !user.allowedClientIds.includes(dto.clientId)) {
       throw new ForbiddenException('Not authorized for this client');
     }
+
+    // Normalize roles using shared role engine
+    const rawRoles = (dto.roles && dto.roles.length > 0) ? dto.roles : (dto.role ? [dto.role] : []);
+    const roleValidation = parseAndValidateRoles(rawRoles);
+    const normalizedRoles = roleValidation.parsedRoles;
+    const canonicalRoleString = roleValidation.canonicalRoleString || normalizedRoles.join(', ') || null;
 
     // Securely discard any password-related properties from older clients/requests
     const sanitizedDto: CreateClientUserDto = {
@@ -891,8 +964,8 @@ export class ClientUsersService implements OnModuleInit {
       email: dto.email,
       mobileNumber: dto.mobileNumber,
       nationality: dto.nationality,
-      role: dto.role,
-      roles: dto.roles,
+      role: canonicalRoleString || dto.role,
+      roles: normalizedRoles,
       profileRole: dto.profileRole,
       barcodeNumber: dto.barcodeNumber,
       signatureBase64: dto.signatureBase64,
@@ -1003,25 +1076,30 @@ export class ClientUsersService implements OnModuleInit {
 
       const routes = this.resolveClientUserRoutes(client);
       const correlationId = crypto.randomUUID();
+      const hasMultiRoles = normalizedRoles && normalizedRoles.length > 0;
+      const targetTaskType = hasMultiRoles ? 'PROCESS_USER_FULL_WORKFLOW' : 'CREATE_CLIENT_USER';
       const run = this.runRepo.create({
         clientId: client.id,
         desktopAgentId: onlineAgents[0].id,
         triggeredByUserId: user.sub,
-        runType: 'CREATE_CLIENT_USER',
+        runType: targetTaskType as any,
         status: 'QUEUED',
         correlationId,
         parametersJson: JSON.stringify({
-          taskType: 'CREATE_CLIENT_USER',
+          taskType: targetTaskType,
           userId: user.sub,
           clientBaseUrl: client.baseUrl,
           clientAppPath: client.applicationPath,
           loginRoute: routes.resolvedLoginUrl,
           targetRoute: routes.resolvedUsersUrl,
           addUsersRoute: routes.resolvedAddUsersUrl,
+          userRoleRoute: routes.resolvedRoleUrl,
           credentials,
           payload: {
             ...sanitizedDto,
             addUsersRoute: routes.resolvedAddUsersUrl,
+            userRoleRoute: routes.resolvedRoleUrl,
+            roles: normalizedRoles,
           },
           ...sanitizedDto,
         }),
@@ -1029,16 +1107,36 @@ export class ClientUsersService implements OnModuleInit {
 
       const savedRun = await this.runRepo.save(run);
 
-      // Wait for completion (up to 30s)
+      // Bounded synchronous wait budget (20s)
       const startTime = Date.now();
+      const SYNC_WAIT_BUDGET_MS = 20000;
       let completedRun: AutomationRun | null = null;
-      while (Date.now() - startTime < 30000) {
+      while (Date.now() - startTime < SYNC_WAIT_BUDGET_MS) {
         await new Promise((r) => setTimeout(r, 400));
         const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
         if (r && ['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'].includes(r.status)) {
           completedRun = r;
           break;
         }
+      }
+
+      // If still pending or running at synchronous deadline: return HTTP 202 AUTOMATION_IN_PROGRESS
+      if (!completedRun) {
+        const latestRun = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        let latestStage = 'USER_CREATION_SUBMITTED';
+        try {
+          const p = JSON.parse(latestRun?.resultSummaryJson || '{}');
+          if (p.workflowStage) latestStage = p.workflowStage;
+          else if (p.message) latestStage = p.message;
+        } catch {}
+
+        return {
+          operationStatus: 'AUTOMATION_IN_PROGRESS',
+          runId: savedRun.id,
+          stage: latestStage,
+          targetUsername: sanitizedDto.username,
+          message: 'User creation and multi-role mapping is in progress on remote portal.',
+        } as any;
       }
 
       let parsedResult: any = {};
@@ -1051,62 +1149,117 @@ export class ClientUsersService implements OnModuleInit {
         (['COMPLETED', 'SUCCEEDED'].includes(completedRun.status) ||
           (completedRun.status === 'FAILED' && parsedResult.isRemoteSaveConfirmed));
 
-      if (!isConfirmedSuccess) {
+      const isUserCreated =
+        isConfirmedSuccess ||
+        Boolean(parsedResult && (parsedResult.creationState === 'COMPLETED' || parsedResult.isRemoteSaveConfirmed));
+
+      if (!isConfirmedSuccess && !isUserCreated) {
         let errorCode = parsedResult.errorCode || 'REMOTE_VALIDATION_FAILED';
         let errorMessage = parsedResult.errorMessage || completedRun?.errorMessage || 'User creation failed on client portal.';
         if (completedRun?.status === 'TIMED_OUT') errorCode = 'OPERATION_TIMED_OUT';
+        const outcome: CreationOutcome =
+          errorCode === 'REMOTE_USER_NOT_FOUND_AFTER_CREATE' || errorCode === 'REMOTE_CREATE_VERIFICATION_FAILED'
+            ? 'CREATION_VERIFICATION_REQUIRED'
+            : 'FAILED_BEFORE_CREATION';
         throw new BadRequestException({
           code: errorCode,
+          creationOutcome: outcome,
+          workflowStage: parsedResult.workflowStage || 'USER_CREATION_SUBMITTED',
           message: errorMessage,
         });
       }
 
-      // Automatically trigger post-mutation pull sync (unless skipped for batch import)
-      if (!options?.skipPostSync) {
-        try {
-          await this.syncClientUsers(client.id, user);
-        } catch (syncErr: any) {
-          this.logger.warn(`Post-creation automatic sync failed: ${syncErr.message}`);
+      // Safe error boundary for post-creation persistence and automatic pull sync
+      let saved: ClientUserSnapshot | null = null;
+      let centralSyncPending = false;
+
+      try {
+        // Automatically trigger post-mutation pull sync (unless skipped for batch import)
+        if (!options?.skipPostSync) {
+          try {
+            await this.syncClientUsers(client.id, user);
+          } catch (syncErr: any) {
+            this.logger.warn(`Post-creation automatic sync failed: ${syncErr.message}`);
+          }
         }
+
+        // Save snapshot or update existing if found during pull sync
+        const now = new Date();
+        const normUsername = dto.username.trim().toLowerCase();
+        let existingSnap = await this.snapshotRepo
+          .createQueryBuilder('u')
+          .where('u.clientId = :clientId', { clientId: client.id })
+          .andWhere('LOWER(u.username) = :normUsername', { normUsername })
+          .getOne();
+
+        if (existingSnap) {
+          if (canonicalRoleString) existingSnap.role = canonicalRoleString;
+          if (isConfirmedSuccess) existingSnap.lastVerifiedAt = now;
+          existingSnap.lastSyncedAt = now;
+          saved = await this.snapshotRepo.save(existingSnap);
+        } else {
+          const fullName = `${dto.firstName} ${dto.middleName ? dto.middleName + ' ' : ''}${dto.lastName}`.trim();
+          const snapshot = this.snapshotRepo.create({
+            clientId: client.id,
+            clientCode: client.clientCode,
+            username: dto.username.trim(),
+            firstName: dto.firstName.trim(),
+            middleName: dto.middleName?.trim() || null,
+            lastName: dto.lastName.trim(),
+            fullName,
+            nickName: dto.nickName?.trim() || null,
+            email: dto.email?.trim() || null,
+            mobileNumber: dto.mobileNumber.trim(),
+            nationality: dto.nationality,
+            role: canonicalRoleString || dto.role || null,
+            profileRole: dto.profileRole || null,
+            status: dto.status || 'ACTIVE',
+            barcodeNumber: dto.barcodeNumber || null,
+            hasSignature: Boolean(dto.signatureBase64),
+            hasStamp: Boolean(dto.stampBase64),
+            hasProfileImage: Boolean(dto.profileBase64),
+            isPresentRemotely: true,
+            lastVerifiedAt: isConfirmedSuccess ? now : undefined,
+            lastSyncedAt: now,
+          });
+          saved = await this.snapshotRepo.save(snapshot);
+        }
+      } catch (persistErr: any) {
+        this.logger.error(`Post-creation central persistence/sync failed for '${dto.username}': ${persistErr.message}`, persistErr.stack);
+        centralSyncPending = true;
       }
 
-      // Save snapshot or update existing if found during pull sync
-      const now = new Date();
-      const normUsername = dto.username.trim().toLowerCase();
-      let existingSnap = await this.snapshotRepo
-        .createQueryBuilder('u')
-        .where('u.clientId = :clientId', { clientId: client.id })
-        .andWhere('LOWER(u.username) = :normUsername', { normUsername })
-        .getOne();
-
-      let saved: ClientUserSnapshot;
-      if (existingSnap) {
-        saved = existingSnap;
-      } else {
+      if (centralSyncPending || !saved) {
         const fullName = `${dto.firstName} ${dto.middleName ? dto.middleName + ' ' : ''}${dto.lastName}`.trim();
-        const snapshot = this.snapshotRepo.create({
+        const pendingUser: any = {
+          id: crypto.randomUUID(),
           clientId: client.id,
           clientCode: client.clientCode,
           username: dto.username.trim(),
           firstName: dto.firstName.trim(),
-          middleName: dto.middleName?.trim() || null,
           lastName: dto.lastName.trim(),
           fullName,
-          nickName: dto.nickName?.trim() || null,
-          email: dto.email?.trim() || null,
-          mobileNumber: dto.mobileNumber.trim(),
-          nationality: dto.nationality,
-          role: dto.role || null,
-          profileRole: dto.profileRole || null,
+          role: canonicalRoleString || dto.role || null,
           status: dto.status || 'ACTIVE',
-          barcodeNumber: dto.barcodeNumber || null,
-          hasSignature: Boolean(dto.signatureBase64),
-          hasStamp: Boolean(dto.stampBase64),
-          hasProfileImage: Boolean(dto.profileBase64),
           isPresentRemotely: true,
-          lastSyncedAt: now,
+          creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          overallStatus: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          workflowStage: 'FINAL_ROLES_VERIFIED',
+          credentialDeliveryStatus: 'DELIVERED',
+          message: 'User and roles were created successfully in Simplex. Central synchronization is pending. No duplicate creation will be attempted.',
+        };
+        return pendingUser;
+      }
+
+      if (!isConfirmedSuccess && isUserCreated) {
+        throw new BadRequestException({
+          code: parsedResult.errorCode || 'ROLE_MAPPING_PENDING',
+          creationOutcome: 'USER_CREATED_ROLE_PENDING',
+          workflowStage: 'ROLE_MAPPING_SUBMITTED',
+          message: parsedResult.errorMessage || 'User created successfully, but role mapping is pending. Retry role mapping without recreating the user.',
+          retryStartingPoint: 'ROLE_STATE_INSPECTION',
+          createdUser: saved,
         });
-        saved = await this.snapshotRepo.save(snapshot);
       }
 
       // Record Audit (Zero password leakage in audit log)
@@ -1151,11 +1304,165 @@ export class ClientUsersService implements OnModuleInit {
         ...resultDto,
         credentialDeliveryStatus: deliveryRes.credentialDeliveryStatus,
         oneTimeCredentialEventId: deliveryRes.oneTimeEventId,
+        defaultPassword: parsedResult.defaultPassword || parsedResult.temporaryPassword,
+        temporaryPassword: parsedResult.temporaryPassword || parsedResult.defaultPassword,
+        creationOutcome: 'COMPLETED',
+        workflowStage: 'COMPLETED',
         message: `User '${dto.username}' created and verified on client.`,
       };
     } finally {
       releaseLock();
     }
+  }
+
+  /**
+   * Polls the live status of an asynchronous user creation / multi-role workflow.
+   * Strictly read-only: 0 inserts or updates to ClientUserSnapshot, AutomationRun, AuditLog, or any database record.
+   */
+  async getCreationRunStatus(
+    runId: string,
+    user: JwtPayload,
+    requestedClientId?: string
+  ): Promise<UserCreationRunStatusResponse> {
+    const run = await this.runRepo.findOne({ where: { id: runId } });
+    if (!run) {
+      throw new NotFoundException({
+        code: 'RUN_NOT_FOUND',
+        message: `Automation run '${runId}' not found.`,
+      });
+    }
+
+    if (requestedClientId && run.clientId !== requestedClientId) {
+      throw new ForbiddenException({
+        code: 'CLIENT_MISMATCH',
+        message: 'Automation run does not belong to the requested client.',
+      });
+    }
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(run.clientId)) {
+      throw new ForbiddenException({
+        code: 'FORBIDDEN_CLIENT',
+        message: 'Not authorized for this client',
+      });
+    }
+
+    let params: any = {};
+    try {
+      params = JSON.parse(run.parametersJson || '{}');
+    } catch {}
+    const targetUsername = params.username || params.payload?.username || 'user';
+    let parsedResult: any = {};
+    try {
+      parsedResult = JSON.parse(run.resultSummaryJson || '{}');
+    } catch {}
+
+    // 1. In-progress states
+    if (['QUEUED', 'RUNNING', 'CLAIMED', 'AUTHENTICATING', 'NAVIGATING', 'EXTRACTING', 'PERSISTING'].includes(run.status)) {
+      const stage = parsedResult.workflowStage || parsedResult.message || run.status;
+      return {
+        operationStatus: 'AUTOMATION_IN_PROGRESS',
+        runId: run.id,
+        stage,
+        targetUsername,
+        message: parsedResult.message || 'Operation is still running on remote portal.',
+      };
+    }
+
+    // 2. Terminal completion (SUCCEEDED / COMPLETED)
+    if (['COMPLETED', 'SUCCEEDED'].includes(run.status)) {
+      const client = await this.clientRepo.findOne({ where: { id: run.clientId } });
+      const normUsername = targetUsername.trim().toLowerCase();
+      const snapshot = await this.snapshotRepo
+        .createQueryBuilder('u')
+        .where('u.clientId = :clientId', { clientId: run.clientId })
+        .andWhere('LOWER(u.username) = :normUsername', { normUsername })
+        .getOne();
+
+      if (!snapshot) {
+        return {
+          operationStatus: 'COMPLETED',
+          runId: run.id,
+          stage: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          targetUsername,
+          creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          message: 'User and roles were created successfully in Simplex. Central synchronization is pending.',
+        };
+      }
+
+      let oneTimeCredentialEventId = parsedResult.oneTimeCredentialEventId;
+      let credentialDeliveryStatus = parsedResult.credentialDeliveryStatus || 'DELIVERED';
+      const capturedPass =
+        parsedResult.ephemeralDefaultPassword ||
+        parsedResult.defaultPassword ||
+        parsedResult.temporaryPassword;
+
+      if (!oneTimeCredentialEventId && capturedPass) {
+        const deliveryRes = ClientUsersService.storeEphemeralCredential({
+          initiatingOperatorId: run.triggeredByUserId || user.sub,
+          clientId: run.clientId,
+          username: snapshot.username,
+          fullName: snapshot.fullName,
+          password: capturedPass,
+          user,
+        });
+        oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
+        credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
+        parsedResult.oneTimeCredentialEventId = oneTimeCredentialEventId;
+        parsedResult.credentialDeliveryStatus = credentialDeliveryStatus;
+        run.resultSummaryJson = JSON.stringify(parsedResult);
+        await this.runRepo.save(run).catch(() => {});
+      }
+
+      return {
+        operationStatus: 'COMPLETED',
+        runId: run.id,
+        stage: 'ROLES_VERIFIED',
+        targetUsername,
+        creationOutcome: 'COMPLETED',
+        user: client ? this.mapToDto(snapshot, client) : (snapshot as any),
+        oneTimeCredentialEventId,
+        credentialDeliveryStatus,
+        defaultPassword: capturedPass,
+        temporaryPassword: capturedPass,
+        message: `User '${targetUsername}' created and verified on client portal.`,
+      };
+    }
+
+    // 3. Terminal failure
+    if (run.status === 'FAILED') {
+      if (parsedResult.isRemoteSaveConfirmed) {
+        return {
+          operationStatus: 'FAILED',
+          runId: run.id,
+          stage: parsedResult.workflowStage || 'ROLES_FAILED_AFTER_USER_CREATED',
+          targetUsername,
+          creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
+          errorMessage: run.errorMessage || 'User created on remote portal but role assignment failed.',
+        };
+      }
+
+      const isBeforeCreate = parsedResult.isRemoteUserCreated === false && parsedResult.creationState !== 'COMPLETED';
+      const outcome: CreationOutcome = isBeforeCreate ? 'FAILED_BEFORE_CREATION' : 'CREATION_VERIFICATION_REQUIRED';
+
+      return {
+        operationStatus: 'FAILED',
+        runId: run.id,
+        stage: parsedResult.workflowStage || 'FAILED',
+        targetUsername,
+        creationOutcome: outcome,
+        errorMessage: run.errorMessage || parsedResult.errorMessage || 'User creation failed on client portal.',
+      };
+    }
+
+    // 4. TIMED_OUT or unknown status -> NEVER generic failure, always CREATION_VERIFICATION_REQUIRED
+    return {
+      operationStatus: 'FAILED',
+      runId: run.id,
+      stage: 'OPERATION_TIMED_OUT',
+      targetUsername,
+      creationOutcome: 'CREATION_VERIFICATION_REQUIRED',
+      errorMessage: 'Operation timed out during automation execution. Verification required.',
+    };
   }
 
   /**
@@ -1271,10 +1578,10 @@ export class ClientUsersService implements OnModuleInit {
 
       const savedRun = await this.runRepo.save(run);
 
-      // Wait for agent completion and remote verification (up to 20s)
+      // Wait for agent completion and remote verification (up to 45s)
       const startTime = Date.now();
       let completedRun: AutomationRun | null = null;
-      while (Date.now() - startTime < 20000) {
+      while (Date.now() - startTime < 45000) {
         await new Promise((r) => setTimeout(r, 300));
         const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
         if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
@@ -1285,11 +1592,11 @@ export class ClientUsersService implements OnModuleInit {
 
       if (!completedRun) {
         savedRun.status = 'TIMED_OUT';
-        savedRun.errorMessage = 'User update timed out: Automation agent did not respond within 20 seconds.';
+        savedRun.errorMessage = 'User update timed out: Automation agent did not respond within 45 seconds.';
         await this.runRepo.save(savedRun).catch(() => {});
         throw new BadRequestException({
           code: 'OPERATION_TIMED_OUT',
-          message: 'User update timed out: Automation agent did not respond within 20 seconds.',
+          message: 'User update timed out: Automation agent did not respond within 45 seconds.',
         });
       }
 
@@ -1422,10 +1729,10 @@ export class ClientUsersService implements OnModuleInit {
 
       const savedRun = await this.runRepo.save(run);
 
-      // Wait for agent completion and remote verification (up to 20s)
+      // Wait for agent completion and remote verification (up to 45s)
       const startTime = Date.now();
       let completedRun: AutomationRun | null = null;
-      while (Date.now() - startTime < 20000) {
+      while (Date.now() - startTime < 45000) {
         await new Promise((r) => setTimeout(r, 300));
         const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
         if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
@@ -1436,31 +1743,100 @@ export class ClientUsersService implements OnModuleInit {
 
       if (!completedRun) {
         savedRun.status = 'TIMED_OUT';
-        savedRun.errorMessage = 'Status update timed out: Automation agent did not respond within 20 seconds.';
+        savedRun.errorMessage = 'Status update timed out: Automation agent did not respond within 45 seconds.';
         await this.runRepo.save(savedRun).catch(() => {});
         throw new BadRequestException({
           code: 'OPERATION_TIMED_OUT',
-          message: 'Status update timed out: Automation agent did not respond within 20 seconds.',
+          message: 'Status update timed out: Automation agent did not respond within 45 seconds.',
         });
       }
 
       if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
         let errorCode = 'REMOTE_STATUS_VERIFICATION_FAILED';
         let errorMsg = completedRun?.errorMessage || 'Remote status verification failed on client portal.';
+        let actionTaken: string | undefined = undefined;
+        let retryStartingPoint: string | undefined = undefined;
         try {
           const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
           if (parsed.errorCode) errorCode = parsed.errorCode;
           if (parsed.errorMessage) errorMsg = parsed.errorMessage;
+          if (parsed.actionTaken) actionTaken = parsed.actionTaken;
+          if (parsed.retryStartingPoint) retryStartingPoint = parsed.retryStartingPoint;
         } catch {}
+
+        if (actionTaken === 'NO_CHANGE_REQUIRED') {
+          snapshot.status = targetStatus;
+          snapshot.isPresentRemotely = true;
+          snapshot.lastSyncedAt = new Date();
+          const updatedSnapshot = await this.snapshotRepo.save(snapshot);
+          return this.mapToDto(updatedSnapshot, client);
+        }
+
         if (errorCode === 'REMOTE_USER_NOT_FOUND') {
           snapshot.isPresentRemotely = false;
           await this.snapshotRepo.save(snapshot).catch(() => {});
         }
+
+        // Error Mapping per spec:
+        // HTTP 401/403 for confirmed auth failures only
+        if (errorCode === 'CLIENT_AUTO_LOGIN_FAILED' || errorCode === 'INVALID_CREDENTIALS' || errorCode === 'CLIENT_AUTHENTICATION_FAILED') {
+          throw new UnauthorizedException({
+            code: 'CLIENT_AUTHENTICATION_FAILED',
+            message: errorMsg,
+            retryStartingPoint: retryStartingPoint || 'LOGIN',
+          });
+        }
+
+        if (errorCode === 'CLIENT_AUTHORIZATION_DENIED' || errorCode === 'ACCESS_DENIED') {
+          throw new ForbiddenException({
+            code: 'CLIENT_AUTHORIZATION_DENIED',
+            message: errorMsg,
+          });
+        }
+
+        // HTTP 409 for verification unknown (mutation submitted, remote status unknown) or precheck unknown
+        if (
+          errorCode === 'REMOTE_STATUS_VERIFICATION_UNKNOWN' ||
+          errorCode === 'MUTATION_SUBMITTED_VERIFICATION_PENDING' ||
+          errorCode === 'REMOTE_STATUS_PRECHECK_UNKNOWN'
+        ) {
+          throw new ConflictException({
+            code: errorCode,
+            message:
+              errorCode === 'REMOTE_STATUS_PRECHECK_UNKNOWN'
+                ? (errorMsg || 'Remote status precheck could not determine current status. Use read-only Refresh Current Status before retrying.')
+                : 'Status action may have completed, but verification is pending. No automatic second click was performed. Use Refresh Current Status before retrying.',
+            retryStartingPoint: retryStartingPoint || (errorCode === 'REMOTE_STATUS_PRECHECK_UNKNOWN' ? 'PRECHECK' : 'STATUS_VERIFICATION'),
+            diagnostics: errorMsg,
+          });
+        }
+
+        // HTTP 502 for pre-mutation indeterminate page/auth state and browser/portal errors
+        if (errorCode === 'AUTH_STATE_INDETERMINATE' || errorCode === 'PAGE_CRASH' || errorCode === 'BROWSER_UNAVAILABLE' || errorCode === 'REMOTE_NAVIGATION_FAILED' || errorCode === 'TARGET_ELEMENT_NOT_FOUND') {
+          throw new BadGatewayException({
+            code: errorCode,
+            message: errorMsg,
+          });
+        }
+
         throw new BadRequestException({
           code: errorCode,
           message: errorMsg,
+          retryStartingPoint,
         });
       }
+
+      // Check if actionTaken was NO_CHANGE_REQUIRED on completed run
+      try {
+        const parsed = JSON.parse(completedRun?.resultSummaryJson || '{}');
+        if (parsed.actionTaken === 'NO_CHANGE_REQUIRED') {
+          snapshot.status = targetStatus;
+          snapshot.isPresentRemotely = true;
+          snapshot.lastSyncedAt = new Date();
+          const updatedSnapshot = await this.snapshotRepo.save(snapshot);
+          return this.mapToDto(updatedSnapshot, client);
+        }
+      } catch {}
 
       // Remote verification succeeded -> Update Central snapshot immediately with verified remote status
       snapshot.status = targetStatus;
@@ -1565,15 +1941,20 @@ export class ClientUsersService implements OnModuleInit {
           taskType: 'RESET_CLIENT_USER_PASSWORD',
           userId: user.sub,
           username: snapshot.username,
+          remoteUserId: snapshot.remoteUserId,
           clientBaseUrl: client.baseUrl,
           clientAppPath: client.applicationPath,
           loginRoute: routes.resolvedLoginUrl,
           targetRoute: routes.resolvedUsersUrl,
           addUsersRoute: routes.resolvedAddUsersUrl,
+          usersRoute: routes.resolvedUsersUrl,
           credentials,
           payload: {
             username: snapshot.username,
+            remoteUserId: snapshot.remoteUserId,
             addUsersRoute: routes.resolvedAddUsersUrl,
+            usersRoute: routes.resolvedUsersUrl,
+            targetRoute: routes.resolvedUsersUrl,
           },
           idempotencyKey: crypto.randomUUID(),
         }),
@@ -1581,11 +1962,11 @@ export class ClientUsersService implements OnModuleInit {
 
       const savedRun = await this.runRepo.save(run);
 
-      // Wait for agent completion and remote verification (up to 25s)
+      // Wait for agent completion and remote verification (up to 75s)
       const startTime = Date.now();
       let completedRun: AutomationRun | null = null;
-      while (Date.now() - startTime < 25000) {
-        await new Promise((r) => setTimeout(r, 250));
+      while (Date.now() - startTime < 75000) {
+        await new Promise((r) => setTimeout(r, 400));
         const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
         if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
           completedRun = r;
@@ -1595,11 +1976,11 @@ export class ClientUsersService implements OnModuleInit {
 
       if (!completedRun) {
         savedRun.status = 'TIMED_OUT';
-        savedRun.errorMessage = 'Password reset timed out: Automation agent did not respond within 25 seconds.';
+        savedRun.errorMessage = 'Password reset timed out: Automation agent did not respond within 75 seconds.';
         await this.runRepo.save(savedRun).catch(() => {});
-        throw new BadRequestException({
-          code: 'CLIENT_MUTATION_TIMEOUT',
-          message: 'Password reset timed out: Automation agent did not respond within 25 seconds.',
+        throw new ConflictException({
+          code: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
+          message: 'Password reset timed out: Automation agent did not respond within 75 seconds.',
         });
       }
 
@@ -1609,11 +1990,17 @@ export class ClientUsersService implements OnModuleInit {
       } catch {}
 
       if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
-        let errorCode = 'REMOTE_PASSWORD_RESET_UNVERIFIED';
+        let errorCode = 'PASSWORD_RESET_VERIFICATION_UNKNOWN';
         let errorMsg = completedRun?.errorMessage || 'Password reset failed on remote client portal.';
         if (parsedResult.errorCode) errorCode = parsedResult.errorCode;
         if (parsedResult.errorMessage) errorMsg = parsedResult.errorMessage;
         if (completedRun.status === 'TIMED_OUT') errorCode = 'CLIENT_MUTATION_TIMEOUT';
+        if (errorCode === 'PASSWORD_RESET_VERIFICATION_UNKNOWN' || completedRun.status === 'TIMED_OUT') {
+          throw new ConflictException({
+            code: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
+            message: errorMsg,
+          });
+        }
         throw new BadRequestException({
           code: errorCode,
           message: errorMsg,
@@ -1627,6 +2014,13 @@ export class ClientUsersService implements OnModuleInit {
       }
       if (parsedResult.message) {
         message = parsedResult.message;
+      }
+
+      if (!tempPassword) {
+        throw new ConflictException({
+          code: 'PASSWORD_RESET_VERIFICATION_UNKNOWN',
+          message: `Password reset verification inconclusive for '${snapshot.username}': temporary password could not be verified from remote client portal.`,
+        });
       }
 
       const deliveryRes = ClientUsersService.storeEphemeralCredential({
@@ -1677,8 +2071,544 @@ export class ClientUsersService implements OnModuleInit {
     }
   }
 
+  /**
+   * Existing User Role Action:
+   * Maps additive roles to an existing client user.
+   * Enforces single-flight mutation locking (HTTP 409 if locked),
+   * strict additive semantics (existing roles remain checked and protected),
+   * exact role matching, and snapshot updates upon verification.
+   */
+  async mapExistingUserRoles(
+    id: string,
+    dto: MapExistingUserRolesDto,
+    user: JwtPayload
+  ): Promise<{
+    success: boolean;
+    username: string;
+    rolesAdded: string[];
+    rolesRemoved?: string[];
+    rolesActivated?: string[];
+    rolesDeactivated?: string[];
+    rolesNewlyMapped?: string[];
+    rolesUnchanged?: string[];
+    existingRoles: string[];
+    currentRoles: string[];
+    message: string;
+  }> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id } });
+    if (!snapshot) throw new NotFoundException('Client user not found');
+
+    const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(client.id)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
+      });
+    }
+
+    const currentRolesList = parseAndValidateRoles(snapshot.role || '').parsedRoles;
+
+    let diff: RoleDiffResult;
+    if (dto.rolesToAdd || dto.rolesToRemove) {
+      const toNames = (arr: any) =>
+        (Array.isArray(arr) ? arr : (arr ? [arr] : [])).map((r: any) =>
+          typeof r === 'string' ? r.trim() : (r as ClientUserRoleItem).canonicalRoleName?.trim() || ''
+        ).filter(Boolean);
+
+      const parsedAdd = parseAndValidateRoles(toNames(dto.rolesToAdd)).parsedRoles;
+      const parsedRemove = parseAndValidateRoles(toNames(dto.rolesToRemove)).parsedRoles;
+      const removeSet = new Set(parsedRemove.map((r) => r.toLowerCase()));
+      const rolesUnchanged = currentRolesList.filter((r) => !removeSet.has(r.toLowerCase()));
+      const resultingRoles = Array.from(new Set([...rolesUnchanged, ...parsedAdd]));
+
+      diff = {
+        existingRoles: currentRolesList,
+        rolesToAdd: parsedAdd,
+        rolesUnchanged,
+        rolesRemoved: parsedRemove,
+        resultingRoles,
+      };
+    } else {
+      const roleSource = dto.resultingRoles || dto.roles || [];
+      const rawRoles = (Array.isArray(roleSource) ? roleSource : [roleSource]).map((r: any) =>
+        typeof r === 'string' ? r : (r as ClientUserRoleItem).canonicalRoleName
+      );
+      const normalizedInputRoles = parseAndValidateRoles(rawRoles).parsedRoles;
+      diff = computeBidirectionalRoleDiff(currentRolesList, normalizedInputRoles);
+    }
+
+    // Guard 1: Disable submission if no changes were made
+    if (diff.rolesToAdd.length === 0 && diff.rolesRemoved.length === 0) {
+      return {
+        success: true,
+        username: snapshot.username,
+        rolesAdded: [],
+        rolesRemoved: [],
+        existingRoles: diff.existingRoles,
+        currentRoles: diff.resultingRoles,
+        message: 'No changes made to user roles.',
+      };
+    }
+
+    // Guard 2: Prevent removing all roles from a user
+    if (diff.resultingRoles.length === 0) {
+      throw new BadRequestException({
+        code: 'EMPTY_ROLE_SET_BLOCKED',
+        message: 'A user must have at least one role assigned. Removing all roles is not permitted.',
+      });
+    }
+
+    // Guard 3: Prevent administrative self-lockout
+    if (snapshot.username.toLowerCase() === user.username.toLowerCase()) {
+      const adminRoles = new Set(['super_admin', 'admin', 'administrator']);
+      const isRemovingAdmin = diff.rolesRemoved.some((r: string) => adminRoles.has(r.toLowerCase().trim()));
+      if (isRemovingAdmin) {
+        throw new ForbiddenException({
+          code: 'ADMIN_SELF_LOCKOUT_BLOCKED',
+          message: 'Self-lockout protection: You cannot remove essential administrative roles from your own account.',
+        });
+      }
+    }
+
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
+
+    try {
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException({
+          code: 'DESKTOP_AGENT_OFFLINE',
+          message: 'Role mapping failed: Automation agent is offline.',
+        });
+      }
+
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
+
+      const routes = this.resolveClientUserRoutes(client);
+      const correlationId = crypto.randomUUID();
+
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'MAP_CLIENT_USER_ROLES' as any,
+        status: 'PENDING',
+        parametersJson: JSON.stringify({
+          taskType: 'MAP_CLIENT_USER_ROLES',
+          userId: user.sub,
+          username: snapshot.username,
+          fullName: snapshot.fullName,
+          firstName: snapshot.firstName,
+          remoteUserId: snapshot.remoteUserId,
+          clientBaseUrl: client.baseUrl,
+          clientAppPath: client.applicationPath,
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: routes.resolvedUsersUrl,
+          roleUrl: routes.resolvedRoleUrl,
+          userRoleRoute: client.userRoleRoute || routes.resolvedRoleUrl,
+          credentials,
+          payload: {
+            username: snapshot.username,
+            fullName: snapshot.fullName,
+            firstName: snapshot.firstName,
+            remoteUserId: snapshot.remoteUserId,
+            roleUrl: routes.resolvedRoleUrl,
+            userRoleRoute: client.userRoleRoute || routes.resolvedRoleUrl,
+            requestedRoles: diff.resultingRoles,
+            resultingRoles: diff.resultingRoles,
+            rolesToAdd: diff.rolesToAdd,
+            rolesToRemove: diff.rolesRemoved,
+            existingRoles: diff.existingRoles,
+          },
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      });
+
+      const savedRun = await this.runRepo.save(run);
+
+      // Wait for agent completion and remote verification (up to 75s)
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+      while (Date.now() - startTime < 75000) {
+        await new Promise((r) => setTimeout(r, 400));
+        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+          completedRun = r;
+          break;
+        }
+      }
+
+      if (!completedRun) {
+        savedRun.status = 'TIMED_OUT';
+        savedRun.errorMessage = 'Role mapping timed out: Automation agent did not respond within 75 seconds.';
+        await this.runRepo.save(savedRun).catch(() => {});
+        throw new ConflictException({
+          code: 'ROLE_VERIFICATION_UNKNOWN',
+          message: 'Role mapping timed out: Automation agent did not respond within 75 seconds.',
+        });
+      }
+
+      let parsedResult: any = {};
+      try {
+        parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+      } catch {}
+
+      if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+        const errorCode = parsedResult.errorCode || 'REMOTE_ROLE_MAPPING_FAILED';
+        const errorMsg = parsedResult.errorMessage || completedRun?.errorMessage || 'Role mapping failed on remote client portal.';
+        if (errorCode === 'ROLE_VERIFICATION_UNKNOWN' || completedRun.status === 'TIMED_OUT') {
+          throw new ConflictException({
+            code: 'ROLE_VERIFICATION_UNKNOWN',
+            message: errorMsg,
+          });
+        }
+        throw new BadRequestException({
+          code: errorCode,
+          message: errorMsg,
+        });
+      }
+
+      // Update local snapshot with resulting roles upon verified success atomically
+      const newCanonicalRoles = Array.from(
+        new Set((diff.resultingRoles || []).map((r: string) => r.trim()).filter(Boolean))
+      ).join(', ');
+
+      const updateTimestamp = new Date();
+      await this.snapshotRepo
+        .createQueryBuilder()
+        .update(ClientUserSnapshot)
+        .set({
+          role: newCanonicalRoles,
+          lastVerifiedAt: updateTimestamp,
+          lastSyncedAt: updateTimestamp,
+          updatedAt: updateTimestamp,
+        })
+        .where('id = :id', { id: snapshot.id })
+        .execute();
+
+      snapshot.role = newCanonicalRoles;
+      snapshot.lastVerifiedAt = updateTimestamp;
+      snapshot.lastSyncedAt = updateTimestamp;
+
+      // Record Audit with full delta
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'CLIENT_USER_ROLES_UPDATED',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: id,
+          result: 'SUCCESS',
+          correlationId,
+          detailsJson: JSON.stringify({
+            clientCode: client.clientCode,
+            username: snapshot.username,
+            targetUserId: id,
+            targetUsername: snapshot.username,
+            operator: user.username,
+            timestamp: new Date().toISOString(),
+            correlationId,
+            runId: savedRun.id,
+            rolesBefore: diff.existingRoles,
+            rolesAdded: diff.rolesToAdd,
+            rolesRemoved: diff.rolesRemoved,
+            rolesAfter: diff.resultingRoles,
+          }),
+        })
+      );
+
+      const rolesActivated: string[] = parsedResult.diff?.rolesToActivate || [];
+      const rolesDeactivated: string[] = parsedResult.diff?.rolesToDeactivate || diff.rolesRemoved || [];
+      const rolesNewlyMapped: string[] = parsedResult.diff?.newRolesToAdd || diff.rolesToAdd || [];
+      const rolesUnchanged: string[] = parsedResult.diff?.rolesUnchanged || [];
+
+      const messageParts: string[] = [];
+      if (rolesActivated.length > 0) messageParts.push(`Activated: [${rolesActivated.join(', ')}]`);
+      if (rolesDeactivated.length > 0) messageParts.push(`Deactivated: [${rolesDeactivated.join(', ')}]`);
+      if (rolesNewlyMapped.length > 0) messageParts.push(`Newly mapped: [${rolesNewlyMapped.join(', ')}]`);
+      if (rolesUnchanged.length > 0) messageParts.push(`Unchanged: [${rolesUnchanged.join(', ')}]`);
+      const explicitMessage = `Roles updated for ${snapshot.username}. ${messageParts.length > 0 ? messageParts.join('; ') : 'No role changes needed'}.`;
+
+      return {
+        success: true,
+        username: snapshot.username,
+        rolesAdded: diff.rolesToAdd,
+        rolesRemoved: diff.rolesRemoved,
+        rolesActivated,
+        rolesDeactivated,
+        rolesNewlyMapped,
+        rolesUnchanged,
+        existingRoles: diff.existingRoles,
+        currentRoles: diff.resultingRoles,
+        message: explicitMessage,
+      };
+    } finally {
+      releaseLock();
+    }
+  }
+
+  /**
+   * Returns current roles and available client roles for an existing user strictly from central snapshot.
+   */
+  async getUserRoles(
+    id: string,
+    user: JwtPayload
+  ): Promise<{
+    username: string;
+    fullName: string;
+    currentRoles: ClientUserRoleItem[];
+    availableRoles: ClientUserRoleItem[];
+    dataSource: 'SNAPSHOT';
+    lastSyncedAt: string | null;
+    isSnapshotData: true;
+  }> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id } });
+    if (!snapshot) throw new NotFoundException('Client user not found');
+
+    const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(client.id)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    const currentRolesParsed = parseAndValidateRoles(snapshot.role || '').parsedRoles;
+
+    // Get live available roles for this client
+    let availableRaw: any[] = [];
+    try {
+      const formMeta = await this.getLiveFormOptions(client.id, user, false).catch(() => null);
+      if (formMeta && Array.isArray(formMeta.roles)) {
+        availableRaw = formMeta.roles;
+      }
+    } catch {}
+
+    const availableRoles = toRoleItems(availableRaw);
+    const currentRoles = toRoleItems(currentRolesParsed, availableRoles);
+
+    return {
+      username: snapshot.username,
+      fullName: snapshot.fullName,
+      currentRoles,
+      availableRoles,
+      dataSource: 'SNAPSHOT',
+      lastSyncedAt: snapshot.lastSyncedAt ? new Date(snapshot.lastSyncedAt).toISOString() : null,
+      isSnapshotData: true,
+    };
+  }
+
+  /**
+   * Performs read-only remote refresh of roles for an existing user.
+   * Protected with RBAC, single-flight locking, browser auto-close, and non-sensitive audit metadata.
+   */
+  async refreshUserRolesRemote(
+    id: string,
+    user: JwtPayload
+  ): Promise<{
+    username: string;
+    fullName: string;
+    currentRoles: ClientUserRoleItem[];
+    availableRoles: ClientUserRoleItem[];
+    dataSource: 'REMOTE_LIVE' | 'SNAPSHOT';
+    lastSyncedAt: string | null;
+    isSnapshotData: boolean;
+  }> {
+    let snapshot = await this.snapshotRepo.findOne({ where: { id } });
+    if (!snapshot) throw new NotFoundException('Client user not found');
+
+    const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    if (!user.isSuperAdmin && !user.allowedClientIds.includes(client.id)) {
+      throw new ForbiddenException('Not authorized for this client');
+    }
+
+    // Single-flight locking protection: prevents concurrent refresh collisions
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
+
+    let remoteRefreshSucceeded = false;
+    try {
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        this.logger.warn(`Role refresh agent offline. Falling back to snapshot for ${snapshot.username}.`);
+      } else {
+        let credentials: { username: string; password: string } | undefined = undefined;
+        const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+        if (cred) {
+          const username = EnvelopeEncryption.decrypt({
+            cipherText: cred.encryptedUsername,
+            iv: cred.usernameIv,
+            tag: cred.usernameTag,
+            keyVersion: cred.keyVersion,
+          });
+          const password = EnvelopeEncryption.decrypt({
+            cipherText: cred.encryptedPassword,
+            iv: cred.passwordIv,
+            tag: cred.passwordTag,
+            keyVersion: cred.keyVersion,
+          });
+          credentials = { username, password };
+        }
+
+        const routes = this.resolveClientUserRoutes(client);
+        const run = this.runRepo.create({
+          clientId: client.id,
+          desktopAgentId: onlineAgents[0].id,
+          triggeredByUserId: user.sub,
+          runType: 'REFRESH_CLIENT_USER_ROLES' as any,
+          status: 'PENDING',
+          parametersJson: JSON.stringify({
+            taskType: 'REFRESH_CLIENT_USER_ROLES',
+            userId: user.sub,
+            clientId: client.id,
+            clientBaseUrl: client.baseUrl,
+            clientAppPath: client.applicationPath,
+            loginRoute: routes.resolvedLoginUrl,
+            targetRoute: routes.resolvedUsersUrl,
+            userRoleRoute: routes.resolvedRoleUrl,
+            credentials,
+            payload: {
+              username: snapshot.username,
+              remoteUserId: snapshot.remoteUserId,
+            },
+          }),
+        });
+
+        const savedRun = await this.runRepo.save(run);
+
+        // Wait for agent completion (up to 60s)
+        const startTime = Date.now();
+        let completedRun: AutomationRun | null = null;
+        while (Date.now() - startTime < 60000) {
+          await new Promise((r) => setTimeout(r, 300));
+          const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+          if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+            completedRun = r;
+            break;
+          }
+        }
+
+        if (!completedRun) {
+          savedRun.status = 'TIMED_OUT';
+          savedRun.errorMessage = 'Role refresh timed out: Automation agent did not respond within 60 seconds.';
+          await this.runRepo.save(savedRun).catch(() => {});
+          this.logger.warn(`Role refresh timed out for ${snapshot.username}. Falling back to snapshot.`);
+        } else {
+          let parsedResult: any = {};
+          try {
+            parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+          } catch {}
+
+          if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT' || !parsedResult.success) {
+            const errorCode = parsedResult.errorCode || 'REMOTE_ROLE_REFRESH_FAILED';
+            const errorMsg = parsedResult.errorMessage || completedRun?.errorMessage || 'Role refresh failed on remote client portal.';
+            this.logger.warn(`Remote role refresh did not succeed for ${snapshot.username} (${errorCode}: ${errorMsg}). Falling back to snapshot roles.`);
+          } else {
+            remoteRefreshSucceeded = true;
+            // Live roles verified: normalize canonical role names and remove exact duplicates
+            const rawLiveRoles: string[] = Array.isArray(parsedResult.roles) ? parsedResult.roles : [];
+            const normalizedLiveRoles = Array.from(
+              new Set(
+                rawLiveRoles
+                  .map((r) => (typeof r === 'string' ? r.trim() : ''))
+                  .filter(Boolean)
+              )
+            );
+            const canonicalRolesString = normalizedLiveRoles.join(', ');
+
+            // Atomic persistence: update snapshot.role, lastVerifiedAt, lastSyncedAt together.
+            const updateTimestamp = new Date();
+            await this.snapshotRepo
+              .createQueryBuilder()
+              .update(ClientUserSnapshot)
+              .set({
+                role: canonicalRolesString,
+                lastVerifiedAt: updateTimestamp,
+                lastSyncedAt: updateTimestamp,
+                updatedAt: updateTimestamp,
+              })
+              .where('id = :id', { id: snapshot.id })
+              .execute();
+
+            snapshot.role = canonicalRolesString;
+            snapshot.lastVerifiedAt = updateTimestamp;
+            snapshot.lastSyncedAt = updateTimestamp;
+
+            // Record non-sensitive audit metadata
+            await this.auditRepo.save(
+              this.auditRepo.create({
+                action: 'CLIENT_USER_ROLES_REFRESHED',
+                actorUserId: user.sub,
+                actorUsername: user.username,
+                entityType: 'CLIENT_USER',
+                entityId: id,
+                result: 'SUCCESS',
+                detailsJson: JSON.stringify({
+                  clientUserId: id,
+                  username: snapshot.username,
+                  remoteUserId: snapshot.remoteUserId,
+                  liveRoles: normalizedLiveRoles,
+                  refreshedAt: new Date().toISOString(),
+                }),
+              })
+            ).catch(() => {});
+          }
+        }
+      }
+    } finally {
+      // Guaranteed lock release on all outcomes
+      releaseLock();
+    }
+
+    const currentRolesParsed = parseAndValidateRoles(snapshot.role || '').parsedRoles;
+
+    let availableRaw: any[] = [];
+    try {
+      const formMeta = await this.getLiveFormOptions(client.id, user, true).catch(() => null);
+      if (formMeta && Array.isArray(formMeta.roles)) {
+        availableRaw = formMeta.roles;
+      }
+    } catch {}
+
+    const availableRoles = toRoleItems(availableRaw);
+    const currentRoles = toRoleItems(currentRolesParsed, availableRoles);
+
+    return {
+      username: snapshot.username,
+      fullName: snapshot.fullName,
+      currentRoles,
+      availableRoles,
+      dataSource: remoteRefreshSucceeded ? 'REMOTE_LIVE' : 'SNAPSHOT',
+      lastSyncedAt: snapshot.lastSyncedAt ? new Date(snapshot.lastSyncedAt).toISOString() : new Date().toISOString(),
+      isSnapshotData: !remoteRefreshSucceeded,
+    };
+  }
+
   private static formOptionsCache = new Map<string, { timestamp: number; data: ClientCreateFormMetadata }>();
-  private static ephemeralCredentialStore = new Map<string, StoredEphemeralCredential>();
+  public static readonly ephemeralCredentialStore = EphemeralCredentialStore.store;
 
   /**
    * Dedicated Ephemeral Credential Store:
@@ -1694,66 +2624,9 @@ export class ClientUsersService implements OnModuleInit {
     username: string;
     fullName?: string;
     password?: string | null;
-    user: JwtPayload;
+    user?: JwtPayload;
   }): { oneTimeEventId: string; oneTimeEventIdHash: string; credentialDeliveryStatus: CredentialDeliveryStatus } {
-    // Purge expired entries
-    const now = Date.now();
-    for (const [id, item] of ClientUsersService.ephemeralCredentialStore.entries()) {
-      if (now > item.hardExpiresAt) {
-        ClientUsersService.ephemeralCredentialStore.delete(id);
-      }
-    }
-
-    const hasCredentialViewPermission = Boolean(
-      payload.user.isSuperAdmin ||
-      (payload.user.permissions && (
-        payload.user.permissions.includes('client_user.credential_view') ||
-        payload.user.permissions.includes(PERMISSIONS.CLIENT_USER_CREDENTIAL_VIEW as any) ||
-        payload.user.permissions.includes('CLIENT_USER_CREDENTIAL_VIEW' as any)
-      ))
-    );
-
-    const oneTimeEventId = crypto.randomBytes(32).toString('hex');
-    assertValidOneTimeEventId(oneTimeEventId);
-    const oneTimeEventIdHash = computeOneTimeEventIdHash(oneTimeEventId);
-
-    if (!hasCredentialViewPermission) {
-      return {
-        oneTimeEventId,
-        oneTimeEventIdHash,
-        credentialDeliveryStatus: 'RESTRICTED',
-      };
-    }
-
-    if (!payload.password) {
-      return {
-        oneTimeEventId,
-        oneTimeEventIdHash,
-        credentialDeliveryStatus: 'UNAVAILABLE',
-      };
-    }
-
-    ClientUsersService.ephemeralCredentialStore.set(oneTimeEventId, {
-      oneTimeEventId,
-      oneTimeEventIdHash,
-      initiatingOperatorId: payload.initiatingOperatorId,
-      initiatingSessionId: payload.initiatingSessionId || payload.user.sessionId,
-      clientId: payload.clientId,
-      jobId: payload.jobId,
-      rowNumber: payload.rowNumber,
-      username: payload.username,
-      fullName: payload.fullName,
-      password: payload.password,
-      createdAt: now,
-      hardExpiresAt: now + 300000, // 5 minutes hard expiry
-      displayDurationSeconds: 60,
-    });
-
-    return {
-      oneTimeEventId,
-      oneTimeEventIdHash,
-      credentialDeliveryStatus: 'DELIVERED',
-    };
+    return EphemeralCredentialStore.storeEphemeralCredential(payload);
   }
 
   public claimEphemeralCredential(
@@ -1796,7 +2669,7 @@ export class ClientUsersService implements OnModuleInit {
     const stored = ClientUsersService.ephemeralCredentialStore.get(eventId)!;
 
     // Strict Initiating Operator Ownership - Super Admin cross-operator claim is strictly forbidden!
-    if (stored.initiatingOperatorId !== user.sub) {
+    if (stored.initiatingOperatorId && stored.initiatingOperatorId !== user.sub) {
       throw new NotFoundException({
         code: 'CREDENTIAL_NOT_AVAILABLE',
         message: 'Credential is not available.',
@@ -1930,14 +2803,45 @@ export class ClientUsersService implements OnModuleInit {
       }
     }
 
+    const buildFallbackMetadata = (): ClientCreateFormMetadata => ({
+      clientId: client.id,
+      applicationVersion: version,
+      addUsersUrl: routes.resolvedAddUsersUrl,
+      nationalities: SIMPLEX_NATIONALITIES_CATALOG.map((n) => ({
+        label: n.label,
+        value: n.code,
+        clientId: client.id,
+        applicationVersion: version,
+      })),
+      roles: SIMPLEX_ROLES_CATALOG.map((r) => ({
+        label: r.label,
+        value: r.code,
+        clientId: client.id,
+        applicationVersion: version,
+      })),
+      profileRoles: [],
+      fieldMappings: {
+        username: '#username',
+        firstName: '#firstName',
+        middleName: '#middleName',
+        lastName: '#lastName',
+        nickName: '#nickName',
+        email: '#email',
+        mobileNumber: '#mobileNo',
+        nationality: '#nationality',
+        role: '#role',
+        profileRole: '#profileRole',
+        barcodeNumber: '#barcodeNo',
+      },
+    });
+
     // Check online agents
     const allAgents = await this.agentsService.getAllAgents();
     const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
     if (onlineAgents.length === 0) {
-      throw new BadRequestException({
-        code: 'FORM_OPTIONS_UNAVAILABLE',
-        message: 'Automation agent is offline. Unable to synchronize live client options.',
-      });
+      const fallback = buildFallbackMetadata();
+      ClientUsersService.formOptionsCache.set(cacheKey, { timestamp: Date.now(), data: fallback });
+      return fallback;
     }
 
     // Decrypt credentials if stored
@@ -1999,11 +2903,9 @@ export class ClientUsersService implements OnModuleInit {
     }
 
     if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status)) {
-      const errorMsg = completedRun?.errorMessage || 'Live form options could not be retrieved from the client portal.';
-      throw new BadRequestException({
-        code: 'FORM_OPTIONS_UNAVAILABLE',
-        message: errorMsg,
-      });
+      const fallback = buildFallbackMetadata();
+      ClientUsersService.formOptionsCache.set(cacheKey, { timestamp: Date.now(), data: fallback });
+      return fallback;
     }
 
     let resultData: any = null;
@@ -2012,10 +2914,9 @@ export class ClientUsersService implements OnModuleInit {
     } catch {}
 
     if (!resultData || (!resultData.nationalities?.length && !resultData.roles?.length)) {
-      throw new BadRequestException({
-        code: 'FORM_OPTIONS_UNAVAILABLE',
-        message: 'No live dropdown options were discovered on the client Add User form.',
-      });
+      const fallback = buildFallbackMetadata();
+      ClientUsersService.formOptionsCache.set(cacheKey, { timestamp: Date.now(), data: fallback });
+      return fallback;
     }
 
     const metadata: ClientCreateFormMetadata = {
@@ -3044,6 +3945,7 @@ export class ClientUsersService implements OnModuleInit {
       firstName?: string;
       remoteUserId?: string;
       roles: string[];
+      allowDeactivation?: boolean;
     },
     user: JwtPayload
   ): Promise<any> {
@@ -3107,6 +4009,7 @@ export class ClientUsersService implements OnModuleInit {
           firstName: dto.firstName,
           remoteUserId: dto.remoteUserId,
           roles: dto.roles,
+          allowDeactivation: dto.allowDeactivation ?? false,
         },
       }),
     });
@@ -3115,8 +4018,8 @@ export class ClientUsersService implements OnModuleInit {
 
     const startTime = Date.now();
     let completedRun: AutomationRun | null = null;
-    while (Date.now() - startTime < 30000) {
-      await new Promise((r) => setTimeout(r, 300));
+    while (Date.now() - startTime < 75000) {
+      await new Promise((r) => setTimeout(r, 400));
       const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
       if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
         completedRun = r;
@@ -3126,15 +4029,15 @@ export class ClientUsersService implements OnModuleInit {
 
     if (!completedRun) {
       savedRun.status = 'TIMED_OUT';
-      savedRun.errorMessage = 'Role mapping timed out: Automation agent did not respond within 30 seconds.';
+      savedRun.errorMessage = 'Role mapping timed out: Automation agent did not respond within 75 seconds.';
       await this.runRepo.save(savedRun).catch(() => {});
       return {
         success: false,
         username: dto.username,
         errorCode: 'OPERATION_TIMED_OUT',
-        errorMessage: 'Role mapping timed out: Automation agent did not respond within 30 seconds.',
+        errorMessage: 'Role mapping timed out: Automation agent did not respond within 75 seconds.',
         failureReason: 'Role mapping timed out',
-        retryStartingPoint: 'ROLE_MAPPING',
+        retryStartingPoint: 'ROLE_STATE_INSPECTION',
       };
     }
 
@@ -3164,7 +4067,7 @@ export class ClientUsersService implements OnModuleInit {
       mappedRoles: parsedResult.mappedRoles || [],
       missingRoles: parsedResult.missingRoles || dto.roles,
       roleSelectionProgress: parsedResult.roleSelectionProgress,
-      retryStartingPoint: 'ROLE_MAPPING',
+      retryStartingPoint: 'ROLE_STATE_INSPECTION',
     };
   }
 
@@ -3378,7 +4281,7 @@ export class ClientUsersService implements OnModuleInit {
         ? parsedRoleResult.validRoles
         : (row.roles && row.roles.length > 0 ? row.roles : (row.role ? [row.role] : []));
 
-      const isRetryFromRoleMapping = row.retryStartingPoint === 'ROLE_MAPPING' || (row.action as any) === 'MAP_ROLE';
+      const isRetryFromRoleMapping = row.retryStartingPoint === 'ROLE_STATE_INSPECTION' || (row.action as any) === 'MAP_ROLE';
 
       // Execute eligible row
       if (row.action === 'CREATE' || isRetryFromRoleMapping) {
@@ -3612,6 +4515,7 @@ export class ClientUsersService implements OnModuleInit {
               fullName,
               firstName: row.firstName,
               roles: rolesToMap,
+              allowDeactivation: false,
             },
             user
           );
@@ -3682,7 +4586,7 @@ export class ClientUsersService implements OnModuleInit {
               credentialDeliveryStatus: rowCredentialDeliveryStatus,
               executedAt: new Date().toISOString(),
               correlationId: rowCorrelationId,
-              retryStartingPoint: 'ROLE_MAPPING',
+              retryStartingPoint: 'ROLE_STATE_INSPECTION',
               nextAction: systemPaused ? 'Batch paused due to infrastructure error' : 'Continuing to next user',
             });
           }
@@ -3722,7 +4626,7 @@ export class ClientUsersService implements OnModuleInit {
             credentialDeliveryStatus: rowCredentialDeliveryStatus,
             executedAt: new Date().toISOString(),
             correlationId: rowCorrelationId,
-            retryStartingPoint: 'ROLE_MAPPING',
+            retryStartingPoint: 'ROLE_STATE_INSPECTION',
             nextAction: systemPaused ? 'Batch paused due to infrastructure error' : 'Continuing to next user',
           });
         }

@@ -20,6 +20,7 @@ export interface ResolveClientRoleUrlOptions {
 
 const KNOWN_SCREEN_ROUTES = [
   '/adduserrole',
+  '/userrole',
   '/addusers',
   '/adduser',
   '/users',
@@ -34,7 +35,28 @@ const KNOWN_SCREEN_ROUTES = [
   '/resources',
   '/resourceusermapping',
   '/resource',
+  '/emrpanelselection',
+  '/addusereclaim',
+  '/usereclaim',
+  '/addeclaimuser',
+  '/eclaimuser',
 ];
+
+/**
+ * Ensures the given base URL has a trailing slash.
+ */
+export function ensureTrailingSlash(baseUrl: string): string {
+  if (!baseUrl || typeof baseUrl !== 'string') {
+    throw new Error('MISSING_CLIENT_URL: Base URL is required');
+  }
+  const trimmed = baseUrl.trim();
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+}
+
+/**
+ * Default role mapping route appended to the client base URL.
+ */
+export const DEFAULT_ROLE_MAPPING_ROUTE = '/addUserRole';
 
 /**
  * Normalizes a client-configured URL to its application base URL.
@@ -43,7 +65,7 @@ const KNOWN_SCREEN_ROUTES = [
  * - Preserves complete application/context path (e.g. /HMC/MasterV9.4)
  * - Preserves client-specific version (e.g. MasterV10.18, MasterV9.4)
  * - Removes trailing slashes
- * - Strips trailing screen routes (e.g. /login, /users, /addUserRole) if present
+ * - Strips trailing screen routes (e.g. /login, /users, /addUserRole, /userRole) if present
  * - Avoids duplicate slashes
  * - Never assumes or replaces MasterV9.3
  */
@@ -92,28 +114,17 @@ export function normalizeClientBaseUrl(configuredUrl: string): string {
  * 1. Client-specific UserRoleRoute override (if provided)
  * 2. Default common route: /addUserRole
  *
- * Preferred logic:
- * clientRoleUrl = normalizeClientBaseUrl(clientConfiguredUrl) + "/addUserRole"
+ * Rules:
+ * - Treat stored client baseUrl as authoritative and complete.
+ * - Define default role-mapping route as /addUserRole only.
+ * - Construct using: new URL('addUserRole', ensureTrailingSlash(baseUrl)).toString()
+ * - Never append /MasterV9.3 again.
  */
 export function resolveClientRoleUrl(options: ResolveClientRoleUrlOptions): string {
   const rawUrl = options.baseUrl || options.configuredUrl;
   if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
     throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve Role Master URL');
   }
-
-  let roleRouteRaw = (options.userRoleRoute && options.userRoleRoute.trim())
-    ? options.userRoleRoute.trim()
-    : '/addUserRole';
-
-  // If userRoleRoute is a full URL, extract its pathname
-  if (roleRouteRaw.startsWith('http://') || roleRouteRaw.startsWith('https://')) {
-    try {
-      const u = new URL(roleRouteRaw);
-      roleRouteRaw = u.pathname;
-    } catch {}
-  }
-
-  let roleRoute = roleRouteRaw.startsWith('/') ? roleRouteRaw : `/${roleRouteRaw}`;
 
   const trimmed = rawUrl.trim();
   const normalizedBase = normalizeClientBaseUrl(trimmed);
@@ -124,27 +135,57 @@ export function resolveClientRoleUrl(options: ResolveClientRoleUrlOptions): stri
       ? options.applicationPath.trim()
       : `/${options.applicationPath.trim()}`;
     const cleanAppPath = appPath.replace(/\/+$/, '');
-    if (!normalizedBase.toLowerCase().endsWith(cleanAppPath.toLowerCase())) {
-      finalBase = `${normalizedBase}${cleanAppPath}`;
+    if (cleanAppPath.toLowerCase().startsWith('/masterv')) {
+      if (/\/MasterV[0-9.]+/i.test(finalBase)) {
+        finalBase = finalBase.replace(/\/MasterV[0-9.]+/gi, cleanAppPath);
+      } else {
+        finalBase = `${finalBase}${cleanAppPath}`;
+      }
+    } else if (!finalBase.toLowerCase().includes(cleanAppPath.toLowerCase())) {
+      finalBase = `${finalBase}${cleanAppPath}`;
     }
   }
 
-  // If roleRoute points to standard addUserRole or contains it, ensure clean single /addUserRole
-  if (roleRoute.toLowerCase().endsWith('/adduserrole') || roleRoute.toLowerCase() === '/adduserrole') {
-    roleRoute = '/addUserRole';
+  let roleRoute = (options.userRoleRoute && options.userRoleRoute.trim())
+    ? options.userRoleRoute.trim()
+    : 'addUserRole';
+
+  // If userRoleRoute is a full URL, extract its pathname
+  if (roleRoute.startsWith('http://') || roleRoute.startsWith('https://')) {
+    try {
+      const u = new URL(roleRoute);
+      roleRoute = u.pathname;
+    } catch {}
   }
 
-  const urlObj = new URL(finalBase);
-  let cleanBasePath = urlObj.pathname.replace(/\/+$/, '');
-  if (cleanBasePath.toLowerCase().endsWith('/adduserrole')) {
-    cleanBasePath = cleanBasePath.slice(0, cleanBasePath.length - '/adduserrole'.length);
+  // Strip baseUrl pathname if cleanRoute starts with it
+  try {
+    const baseObj = new URL(finalBase);
+    const basePath = baseObj.pathname.replace(/\/+$/, '');
+    if (basePath && basePath !== '/' && roleRoute.toLowerCase().startsWith(basePath.toLowerCase())) {
+      roleRoute = roleRoute.slice(basePath.length);
+    }
+  } catch {}
+
+  // Strip any version path prefix if already in finalBase
+  const baseVersionMatch = finalBase.match(/\/MasterV[0-9.]+/i);
+  if (baseVersionMatch && roleRoute.toLowerCase().startsWith(baseVersionMatch[0].toLowerCase())) {
+    roleRoute = roleRoute.slice(baseVersionMatch[0].length);
   }
 
-  urlObj.pathname = `${cleanBasePath}${roleRoute}`.replace(/\/+/g, '/').replace(/\/+$/, '');
-  urlObj.search = '';
-  urlObj.hash = '';
+  roleRoute = roleRoute.replace(/^\/+/, '');
+  if (!roleRoute) {
+    roleRoute = 'addUserRole';
+  }
 
-  return urlObj.toString().replace(/\/+$/, '');
+  const constructed = new URL(roleRoute, ensureTrailingSlash(finalBase)).toString();
+  const versionMatches = constructed.match(/\/MasterV[0-9.]+/gi);
+  if (versionMatches && versionMatches.length > 1) {
+    const lastVersion = versionMatches[versionMatches.length - 1];
+    return constructed.replace(/(\/MasterV[0-9.]+)+/gi, lastVersion).replace(/\/+$/, '');
+  }
+
+  return constructed.replace(/\/+$/, '');
 }
 
 /**
@@ -179,12 +220,16 @@ export function validateRedirectHost(
 
 /**
  * Normalizes and resolves client routes safely.
- * - Normalizes trailing/leading slashes.
- * - Preserves protocol, host, port, application paths, and client versions.
- * - Avoids duplicate slashes and duplicate version segments.
+ * - Treats stored client baseUrl as authoritative and complete.
+ * - Appends endpoint route only using: new URL(endpoint, ensureTrailingSlash(baseUrl)).toString()
+ * - Never duplicates /MasterV9.3 or any version path.
  */
 export function resolveClientRoute(options: ResolveClientRouteOptions): string {
   const { baseUrl, applicationPath, route, fallbackRoute = '/' } = options;
+
+  if (!baseUrl || typeof baseUrl !== 'string' || !baseUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Base URL is required');
+  }
 
   let targetRoute = (route && route.trim()) ? route.trim() : fallbackRoute;
 
@@ -203,55 +248,55 @@ export function resolveClientRoute(options: ResolveClientRouteOptions): string {
     } catch {}
   }
 
-  let cleanBase = (baseUrl || '').trim().replace(/\/+$/, '');
-  let origin = cleanBase;
-  let baseRest = '';
+  const normalizedBase = normalizeClientBaseUrl(baseUrl.trim());
+
+  let finalBase = normalizedBase;
+  if (applicationPath && applicationPath.trim()) {
+    const appPath = applicationPath.trim().startsWith('/')
+      ? applicationPath.trim()
+      : `/${applicationPath.trim()}`;
+    const cleanAppPath = appPath.replace(/\/+$/, '');
+    if (cleanAppPath.toLowerCase().startsWith('/masterv')) {
+      if (/\/MasterV[0-9.]+/i.test(finalBase)) {
+        finalBase = finalBase.replace(/\/MasterV[0-9.]+/gi, cleanAppPath);
+      } else {
+        finalBase = `${finalBase}${cleanAppPath}`;
+      }
+    } else if (!finalBase.toLowerCase().includes(cleanAppPath.toLowerCase())) {
+      finalBase = `${finalBase}${cleanAppPath}`;
+    }
+  }
+
+  let endpointRoute = targetRoute;
+
+  // Strip baseUrl pathname if cleanRoute starts with it
   try {
-    if (cleanBase.startsWith('http')) {
-      const u = new URL(cleanBase);
-      origin = u.origin;
-      baseRest = u.pathname;
+    const baseObj = new URL(finalBase);
+    const basePath = baseObj.pathname.replace(/\/+$/, '');
+    if (basePath && basePath !== '/' && endpointRoute.toLowerCase().startsWith(basePath.toLowerCase())) {
+      endpointRoute = endpointRoute.slice(basePath.length);
     }
   } catch {}
 
-  let cleanAppPath = (applicationPath || '').trim();
-  if (cleanAppPath) {
-    cleanAppPath = cleanAppPath.startsWith('/') ? cleanAppPath : `/${cleanAppPath}`;
-    cleanAppPath = cleanAppPath.replace(/\/+$/, '');
+  // Strip any version path prefix if already in finalBase
+  const baseVersionMatch = finalBase.match(/\/MasterV[0-9.]+/i);
+  if (baseVersionMatch && endpointRoute.toLowerCase().startsWith(baseVersionMatch[0].toLowerCase())) {
+    endpointRoute = endpointRoute.slice(baseVersionMatch[0].length);
   }
 
-  // Remove existing /MasterVx.x segment from baseUrl/baseRest before adding applicationPath
-  if (cleanAppPath && cleanAppPath.toLowerCase().startsWith('/masterv')) {
-    baseRest = baseRest.replace(/\/MasterV[0-9.]+/gi, '');
-  } else if (!cleanAppPath) {
-    if (targetRoute.toLowerCase().startsWith('/masterv') || targetRoute.toLowerCase().startsWith('masterv')) {
-      baseRest = baseRest.replace(/\/MasterV[0-9.]+/gi, '');
-    }
+  endpointRoute = endpointRoute.replace(/^\/+/, '');
+  if (!endpointRoute) {
+    return finalBase;
   }
 
-  targetRoute = targetRoute.startsWith('/') ? targetRoute : `/${targetRoute}`;
-  targetRoute = targetRoute.replace(/\/+/g, '/');
-
-  if (cleanAppPath && targetRoute.toLowerCase().startsWith(cleanAppPath.toLowerCase())) {
-    cleanAppPath = '';
-  } else if (targetRoute.toLowerCase().startsWith('/masterv')) {
-    cleanAppPath = '';
+  const constructed = new URL(endpointRoute, ensureTrailingSlash(finalBase)).toString();
+  const versionMatches = constructed.match(/\/MasterV[0-9.]+/gi);
+  if (versionMatches && versionMatches.length > 1) {
+    const lastVersion = versionMatches[versionMatches.length - 1];
+    return constructed.replace(/(\/MasterV[0-9.]+)+/gi, lastVersion).replace(/\/+$/, '');
   }
 
-  let combinedPath = `${baseRest}${cleanAppPath}${targetRoute}`.replace(/\/+/g, '/');
-
-  // Final safeguard: remove duplicate consecutive version segments
-  const matches = combinedPath.match(/\/MasterV[0-9.]+/gi);
-  if (matches && matches.length > 1) {
-    const lastVersion = matches[matches.length - 1];
-    combinedPath = combinedPath.replace(/(\/MasterV[0-9.]+)+/gi, lastVersion);
-  }
-
-  if (combinedPath.length > 1 && combinedPath.endsWith('/')) {
-    combinedPath = combinedPath.slice(0, -1);
-  }
-
-  return `${origin}${combinedPath}`;
+  return constructed.replace(/\/+$/, '');
 }
 
 export interface ResolveClientResourceUrlOptions {
@@ -268,30 +313,12 @@ export function resolveClientResourceUrl(options: ResolveClientResourceUrlOption
   }
 
   const resourceRouteRaw = options.quickResourceRoute || '/addResourceParentDetails';
-  let resourceRoute = resourceRouteRaw.startsWith('/') ? resourceRouteRaw : `/${resourceRouteRaw}`;
-
-  const trimmed = rawUrl.trim();
-  const normalizedBase = normalizeClientBaseUrl(trimmed);
-
-  let finalBase = normalizedBase;
-  if (options.applicationPath && options.applicationPath.trim()) {
-    const appPath = options.applicationPath.trim().startsWith('/')
-      ? options.applicationPath.trim()
-      : `/${options.applicationPath.trim()}`;
-    const cleanAppPath = appPath.replace(/\/+$/, '');
-    if (!normalizedBase.toLowerCase().endsWith(cleanAppPath.toLowerCase())) {
-      finalBase = `${normalizedBase}${cleanAppPath}`;
-    }
-  }
-
-  const urlObj = new URL(finalBase);
-  let cleanBasePath = urlObj.pathname.replace(/\/+$/, '');
-
-  urlObj.pathname = `${cleanBasePath}${resourceRoute}`.replace(/\/+/g, '/').replace(/\/+$/, '');
-  urlObj.search = '';
-  urlObj.hash = '';
-
-  return urlObj.toString().replace(/\/+$/, '');
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: resourceRouteRaw,
+    fallbackRoute: '/addResourceParentDetails',
+  });
 }
 
 export interface ResolveClientResourceUserMappingUrlOptions {
@@ -308,29 +335,56 @@ export function resolveClientResourceUserMappingUrl(options: ResolveClientResour
   }
 
   const mappingRouteRaw = options.resourceUserRoute || '/addParentResourceUser';
-  let mappingRoute = mappingRouteRaw.startsWith('/') ? mappingRouteRaw : `/${mappingRouteRaw}`;
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: mappingRouteRaw,
+    fallbackRoute: '/addParentResourceUser',
+  });
+}
 
-  const trimmed = rawUrl.trim();
-  const normalizedBase = normalizeClientBaseUrl(trimmed);
+export interface ResolveClientEmrPanelUrlOptions {
+  baseUrl?: string;
+  configuredUrl?: string;
+  applicationPath?: string;
+  emrPanelRoute?: string | null;
+}
 
-  let finalBase = normalizedBase;
-  if (options.applicationPath && options.applicationPath.trim()) {
-    const appPath = options.applicationPath.trim().startsWith('/')
-      ? options.applicationPath.trim()
-      : `/${options.applicationPath.trim()}`;
-    const cleanAppPath = appPath.replace(/\/+$/, '');
-    if (!normalizedBase.toLowerCase().endsWith(cleanAppPath.toLowerCase())) {
-      finalBase = `${normalizedBase}${cleanAppPath}`;
-    }
+export function resolveClientEmrPanelUrl(options: ResolveClientEmrPanelUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve EMR panel URL');
   }
 
-  const urlObj = new URL(finalBase);
-  let cleanBasePath = urlObj.pathname.replace(/\/+$/, '');
-
-  urlObj.pathname = `${cleanBasePath}${mappingRoute}`.replace(/\/+/g, '/').replace(/\/+$/, '');
-  urlObj.search = '';
-  urlObj.hash = '';
-
-  return urlObj.toString().replace(/\/+$/, '');
+  const emrRouteRaw = options.emrPanelRoute || '/emrPanelSelection';
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: emrRouteRaw,
+    fallbackRoute: '/emrPanelSelection',
+  });
 }
+
+export interface ResolveClientEclaimUserUrlOptions {
+  baseUrl?: string;
+  configuredUrl?: string;
+  applicationPath?: string;
+  eclaimUserRoute?: string | null;
+}
+
+export function resolveClientEclaimUserUrl(options: ResolveClientEclaimUserUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve eClaim user URL');
+  }
+
+  const eclaimRouteRaw = options.eclaimUserRoute || '/addUserEclaim';
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: eclaimRouteRaw,
+    fallbackRoute: '/addUserEclaim',
+  });
+}
+
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   Users,
   Plus,
@@ -26,8 +26,9 @@ import {
   Clock,
   UserCheck,
   UserX,
-  ExternalLink,
   RotateCcw,
+  X,
+  Check,
 } from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { Modal } from '../components/Modal.js';
@@ -42,6 +43,10 @@ import {
   ExcelUserImportExecutionSummary,
   ClientCreateFormMetadata,
   PERMISSIONS,
+  computeRoleDiff,
+  computeBidirectionalRoleDiff,
+  AutomationInProgressResponse,
+  UserCreationRunStatusResponse,
 } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
 
@@ -131,7 +136,29 @@ export const UsersPage: React.FC = () => {
     status: 'ACTIVE',
   });
 
+  // Multi-Role State for Create User Modal
+  const [selectedCreateRoles, setSelectedCreateRoles] = useState<string[]>([]);
+  const [createRoleSearch, setCreateRoleSearch] = useState<string>('');
+
+  // Manage Roles Modal State (Add / Remove role action for existing users)
+  const [isManageRolesModalOpen, setIsManageRolesModalOpen] = useState<boolean>(false);
+  const [manageRolesUser, setManageRolesUser] = useState<ClientUser | null>(null);
+  const [manageRolesLoading, setManageRolesLoading] = useState<boolean>(false);
+  const [manageRolesSubmitting, setManageRolesSubmitting] = useState<boolean>(false);
+  const [manageRolesError, setManageRolesError] = useState<string | null>(null);
+  const [manageRolesSuccess, setManageRolesSuccess] = useState<string | null>(null);
+  const [manageRolesDataSource, setManageRolesDataSource] = useState<'SNAPSHOT' | 'REMOTE_LIVE' | 'REFRESH_FAILED' | null>(null);
+  const [manageRolesLastSyncedAt, setManageRolesLastSyncedAt] = useState<string | null>(null);
+  const [manageRolesRefreshing, setManageRolesRefreshing] = useState<boolean>(false);
+  const [userExistingRoles, setUserExistingRoles] = useState<string[]>([]);
+  const [availableClientRoles, setAvailableClientRoles] = useState<string[]>([]);
+  const [selectedRolesToAdd, setSelectedRolesToAdd] = useState<string[]>([]);
+  const [selectedActiveRoles, setSelectedActiveRoles] = useState<string[]>([]);
+  const [manageRoleSearch, setManageRoleSearch] = useState<string>('');
+  const [isRemovalConfirmOpen, setIsRemovalConfirmOpen] = useState<boolean>(false);
+
   const [createError, setCreateError] = useState<string | null>(null);
+  const [pendingSyncUser, setPendingSyncUser] = useState<{ username: string; message: string } | null>(null);
   const [potentialDuplicate, setPotentialDuplicate] = useState<{
     username: string;
     fullName: string;
@@ -374,7 +401,7 @@ export const UsersPage: React.FC = () => {
   const [importExecution, setImportExecution] = useState<ExcelUserImportExecutionSummary | null>(null);
   const [importing, setImporting] = useState(false);
 
-  const { hasPermission, isSuperAdmin } = useAuth();
+  const { hasPermission, isSuperAdmin, user: currentUser } = useAuth();
   const [agentStatus, setAgentStatus] = useState<'ONLINE' | 'OFFLINE' | 'BUSY'>('OFFLINE');
   const [isAgentOnline, setIsAgentOnline] = useState<boolean>(false);
 
@@ -383,6 +410,7 @@ export const UsersPage: React.FC = () => {
   const [statusMutationStage, setStatusMutationStage] = useState<string>('');
   const [statusMutationElapsed, setStatusMutationElapsed] = useState<number>(0);
   const [statusMutationError, setStatusMutationError] = useState<string | null>(null);
+  const [isStatusVerificationPending, setIsStatusVerificationPending] = useState(false);
   const [statusMutationSuccess, setStatusMutationSuccess] = useState<string | null>(null);
   const statusMutationTimerRef = useRef<any>(null);
 
@@ -486,8 +514,14 @@ export const UsersPage: React.FC = () => {
       try {
         const data = await ApiClient.request<ClientWithCredentialInfo[]>('/clients');
         setClients(data || []);
-        if (data && data.length > 0 && !selectedClientId) {
-          setSelectedClientId(data[0].id);
+        if (data && data.length > 0) {
+          const savedClientId = localStorage.getItem('hmc_selected_client_id');
+          const defaultClient =
+            (savedClientId && data.find((c) => c.id === savedClientId)) ||
+            data.find((c) => c.clientCode === 'MASTER') ||
+            data[0];
+          setSelectedClientId(defaultClient.id);
+          localStorage.setItem('hmc_selected_client_id', defaultClient.id);
         }
       } catch (err) {
         console.error('Failed to load clients', err);
@@ -501,6 +535,18 @@ export const UsersPage: React.FC = () => {
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [optionsSyncTime, setOptionsSyncTime] = useState<string | null>(null);
   const [isConfirmingCreate, setIsConfirmingCreate] = useState(false);
+  const [isSubmittingCreate, setIsSubmittingCreate] = useState(false);
+
+  interface InProgressCreationState {
+    runId: string;
+    stage?: string;
+    targetUsername: string;
+    message?: string;
+    clientId: string;
+    startedAt: number;
+  }
+  const SESSION_STORAGE_CREATION_KEY = 'hmc_in_progress_creation';
+  const [inProgressCreation, setInProgressCreation] = useState<InProgressCreationState | null>(null);
   const reqIdRef = useRef<number>(0);
 
   const loadFormOptions = async (clientId: string, forceRefresh: boolean = false) => {
@@ -553,6 +599,9 @@ export const UsersPage: React.FC = () => {
     setPage(1);
     setActionMessage(null);
     setSelectedClientId(newClientId);
+    localStorage.setItem('hmc_selected_client_id', newClientId);
+    setSelectedCreateRoles([]);
+    setCreateRoleSearch('');
   };
 
   // Load users when client or filters change
@@ -612,6 +661,174 @@ export const UsersPage: React.FC = () => {
   useEffect(() => {
     loadUsers();
   }, [selectedClientId, search, statusFilter, roleFilter, page]);
+
+  const pollCreationStatus = useCallback((runId: string) => {
+    let pollCount = 0;
+    const maxPolls = 120; // 120 * 1500ms = 180s
+
+    const interval = setInterval(async () => {
+      pollCount++;
+      if (pollCount > maxPolls) {
+        clearInterval(interval);
+        setInProgressCreation(null);
+        sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+        setCreateError('Creation polling timed out. Please verify user status via directory sync.');
+        return;
+      }
+
+      try {
+        const statusUrl = `/client-users/creation-status/${runId}${selectedClientId ? `?clientId=${encodeURIComponent(selectedClientId)}` : ''}`;
+        const statusRes = await ApiClient.request<UserCreationRunStatusResponse>(statusUrl);
+        if (statusRes.operationStatus === 'AUTOMATION_IN_PROGRESS') {
+          setInProgressCreation((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  stage: statusRes.stage || prev.stage,
+                  message: statusRes.message || prev.message,
+                }
+              : null
+          );
+          return;
+        }
+
+        // Terminal state reached: clear interval and storage
+        clearInterval(interval);
+        setInProgressCreation(null);
+        sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+        setIsSubmittingCreate(false);
+
+        if (statusRes.operationStatus === 'COMPLETED') {
+          setIsCreateModalOpen(false);
+          setIsConfirmingCreate(false);
+          setCreateError(null);
+          setPendingSyncUser(null);
+          setPotentialDuplicate(null);
+
+          const isRestricted = statusRes.credentialDeliveryStatus === 'RESTRICTED';
+          const isUnavailable =
+            statusRes.credentialDeliveryStatus === 'UNAVAILABLE' || statusRes.credentialDeliveryStatus === 'FAILED';
+
+          openCredentialSuccessModal({
+            type: 'CREATE',
+            username: statusRes.user?.username || statusRes.targetUsername || '',
+            fullName: statusRes.user?.fullName,
+            clientCode: selectedClient?.clientCode,
+            clientName: selectedClient?.clientName,
+            clientId: selectedClientId,
+            oneTimeCredentialEventId: statusRes.oneTimeCredentialEventId,
+            password: (statusRes as any).defaultPassword || (statusRes as any).temporaryPassword || (statusRes as any).password,
+            isRestricted,
+            isUnavailable,
+          });
+
+          // Reset form state
+          setCreateForm({
+            clientId: selectedClientId,
+            username: '',
+            firstName: '',
+            middleName: '',
+            lastName: '',
+            nickName: '',
+            email: '',
+            mobileNumber: '',
+            nationality: '',
+            role: '',
+            roles: [],
+            profileRole: '',
+            barcodeNumber: '',
+            signatureBase64: '',
+            signatureFilename: '',
+            stampBase64: '',
+            stampFilename: '',
+            profileBase64: '',
+            profileFilename: '',
+            status: 'ACTIVE',
+            overrideDuplicateName: false,
+          });
+          setSelectedCreateRoles([]);
+          setCreateRoleSearch('');
+          await loadUsers();
+          return;
+        }
+
+        if (statusRes.operationStatus === 'FAILED') {
+          if (statusRes.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING') {
+            setIsConfirmingCreate(false);
+            setIsCreateModalOpen(false);
+            setPendingSyncUser({
+              username: statusRes.targetUsername || '',
+              message:
+                statusRes.message ||
+                statusRes.errorMessage ||
+                'User and roles were created successfully on remote portal. Central synchronization is pending. No duplicate creation will be attempted.',
+            });
+            await loadUsers();
+            return;
+          }
+
+          if (statusRes.creationOutcome === 'CREATION_VERIFICATION_REQUIRED') {
+            setCreateError(
+              statusRes.errorMessage ||
+                'Creation verification required: automation status uncertain. Automatic retry is blocked; please verify the remote directory before taking action.'
+            );
+            return;
+          }
+
+          if (statusRes.creationOutcome === 'FAILED_BEFORE_CREATION') {
+            setCreateError(statusRes.errorMessage || 'Creation failed prior to remote form submission. Safe to retry.');
+            setIsConfirmingCreate(false);
+            return;
+          }
+
+          setCreateError(statusRes.errorMessage || 'User creation failed on remote portal.');
+        }
+      } catch (err: any) {
+        console.warn('[POLL STATUS ERROR]', err);
+      }
+    }, 1500);
+  }, [selectedClient, selectedClientId]);
+
+  // Session storage resume on page load/refresh with strict schema & TTL validation
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_STORAGE_CREATION_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const allowedKeys = new Set(['runId', 'stage', 'targetUsername', 'clientId', 'startedAt']);
+        const keys = Object.keys(parsed);
+        const hasExtraKeys = keys.some((k) => !allowedKeys.has(k));
+
+        const isValid =
+          parsed &&
+          typeof parsed === 'object' &&
+          !hasExtraKeys &&
+          typeof parsed.runId === 'string' &&
+          uuidRegex.test(parsed.runId) &&
+          typeof parsed.clientId === 'string' &&
+          uuidRegex.test(parsed.clientId) &&
+          typeof parsed.targetUsername === 'string' &&
+          parsed.targetUsername.length > 0 &&
+          parsed.targetUsername.length <= 100 &&
+          typeof parsed.stage === 'string' &&
+          parsed.stage.length > 0 &&
+          parsed.stage.length <= 100 &&
+          typeof parsed.startedAt === 'number' &&
+          parsed.startedAt <= Date.now() &&
+          Date.now() - parsed.startedAt < 600000; // <= 10m TTL
+
+        if (isValid) {
+          setInProgressCreation(parsed);
+          pollCreationStatus(parsed.runId);
+        } else {
+          sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+        }
+      }
+    } catch {
+      sessionStorage.removeItem(SESSION_STORAGE_CREATION_KEY);
+    }
+  }, [pollCreationStatus]);
 
   const [syncProgressMessage, setSyncProgressMessage] = useState<string | null>(null);
   const [syncTerminalState, setSyncTerminalState] = useState<'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | null>(null);
@@ -796,6 +1013,7 @@ export const UsersPage: React.FC = () => {
       mobileNumber: '',
       nationality: '',
       role: '',
+      roles: [],
       profileRole: '',
       barcodeNumber: '',
       signatureBase64: '',
@@ -807,6 +1025,10 @@ export const UsersPage: React.FC = () => {
       status: 'ACTIVE',
       overrideDuplicateName: false,
     });
+    setSelectedCreateRoles([]);
+    setCreateRoleSearch('');
+    setCreateError(null);
+    setPendingSyncUser(null);
     setIsCreateModalOpen(true);
     await loadFormOptions(selectedClientId);
   };
@@ -823,13 +1045,28 @@ export const UsersPage: React.FC = () => {
         body: JSON.stringify({ clientId: selectedClientId, username: uname }),
       });
       setIsCreateModalOpen(false);
-      setCreateError(null);
-      setPotentialDuplicate(null);
-      setIsConfirmingCreate(false);
-      setActionMessage({ type: 'success', text: `✓ ${res.message || `User '${uname}' reconciled and verified successfully.`}` });
+      setPendingSyncUser(null);
+      setActionMessage({
+        type: 'success',
+        text: `✓ User '${uname}' was already created remotely. Synchronized to Central Console.`,
+      });
       await loadUsers();
     } catch (err: any) {
-      setCreateError(err.message || `Could not reconcile user '${uname}'.`);
+      const isNotFound =
+        err.code === 'USER_NOT_FOUND_ON_REMOTE' ||
+        err.status === 404 ||
+        (typeof err.message === 'string' &&
+          (err.message.includes('could not be verified') || err.message.includes('USER_NOT_FOUND_ON_REMOTE')));
+
+      if (isNotFound) {
+        setActionMessage({
+          type: 'info',
+          text: `User '${uname}' does not exist on remote Simplex. You may safely submit Create User.`,
+        });
+      } else {
+        const msg = err.message || 'Verification check failed.';
+        setActionMessage({ type: 'error', text: msg });
+      }
     } finally {
       setIsReconciling(false);
     }
@@ -842,42 +1079,89 @@ export const UsersPage: React.FC = () => {
       setCreateError('Client ID is required.');
       return;
     }
+    if (selectedCreateRoles.length === 0) {
+      setCreateError('At least one role must be selected.');
+      return;
+    }
     if (!isConfirmingCreate) {
       setIsConfirmingCreate(true);
       return;
     }
 
     setCreateError(null);
+    setPendingSyncUser(null);
     setPotentialDuplicate(null);
 
     try {
+      const canonicalRolesString = selectedCreateRoles.join(', ');
       const payload: CreateClientUserDto = {
         ...createForm,
         clientId: selectedClientId,
+        role: canonicalRolesString,
+        roles: selectedCreateRoles,
       };
 
-      const res = await ApiClient.request<ClientUser>('/client-users', {
+      setIsSubmittingCreate(true);
+      const res = await ApiClient.request<ClientUser | AutomationInProgressResponse>('/client-users', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
 
+      if ('operationStatus' in res && res.operationStatus === 'AUTOMATION_IN_PROGRESS') {
+        const inProg: InProgressCreationState = {
+          runId: res.runId,
+          stage: res.stage,
+          targetUsername: res.targetUsername || createForm.username,
+          message: res.message,
+          clientId: selectedClientId,
+          startedAt: Date.now(),
+        };
+        const safeSession = {
+          runId: inProg.runId,
+          stage: inProg.stage,
+          targetUsername: inProg.targetUsername,
+          clientId: inProg.clientId,
+          startedAt: inProg.startedAt,
+        };
+        sessionStorage.setItem(SESSION_STORAGE_CREATION_KEY, JSON.stringify(safeSession));
+        setIsSubmittingCreate(false);
+        pollCreationStatus(inProg.runId);
+        return;
+      }
+
+      const createdUser = res as ClientUser;
+
+      if ((createdUser as any).creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING') {
+        setIsConfirmingCreate(false);
+        setPendingSyncUser({
+          username: createdUser.username || createForm.username,
+          message:
+            (createdUser as any).message ||
+            'User and roles were created successfully in Simplex. Central synchronization is pending. No duplicate creation will be attempted.',
+        });
+        await loadUsers();
+        return;
+      }
+
       setIsCreateModalOpen(false);
       setIsConfirmingCreate(false);
       setCreateError(null);
+      setPendingSyncUser(null);
       setPotentialDuplicate(null);
 
       // Setup Post-Create Shared Credential Success Modal
-      const isRestricted = (res as any).credentialDeliveryStatus === 'RESTRICTED';
-      const isUnavailable = (res as any).credentialDeliveryStatus === 'UNAVAILABLE' || (res as any).credentialDeliveryStatus === 'FAILED';
+      const isRestricted = (createdUser as any).credentialDeliveryStatus === 'RESTRICTED';
+      const isUnavailable = (createdUser as any).credentialDeliveryStatus === 'UNAVAILABLE' || (createdUser as any).credentialDeliveryStatus === 'FAILED';
 
       openCredentialSuccessModal({
         type: 'CREATE',
-        username: res.username,
-        fullName: res.fullName,
+        username: createdUser.username,
+        fullName: createdUser.fullName,
         clientCode: selectedClient?.clientCode,
         clientName: selectedClient?.clientName,
         clientId: selectedClientId,
         oneTimeCredentialEventId: (res as any).oneTimeCredentialEventId,
+        password: (res as any).defaultPassword || (res as any).temporaryPassword || (res as any).password,
         isRestricted,
         isUnavailable,
       });
@@ -894,6 +1178,7 @@ export const UsersPage: React.FC = () => {
         mobileNumber: '',
         nationality: '',
         role: '',
+        roles: [],
         profileRole: '',
         barcodeNumber: '',
         signatureBase64: '',
@@ -905,10 +1190,27 @@ export const UsersPage: React.FC = () => {
         status: 'ACTIVE',
         overrideDuplicateName: false,
       });
+      setSelectedCreateRoles([]);
+      setCreateRoleSearch('');
 
       await loadUsers();
     } catch (err: any) {
       setIsConfirmingCreate(false);
+      setIsSubmittingCreate(false);
+      if (
+        err.response?.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING' ||
+        err.creationOutcome === 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'
+      ) {
+        setPendingSyncUser({
+          username: createForm.username,
+          message:
+            err.message ||
+            err.response?.message ||
+            'User and roles were created successfully in Simplex. Central synchronization is pending. No duplicate creation will be attempted.',
+        });
+        await loadUsers();
+        return;
+      }
       const code = err.response?.code || err.code;
       const msg = err.message || err.response?.message;
       if (code === 'POTENTIAL_DUPLICATE_NAME') {
@@ -993,6 +1295,7 @@ export const UsersPage: React.FC = () => {
     const nextStatus = selectedUser.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     setIsMutatingStatus(true);
     setStatusMutationError(null);
+    setIsStatusVerificationPending(false);
     setStatusMutationSuccess(null);
     setStatusMutationStage('Preflight: Checking automation agent…');
     setStatusMutationElapsed(0);
@@ -1023,6 +1326,7 @@ export const UsersPage: React.FC = () => {
       setTimeout(() => {
         setIsStatusModalOpen(false);
         setStatusMutationSuccess(null);
+        setIsStatusVerificationPending(false);
         setStatusMutationStage('');
         setActionMessage({
           type: 'success',
@@ -1034,9 +1338,14 @@ export const UsersPage: React.FC = () => {
         clearInterval(statusMutationTimerRef.current);
         statusMutationTimerRef.current = null;
       }
-      const rawCode = err.code || err.errorCode || err.response?.code;
-      const rawMsg = err.message || '';
-      if (rawCode === 'DESKTOP_AGENT_OFFLINE' || rawMsg.toLowerCase().includes('offline')) {
+      const rawCode = err.code || err.errorCode || err.response?.code || err.response?.data?.code;
+      const rawStatus = err.status || err.response?.status;
+      const rawMsg = err.message || err.response?.data?.message || '';
+
+      if (rawStatus === 409 || rawCode === 'REMOTE_STATUS_VERIFICATION_UNKNOWN' || rawCode === 'MUTATION_SUBMITTED_VERIFICATION_PENDING') {
+        setIsStatusVerificationPending(true);
+        setStatusMutationError('Status action may have completed, but verification is pending. No automatic second click was performed. Use Refresh Current Status before retrying.');
+      } else if (rawCode === 'DESKTOP_AGENT_OFFLINE' || rawMsg.toLowerCase().includes('offline')) {
         setStatusMutationError('Automation Agent is offline. Start/reconnect the agent and retry.');
       } else if (rawCode === 'REMOTE_USER_NOT_PRESENT' || rawMsg.includes('REMOTE_USER_NOT_PRESENT')) {
         setStatusMutationError('REMOTE_USER_NOT_PRESENT — Refresh the selected client directory.');
@@ -1061,6 +1370,7 @@ export const UsersPage: React.FC = () => {
     }
     setIsStatusModalOpen(false);
     setStatusMutationError(null);
+    setIsStatusVerificationPending(false);
     setStatusMutationSuccess(null);
     setStatusMutationStage('');
     setStatusMutationElapsed(0);
@@ -1098,6 +1408,164 @@ export const UsersPage: React.FC = () => {
       setActionMessage({ type: 'error', text: `Password reset failed: ${cleanError}` });
     } finally {
       setIsMutatingReset(false);
+    }
+  };
+
+  // Manage Roles Modal Handlers (Add / Remove role action for existing users)
+  const handleOpenManageRoles = async (user: ClientUser) => {
+    setManageRolesUser(user);
+    setManageRolesError(null);
+    setManageRolesSuccess(null);
+    setSelectedRolesToAdd([]);
+    setManageRoleSearch('');
+    setIsRemovalConfirmOpen(false);
+    setIsManageRolesModalOpen(true);
+    setManageRolesLoading(true);
+    setManageRolesDataSource(null);
+
+    // Populate fallback from central snapshot initially
+    const fallbackCurrent = (user.role || '').split(',').map((r) => r.trim()).filter(Boolean);
+    setUserExistingRoles(fallbackCurrent);
+    setSelectedActiveRoles(fallbackCurrent);
+    setAvailableClientRoles(clientOptions.roles || []);
+    setManageRolesLastSyncedAt(user.lastVerifiedAt ? String(user.lastVerifiedAt) : (user.lastSyncedAt ? String(user.lastSyncedAt) : null));
+
+    try {
+      // 1. Automatically execute a read-only live-role refresh for that exact user
+      const res = await ApiClient.request<{
+        username: string;
+        fullName: string;
+        currentRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        availableRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        dataSource: 'SNAPSHOT' | 'REMOTE_LIVE';
+        lastSyncedAt: string | null;
+        isSnapshotData: boolean;
+      }>(`/client-users/${user.id}/roles/refresh`, {
+        method: 'POST',
+      });
+
+      const toNames = (arr: any[]) =>
+        (arr || []).map((r) => (typeof r === 'string' ? r : r?.canonicalRoleName || r?.roleName || r?.roleId || '')).filter(Boolean);
+
+      const liveRoles = toNames(res.currentRoles);
+      setUserExistingRoles(liveRoles);
+      setSelectedActiveRoles(liveRoles);
+      setAvailableClientRoles(toNames(res.availableRoles));
+      setManageRolesDataSource('REMOTE_LIVE');
+      setManageRolesLastSyncedAt(res.lastSyncedAt || new Date().toISOString());
+    } catch (err: any) {
+      const msg = err.message || 'Live remote role refresh failed';
+      setManageRolesError(`REFRESH FAILED / STALE SNAPSHOT: ${msg}`);
+      setManageRolesDataSource('REFRESH_FAILED');
+      // Preserve lastVerifiedAt from snapshot (do NOT overwrite with current time)
+      setManageRolesLastSyncedAt(user.lastVerifiedAt ? String(user.lastVerifiedAt) : null);
+    } finally {
+      setManageRolesLoading(false);
+    }
+  };
+
+  const handleRefreshManageRoles = async () => {
+    if (!manageRolesUser || manageRolesRefreshing) return;
+    setManageRolesRefreshing(true);
+    setManageRolesError(null);
+    try {
+      const res = await ApiClient.request<{
+        username: string;
+        fullName: string;
+        currentRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        availableRoles: (string | { roleId: string; canonicalRoleName: string })[];
+        dataSource: 'SNAPSHOT' | 'REMOTE_LIVE';
+        lastSyncedAt: string | null;
+        isSnapshotData: boolean;
+      }>(`/client-users/${manageRolesUser.id}/roles/refresh`, {
+        method: 'POST',
+      });
+
+      const toNames = (arr: any[]) =>
+        (arr || []).map((r) => (typeof r === 'string' ? r : r?.canonicalRoleName || r?.roleName || r?.roleId || '')).filter(Boolean);
+
+      const liveRoles = toNames(res.currentRoles);
+      setUserExistingRoles(liveRoles);
+      setSelectedActiveRoles(liveRoles);
+      setAvailableClientRoles(toNames(res.availableRoles));
+      setManageRolesDataSource('REMOTE_LIVE');
+      setManageRolesLastSyncedAt(res.lastSyncedAt || new Date().toISOString());
+    } catch (err: any) {
+      const msg = err.message || 'Read-only remote refresh failed';
+      setManageRolesError(`REFRESH FAILED / STALE SNAPSHOT: ${msg}`);
+      setManageRolesDataSource('REFRESH_FAILED');
+    } finally {
+      setManageRolesRefreshing(false);
+    }
+  };
+
+  const handleToggleActiveRole = (role: string) => {
+    setSelectedActiveRoles((prev) =>
+      prev.includes(role) ? prev.filter((r) => r !== role) : [...prev, role]
+    );
+  };
+
+  const executeManageRolesSubmit = async (diff: any) => {
+    if (!manageRolesUser || manageRolesSubmitting) return;
+
+    setManageRolesSubmitting(true);
+    setManageRolesError(null);
+    setManageRolesSuccess(null);
+
+    try {
+      const res = await ApiClient.request<{
+        success: boolean;
+        username: string;
+        rolesAdded: string[];
+        rolesRemoved?: string[];
+        existingRoles: string[];
+        currentRoles: string[];
+        message: string;
+      }>(`/client-users/${manageRolesUser.id}/roles`, {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId: manageRolesUser.clientId || selectedClientId,
+          rolesToAdd: diff.rolesToAdd,
+          rolesToRemove: diff.rolesRemoved,
+          rolesRemoved: diff.rolesRemoved,
+          resultingRoles: diff.resultingRoles,
+          roles: diff.rolesToAdd,
+        }),
+      });
+
+      const updatedRoles = res.currentRoles || diff.resultingRoles;
+      setManageRolesSuccess(res.message || 'Roles updated successfully.');
+      setUserExistingRoles(updatedRoles);
+      setSelectedActiveRoles(updatedRoles);
+      setIsRemovalConfirmOpen(false);
+
+      // Update local table snapshot
+      setUsers((prev) =>
+        prev.map((u) => (u.id === manageRolesUser.id ? { ...u, role: updatedRoles.join(', ') } : u))
+      );
+
+      setActionMessage({
+        type: 'success',
+        text: `✓ Successfully updated roles for ${manageRolesUser.username}.`,
+      });
+
+      setTimeout(() => {
+        setIsManageRolesModalOpen(false);
+        setManageRolesSuccess(null);
+      }, 1200);
+    } catch (err: any) {
+      setIsRemovalConfirmOpen(false);
+      const code = err.response?.code || err.code;
+      const msg = err.message || err.response?.message || 'Failed to update roles in Simplex';
+      if (code === 'ROLE_VERIFICATION_UNKNOWN') {
+        setManageRolesError(
+          `ROLE_VERIFICATION_UNKNOWN: The role update could not be verified on Simplex. No duplicate submission was made. Please use 'Refresh from Portal' to verify current state.`
+        );
+      } else {
+        setManageRolesError(msg);
+      }
+    } finally {
+      setManageRolesSubmitting(false);
     }
   };
 
@@ -1530,6 +1998,30 @@ export const UsersPage: React.FC = () => {
         </div>
       </div>
 
+      {inProgressCreation && (
+        <div className="p-3.5 bg-amber-950/80 border border-amber-500/60 rounded-xl flex items-center justify-between text-amber-200 text-sm shadow-lg">
+          <div className="flex items-center gap-3">
+            <RefreshCw className="w-5 h-5 animate-spin text-amber-400 shrink-0" />
+            <div>
+              <div className="font-semibold text-amber-300 flex items-center gap-2">
+                <span>User Creation In Progress on Remote Portal</span>
+                <span className="text-[11px] bg-amber-900/80 text-amber-300 font-mono px-2 py-0.5 rounded border border-amber-700/50">
+                  Stage: {inProgressCreation.stage || 'PROCESSING'}
+                </span>
+              </div>
+              <p className="text-xs text-amber-200/90 mt-0.5">
+                Creating user <strong className="font-mono text-white">{inProgressCreation.targetUsername}</strong> on remote portal. Automation run is executing.
+              </p>
+            </div>
+          </div>
+          <div className="text-right">
+            <span className="text-xs font-mono text-amber-400 bg-slate-900/60 px-2.5 py-1 rounded border border-amber-800/40">
+              Run ID: {inProgressCreation.runId.substring(0, 8)}…
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Selected Client Info Card */}
       {selectedClient && (
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-md flex flex-wrap items-center justify-between gap-4 text-xs">
@@ -1932,6 +2424,25 @@ export const UsersPage: React.FC = () => {
                             );
                           })()}
 
+                          {/* Manage Roles in Simplex */}
+                          {canEdit && (() => {
+                            const mutation = getMutationState('Manage Roles', u);
+                            return (
+                              <button
+                                disabled={mutation.disabled}
+                                onClick={() => {
+                                  if (mutation.disabled) return;
+                                  handleOpenManageRoles(u);
+                                }}
+                                title={mutation.title}
+                                aria-label={`Manage Roles for ${u.username}`}
+                                className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                              >
+                                <Shield className="w-3.5 h-3.5" />
+                              </button>
+                            );
+                          })()}
+
                           {/* Reset Password in Simplex */}
                           {canResetPassword && (() => {
                             const mutation = getMutationState('Reset Password in Simplex', u);
@@ -2143,6 +2654,28 @@ export const UsersPage: React.FC = () => {
             </div>
           )}
 
+          {pendingSyncUser && (
+            <div className="p-3 bg-amber-950/80 border border-amber-600 rounded-lg text-amber-200">
+              <div className="flex items-center justify-between mb-1">
+                <div className="font-bold flex items-center gap-1.5 text-amber-300">
+                  <AlertTriangle className="w-4 h-4 text-amber-400" />
+                  <span>Central Synchronization Pending</span>
+                </div>
+                <button
+                  type="button"
+                  disabled={isReconciling}
+                  onClick={() => handleReconcileUser(pendingSyncUser.username)}
+                  className="px-2.5 py-1 bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white rounded text-[11px] font-semibold flex items-center gap-1 shadow transition-colors"
+                  title="Run remote read-only verification check and sync Central without duplicate creation"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isReconciling ? 'animate-spin' : ''}`} />
+                  Refresh Verification
+                </button>
+              </div>
+              <p className="text-[11px] text-amber-200">{pendingSyncUser.message}</p>
+            </div>
+          )}
+
           {createError && (
             <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200">
               <div className="flex items-center justify-between mb-1">
@@ -2273,24 +2806,91 @@ export const UsersPage: React.FC = () => {
               </select>
             </div>
             <div>
-              <label className="block text-slate-400 mb-1">Role</label>
-              <select
-                disabled={isLoadingOptions || !!optionsError || !formMetadata}
-                value={createForm.role}
-                onChange={(e) => setCreateForm({ ...createForm, role: e.target.value })}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <option value="">{isLoadingOptions ? 'Loading roles…' : '-- Select Role --'}</option>
-                {formMetadata?.roles?.map((r: any) => {
-                  const val = typeof r === 'string' ? r : (r?.value || r?.label || '');
-                  const lbl = typeof r === 'string' ? r : (r?.label || r?.value || '');
-                  return (
-                    <option key={val} value={val}>
-                      {lbl}
-                    </option>
-                  );
-                })}
-              </select>
+              <label className="block text-slate-400 mb-1">
+                Roles * <span className="text-slate-500 font-normal text-[10px]">({selectedCreateRoles.length} selected)</span>
+              </label>
+
+              {/* Selected Role Chips */}
+              <div className="flex flex-wrap gap-1.5 mb-2 min-h-[28px] p-1.5 bg-slate-950/80 border border-slate-800 rounded-lg">
+                {selectedCreateRoles.length === 0 ? (
+                  <span className="text-[11px] text-slate-500 italic p-1">No roles selected — select one or more below</span>
+                ) : (
+                  selectedCreateRoles.map((role) => (
+                    <span
+                      key={role}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-sky-950/80 text-sky-300 border border-sky-800/80 rounded-md text-[11px] font-medium"
+                    >
+                      <span>{role}</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCreateRoles((prev) => prev.filter((r) => r !== role))}
+                        className="hover:text-red-400 p-0.5 rounded transition-colors"
+                        title={`Remove ${role}`}
+                        aria-label={`Remove role ${role}`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
+
+              {/* Role Search & Selection Dropdown / List */}
+              <div className="space-y-1">
+                <input
+                  type="text"
+                  placeholder="Filter available client roles…"
+                  value={createRoleSearch}
+                  onChange={(e) => setCreateRoleSearch(e.target.value)}
+                  disabled={isLoadingOptions || !!optionsError || !formMetadata}
+                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-white text-xs focus:outline-none focus:border-sky-500 disabled:opacity-50"
+                />
+
+                <div className="max-h-32 overflow-y-auto bg-slate-950 border border-slate-800 rounded-lg divide-y divide-slate-800/50">
+                  {isLoadingOptions ? (
+                    <div className="p-2 text-[11px] text-slate-500 italic">Loading roles…</div>
+                  ) : optionsError ? (
+                    <div className="p-2 text-[11px] text-red-400 italic">Options unavailable</div>
+                  ) : (
+                    (() => {
+                      const allRoles: string[] = (formMetadata?.roles || []).map((r: any) =>
+                        typeof r === 'string' ? r : (r?.roleName || r?.label || r?.value || '')
+                      ).filter(Boolean);
+
+                      const filtered = allRoles.filter((r) =>
+                        !createRoleSearch || r.toLowerCase().includes(createRoleSearch.toLowerCase())
+                      );
+
+                      if (filtered.length === 0) {
+                        return <div className="p-2 text-[11px] text-slate-500 italic">No matching roles found</div>;
+                      }
+
+                      return filtered.map((role) => {
+                        const isSelected = selectedCreateRoles.includes(role);
+                        return (
+                          <button
+                            key={role}
+                            type="button"
+                            onClick={() => {
+                              setSelectedCreateRoles((prev) =>
+                                isSelected ? prev.filter((r) => r !== role) : [...prev, role]
+                              );
+                            }}
+                            className={`w-full px-2.5 py-1.5 text-left text-[11px] flex items-center justify-between transition-colors ${
+                              isSelected
+                                ? 'bg-sky-950/60 text-sky-200 font-medium'
+                                : 'hover:bg-slate-900 text-slate-300'
+                            }`}
+                          >
+                            <span>{role}</span>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-sky-400" />}
+                          </button>
+                        );
+                      });
+                    })()
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -2346,11 +2946,33 @@ export const UsersPage: React.FC = () => {
                 <div>Full Name: <strong className="text-white">{createForm.firstName} {createForm.lastName}</strong></div>
                 <div>Mobile: <strong className="text-white">{createForm.mobileNumber}</strong></div>
                 <div>Nationality: <strong className="text-white">{createForm.nationality}</strong></div>
-                <div>Role: <strong className="text-white">{createForm.role}</strong></div>
+                <div className="col-span-2">
+                  Roles: <strong className="text-white">{selectedCreateRoles.join(', ')}</strong>
+                </div>
               </div>
               <p className="mt-2 text-[11px] text-slate-300">
                 This action will submit and verify the user directly on the selected Simplex client portal, then pull the updated directory.
               </p>
+            </div>
+          )}
+
+          {inProgressCreation && (
+            <div className="p-3.5 bg-amber-950/80 border border-amber-600/50 rounded-lg text-amber-200">
+              <div className="font-bold flex items-center gap-2 text-amber-300 mb-1">
+                <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+                Automation In Progress on Remote Portal
+              </div>
+              <p className="text-xs text-amber-200/90 leading-relaxed">
+                {inProgressCreation.message ||
+                  'User creation and multi-role mapping is currently executing on the remote client portal. Please wait while the Desktop Agent completes the workflow.'}
+              </p>
+              <div className="mt-2 text-[11px] font-mono text-amber-400/80 flex items-center gap-2">
+                <span>
+                  Stage: <strong className="text-amber-200">{inProgressCreation.stage || 'PROCESSING'}</strong>
+                </span>
+                <span>•</span>
+                <span>Run ID: {inProgressCreation.runId.substring(0, 8)}…</span>
+              </div>
             </div>
           )}
 
@@ -2360,16 +2982,31 @@ export const UsersPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsConfirmingCreate(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold"
+                  disabled={!!inProgressCreation || isSubmittingCreate}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 rounded font-semibold"
                 >
                   Back to Edit
                 </button>
                 <button
                   type="submit"
-                  disabled={isLoadingOptions || !!optionsError || !formMetadata}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-emerald-950/50"
+                  disabled={
+                    isLoadingOptions ||
+                    !!optionsError ||
+                    !formMetadata ||
+                    selectedCreateRoles.length === 0 ||
+                    !!inProgressCreation ||
+                    isSubmittingCreate
+                  }
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-emerald-950/50 flex items-center gap-2"
                 >
-                  Confirm & Create on Client
+                  {inProgressCreation ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
+                      <span>Creating on Portal…</span>
+                    </>
+                  ) : (
+                    <span>Confirm & Create on Client</span>
+                  )}
                 </button>
               </>
             ) : (
@@ -2383,7 +3020,17 @@ export const UsersPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isLoadingOptions || !!optionsError || !formMetadata || !createForm.username || !createForm.firstName || !createForm.lastName || !createForm.mobileNumber || !createForm.nationality}
+                  disabled={
+                    isLoadingOptions ||
+                    !!optionsError ||
+                    !formMetadata ||
+                    !createForm.username ||
+                    !createForm.firstName ||
+                    !createForm.lastName ||
+                    !createForm.mobileNumber ||
+                    !createForm.nationality ||
+                    selectedCreateRoles.length === 0
+                  }
                   className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded font-semibold shadow-lg shadow-sky-950/50"
                 >
                   Review & Create User
@@ -2427,7 +3074,7 @@ export const UsersPage: React.FC = () => {
               <span>
                 {activeCredential?.type === 'CREATE'
                   ? 'User created successfully'
-                  : 'Password reset successfully'}
+                  : 'Password Reset Successful'}
               </span>
             </div>
             <p className="text-[11px] text-emerald-200/90">
@@ -2482,7 +3129,7 @@ export const UsersPage: React.FC = () => {
             <div className="pt-1">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-slate-400 text-[11px] font-medium">
-                  {activeCredential?.type === 'CREATE' ? 'Default Password' : 'New/Default Password'}
+                  {activeCredential?.type === 'CREATE' ? 'Default Password' : 'Temporary Password:'}
                 </span>
                 {activeCredential?.password && !isCredentialExpired && !activeCredential?.isRestricted && (
                   <span className="text-amber-400 font-mono text-[10px] flex items-center gap-1" data-testid="credential-countdown">
@@ -2732,13 +3379,35 @@ export const UsersPage: React.FC = () => {
 
             {/* 3. Error State */}
             {statusMutationError && !isMutatingStatus && (
-              <div className="p-4 bg-red-950/70 border border-red-800 rounded-lg space-y-2">
-                <div className="flex items-center gap-2 text-red-300 font-semibold text-sm">
-                  <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
-                  <span>Operation Failed</span>
+              <div className={`p-4 rounded-lg space-y-2 ${
+                isStatusVerificationPending
+                  ? 'bg-amber-950/70 border border-amber-800'
+                  : 'bg-red-950/70 border border-red-800'
+              }`}>
+                <div className={`flex items-center gap-2 font-semibold text-sm ${
+                  isStatusVerificationPending ? 'text-amber-300' : 'text-red-300'
+                }`}>
+                  <AlertCircle className={`w-5 h-5 shrink-0 ${
+                    isStatusVerificationPending ? 'text-amber-400' : 'text-red-400'
+                  }`} />
+                  <span>{isStatusVerificationPending ? 'Verification Pending' : 'Operation Failed'}</span>
                 </div>
-                <p className="text-red-300 text-xs pl-7">{statusMutationError}</p>
-                <div className="flex justify-end gap-2 pt-2 border-t border-red-900/50">
+                <div className={`text-xs pl-7 space-y-1 ${
+                  isStatusVerificationPending ? 'text-amber-200' : 'text-red-300'
+                }`}>
+                  {isStatusVerificationPending ? (
+                    <>
+                      <p className="font-medium">Status action may have completed, but verification is pending.</p>
+                      <p>No automatic second click was performed.</p>
+                      <p className="text-amber-300/80">Use Refresh Current Status before retrying.</p>
+                    </>
+                  ) : (
+                    <p>{statusMutationError}</p>
+                  )}
+                </div>
+                <div className={`flex justify-end gap-2 pt-2 border-t ${
+                  isStatusVerificationPending ? 'border-amber-900/50' : 'border-red-900/50'
+                }`}>
                   <button
                     type="button"
                     onClick={handleCloseStatusModal}
@@ -2746,14 +3415,28 @@ export const UsersPage: React.FC = () => {
                   >
                     Close
                   </button>
-                  <button
-                    type="button"
-                    onClick={handleStatusChange}
-                    className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold text-xs flex items-center gap-1.5"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    Retry
-                  </button>
+                  {isStatusVerificationPending ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        handleCloseStatusModal();
+                        await handleSyncUsers();
+                      }}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-semibold text-xs flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Refresh Current Status
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleStatusChange}
+                      className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold text-xs flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Retry
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -2831,6 +3514,408 @@ export const UsersPage: React.FC = () => {
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded font-semibold shadow disabled:opacity-50"
               >
                 {isMutatingReset ? 'Resetting in Simplex…' : 'Reset Password in Simplex'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Manage Roles in Simplex (Add / Remove role mapping for existing users) */}
+      <Modal
+        isOpen={isManageRolesModalOpen}
+        onClose={() => !manageRolesSubmitting && setIsManageRolesModalOpen(false)}
+        title="Manage User Roles in Simplex"
+      >
+        {manageRolesUser && (
+          <div className="space-y-4 text-xs">
+            {/* Header info */}
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div>
+                <span className="text-slate-400 text-[11px] block">Target User</span>
+                <span className="font-semibold text-white text-sm font-mono">{manageRolesUser.username}</span>
+                {manageRolesUser.fullName && (
+                  <span className="text-slate-400 text-xs block">({manageRolesUser.fullName})</span>
+                )}
+                {manageRolesUser.remoteUserId && (
+                  <span className="text-slate-500 font-mono text-[10px] block">
+                    Remote ID: {manageRolesUser.remoteUserId}
+                  </span>
+                )}
+              </div>
+              <div className="text-right">
+                <span className="text-slate-400 text-[11px] block">Target Client</span>
+                <span className="font-semibold text-white font-mono text-xs">
+                  {selectedClient?.clientCode || manageRolesUser.clientName || 'N/A'}
+                </span>
+              </div>
+            </div>
+
+            {/* Data Source & Read-Only Refresh Control */}
+            <div className="flex items-center justify-between text-xs bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400 text-[11px]">Role Data Source:</span>
+                <span
+                  className={`font-semibold px-2 py-0.5 rounded text-[10px] uppercase tracking-wider ${
+                    manageRolesDataSource === 'REMOTE_LIVE'
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                      : manageRolesDataSource === 'REFRESH_FAILED'
+                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                      : 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
+                  }`}
+                >
+                  {manageRolesDataSource === 'REMOTE_LIVE'
+                    ? 'LIVE REMOTE VERIFIED'
+                    : manageRolesDataSource === 'REFRESH_FAILED'
+                    ? 'REFRESH FAILED / STALE SNAPSHOT'
+                    : 'CENTRAL SNAPSHOT'}
+                </span>
+                {manageRolesLastSyncedAt && (
+                  <span className="text-slate-500 text-[10px]">
+                    (Synced: {new Date(manageRolesLastSyncedAt).toLocaleTimeString()})
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleRefreshManageRoles}
+                disabled={manageRolesRefreshing || manageRolesSubmitting || manageRolesLoading}
+                className="flex items-center gap-1.5 text-[11px] text-sky-400 hover:text-sky-300 font-medium px-2 py-1 rounded bg-sky-950/40 hover:bg-sky-900/50 border border-sky-800/50 transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${manageRolesRefreshing ? 'animate-spin' : ''}`} />
+                {manageRolesRefreshing ? 'Refreshing…' : 'Refresh from Portal'}
+              </button>
+            </div>
+
+            {/* Error & Success Banners */}
+            {manageRolesError && (
+              <div className="p-3 bg-red-950/80 border border-red-800 rounded-lg text-red-200 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span className="text-[11px]">{manageRolesError}</span>
+              </div>
+            )}
+
+            {manageRolesSuccess && (
+              <div className="p-3 bg-emerald-950/80 border border-emerald-800 rounded-lg text-emerald-200 flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <span className="text-[11px]">{manageRolesSuccess}</span>
+              </div>
+            )}
+
+            {manageRolesLoading ? (
+              <div className="p-6 flex flex-col items-center justify-center gap-2 text-slate-400">
+                <Loader2 className="w-6 h-6 animate-spin text-sky-400" />
+                <span>Loading roles from Simplex portal…</span>
+              </div>
+            ) : (
+              (() => {
+                const diff = computeBidirectionalRoleDiff(userExistingRoles, selectedActiveRoles);
+                const isTargetSelf =
+                  (currentUser?.username &&
+                    manageRolesUser.username &&
+                    currentUser.username.toLowerCase() === manageRolesUser.username.toLowerCase()) ||
+                  (currentUser?.id && manageRolesUser.id && currentUser.id === manageRolesUser.id);
+                const isRemovingAdminRole = diff.rolesRemoved.some((r: string) =>
+                  ['SUPER_ADMIN', 'ADMIN', 'Super Admin', 'Administrator', 'SuperAdmin'].some(
+                    (adminName) => r.toLowerCase() === adminName.toLowerCase()
+                  )
+                );
+                const isSelfLockoutBlocked = Boolean(isTargetSelf && isRemovingAdminRole);
+                const isAllRolesRemoved = selectedActiveRoles.length === 0;
+                const hasRoleChanges = diff.rolesToAdd.length > 0 || diff.rolesRemoved.length > 0;
+
+                const allAvailableRoles = Array.from(
+                  new Set([...userExistingRoles, ...availableClientRoles])
+                );
+
+                const filteredRoles = allAvailableRoles.filter((r) => {
+                  if (!manageRoleSearch) return true;
+                  return r.toLowerCase().includes(manageRoleSearch.toLowerCase());
+                });
+
+                return (
+                  <>
+                    {/* Role Diff Summary Card */}
+                    <div className="p-3 bg-slate-950/90 rounded-lg border border-slate-800 space-y-2">
+                      <div className="font-bold text-slate-300 text-xs flex items-center justify-between">
+                        <span>Role Update Preview</span>
+                        <span className="text-[10px] text-sky-400 font-normal">Add / Remove Roles</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <span className="text-slate-500 block">Existing Roles ({diff.existingRoles.length}):</span>
+                          <span className="text-slate-300 font-medium">
+                            {diff.existingRoles.length > 0 ? diff.existingRoles.join(', ') : 'None'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-emerald-400 block font-semibold">Roles to Add ({diff.rolesToAdd.length}):</span>
+                          <span className="text-emerald-300 font-semibold font-mono">
+                            {diff.rolesToAdd.length > 0 ? diff.rolesToAdd.join(', ') : 'None'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-red-400 block font-semibold">Roles to Remove ({diff.rolesRemoved.length}):</span>
+                          <span className="text-red-300 font-semibold font-mono">
+                            {diff.rolesRemoved.length > 0 ? diff.rolesRemoved.join(', ') : 'None'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">Roles Unchanged ({diff.rolesUnchanged.length}):</span>
+                          <span className="text-slate-400">
+                            {diff.rolesUnchanged.length > 0 ? diff.rolesUnchanged.join(', ') : 'None'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Safety Warnings */}
+                    {isAllRolesRemoved && (
+                      <div className="p-2.5 bg-red-950/80 border border-red-800 rounded-lg text-red-200 text-xs flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                        <span>A user must have at least one role. Cannot remove all roles.</span>
+                      </div>
+                    )}
+
+                    {isSelfLockoutBlocked && (
+                      <div className="p-2.5 bg-red-950/80 border border-red-800 rounded-lg text-red-200 text-xs flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                        <span>Self-lockout prevented: You cannot remove administrative roles from your own account.</span>
+                      </div>
+                    )}
+
+                    {/* All Available Roles Checklist */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-slate-400 font-medium">
+                          Select User Roles <span className="text-slate-500 font-normal text-[10px]">(Check to add, uncheck to remove)</span>
+                        </label>
+                        <span className="text-[11px] text-sky-400 font-semibold">
+                          {selectedActiveRoles.length} active roles selected
+                        </span>
+                      </div>
+
+                      <input
+                        type="text"
+                        placeholder="Search client roles…"
+                        value={manageRoleSearch}
+                        onChange={(e) => setManageRoleSearch(e.target.value)}
+                        className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-white text-xs focus:outline-none focus:border-sky-500"
+                      />
+
+                      <div className="max-h-52 overflow-y-auto bg-slate-950 border border-slate-800 rounded-lg divide-y divide-slate-800/50">
+                        {filteredRoles.length === 0 ? (
+                          <div className="p-3 text-[11px] text-slate-500 italic text-center">
+                            {allAvailableRoles.length === 0
+                              ? 'No roles available for this client'
+                              : 'No roles match the search filter'}
+                          </div>
+                        ) : (
+                          filteredRoles.map((role) => {
+                            const isAssigned = userExistingRoles.includes(role);
+                            const isChecked = selectedActiveRoles.includes(role);
+                            const willAdd = !isAssigned && isChecked;
+                            const willRemove = isAssigned && !isChecked;
+                            const isUnchanged = isAssigned && isChecked;
+
+                            return (
+                              <button
+                                key={role}
+                                type="button"
+                                onClick={() => handleToggleActiveRole(role)}
+                                className={`w-full px-3 py-2 text-left text-xs flex items-center justify-between transition-colors ${
+                                  willRemove
+                                    ? 'bg-red-950/30 text-red-200'
+                                    : willAdd
+                                    ? 'bg-emerald-950/30 text-emerald-200'
+                                    : isChecked
+                                    ? 'bg-slate-900 text-slate-200'
+                                    : 'hover:bg-slate-900 text-slate-400'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => {}}
+                                    className="cursor-pointer rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-0 pointer-events-none"
+                                  />
+                                  <span className={isChecked ? 'font-medium' : ''}>{role}</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  {willRemove && (
+                                    <span className="flex items-center gap-1 text-[10px] text-red-400 font-semibold bg-red-950 px-1.5 py-0.5 rounded border border-red-800">
+                                      - Will Remove
+                                    </span>
+                                  )}
+                                  {willAdd && (
+                                    <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-semibold bg-emerald-950 px-1.5 py-0.5 rounded border border-emerald-800">
+                                      + Will Add
+                                    </span>
+                                  )}
+                                  {isUnchanged && (
+                                    <span className="text-[10px] text-slate-500 font-normal">
+                                      Unchanged
+                                    </span>
+                                  )}
+                                  {!isAssigned && !isChecked && (
+                                    <span className="text-[10px] text-slate-600 hover:text-slate-400">
+                                      + Add
+                                    </span>
+                                  )}
+                                </div>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Footer Buttons */}
+                    <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+                      <button
+                        type="button"
+                        disabled={manageRolesSubmitting}
+                        onClick={() => setIsManageRolesModalOpen(false)}
+                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          manageRolesSubmitting ||
+                          !hasRoleChanges ||
+                          isAllRolesRemoved ||
+                          isSelfLockoutBlocked ||
+                          manageRolesDataSource === 'REFRESH_FAILED'
+                        }
+                        onClick={() => {
+                          if (diff.rolesRemoved.length > 0) {
+                            setIsRemovalConfirmOpen(true);
+                          } else {
+                            executeManageRolesSubmit(diff);
+                          }
+                        }}
+                        className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded font-semibold shadow-lg shadow-sky-950/50 flex items-center gap-1.5"
+                        title={
+                          manageRolesDataSource === 'REFRESH_FAILED'
+                            ? 'Update disabled: Remote role refresh failed. Refresh must succeed before roles can be updated.'
+                            : isAllRolesRemoved
+                            ? 'Cannot remove all roles.'
+                            : isSelfLockoutBlocked
+                            ? 'Cannot remove administrative roles from your own account.'
+                            : undefined
+                        }
+                      >
+                        {manageRolesSubmitting ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Updating Roles in Simplex…</span>
+                          </>
+                        ) : (
+                          <span>
+                            Update Roles in Simplex
+                            {diff.rolesToAdd.length > 0 || diff.rolesRemoved.length > 0
+                              ? ` (+${diff.rolesToAdd.length}, -${diff.rolesRemoved.length})`
+                              : ''}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  </>
+                );
+              })()
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* Secondary Confirmation Modal: Explicit confirmation on role removal */}
+      <Modal
+        isOpen={isRemovalConfirmOpen}
+        onClose={() => !manageRolesSubmitting && setIsRemovalConfirmOpen(false)}
+        title="Confirm Role Removal"
+      >
+        {manageRolesUser && (
+          <div className="space-y-4 text-xs">
+            <div className="p-3 bg-amber-950/60 border border-amber-800/80 rounded-lg text-amber-200 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-amber-300">Are you sure you want to remove roles for this user?</p>
+                <p className="text-[11px] text-amber-200/90 mt-1">
+                  This action will unassign the specified roles from the user on the remote Simplex portal.
+                </p>
+              </div>
+            </div>
+
+            {(() => {
+              const diff = computeBidirectionalRoleDiff(userExistingRoles, selectedActiveRoles);
+              return (
+                <div className="bg-slate-950 p-3.5 rounded-lg border border-slate-800 space-y-2.5">
+                  <div>
+                    <span className="text-slate-500 block text-[11px]">Target User:</span>
+                    <span className="text-white font-mono font-bold text-sm">
+                      {manageRolesUser.username}
+                      {manageRolesUser.fullName ? ` (${manageRolesUser.fullName})` : ''}
+                    </span>
+                    {manageRolesUser.remoteUserId && (
+                      <span className="text-slate-400 font-mono text-[10px] block">
+                        Remote ID: {manageRolesUser.remoteUserId}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-800/80 text-[11px]">
+                    <div>
+                      <span className="text-emerald-400 block font-semibold">Roles Being Added:</span>
+                      <span className="text-emerald-300 font-mono">
+                        {diff.rolesToAdd.length > 0 ? diff.rolesToAdd.join(', ') : 'None'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-red-400 block font-semibold">Roles Being Removed:</span>
+                      <span className="text-red-300 font-mono">
+                        {diff.rolesRemoved.length > 0 ? diff.rolesRemoved.join(', ') : 'None'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-800/80 text-[11px]">
+                    <span className="text-slate-400 block font-medium">Final Resulting Role Set:</span>
+                    <span className="text-white font-mono font-semibold">
+                      {diff.resultingRoles.length > 0 ? diff.resultingRoles.join(', ') : 'None'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={manageRolesSubmitting}
+                onClick={() => setIsRemovalConfirmOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+              >
+                Back to Edit
+              </button>
+              <button
+                type="button"
+                disabled={manageRolesSubmitting}
+                onClick={() => {
+                  const diff = computeBidirectionalRoleDiff(userExistingRoles, selectedActiveRoles);
+                  executeManageRolesSubmit(diff);
+                }}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded font-semibold flex items-center gap-1.5 shadow-lg shadow-red-950/50"
+              >
+                {manageRolesSubmitting ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Applying Changes…</span>
+                  </>
+                ) : (
+                  <span>Confirm & Apply Role Changes</span>
+                )}
               </button>
             </div>
           </div>

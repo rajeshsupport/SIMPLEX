@@ -25,6 +25,9 @@ export class ClientResourceSnapshot {
   @Column({ type: 'nvarchar', length: 100 })
   remoteResourceId!: string;
 
+  @Column({ type: 'nvarchar', length: 100 })
+  resourceCode!: string;
+
   @Column({ type: 'nvarchar', length: 250 })
   resourceName!: string;
 
@@ -37,11 +40,20 @@ export class ClientResourceSnapshot {
   @Column({ type: 'nvarchar', length: 150, nullable: true })
   resourceTypeName?: string | null;
 
+  @Column({ type: 'nvarchar', length: 50, nullable: true })
+  resourceType?: string | null;
+
   @Column({ type: 'nvarchar', length: 100, nullable: true })
   remoteSpecialtyId?: string | null;
 
   @Column({ type: 'nvarchar', length: 150, nullable: true })
   specialtyName?: string | null;
+
+  @Column({ type: 'nvarchar', length: 100, nullable: true })
+  department?: string | null;
+
+  @Column({ type: 'nvarchar', length: 100, nullable: true })
+  specialization?: string | null;
 
   @Column({ type: 'nvarchar', length: 10, default: 'FFFFFF' })
   colorIdentificationCode!: string;
@@ -76,6 +88,9 @@ export class ClientResourceSnapshot {
   @Column({ type: 'nvarchar', length: 50, default: 'ACTIVE' })
   remoteStatus!: string;
 
+  @Column({ type: 'nvarchar', length: 50, default: 'ACTIVE' })
+  status!: string;
+
   @Column({ type: 'bit', default: 1 })
   isPresentRemotely!: boolean;
 
@@ -84,6 +99,25 @@ export class ClientResourceSnapshot {
 
   @Column({ type: 'datetime2', default: () => 'SYSUTCDATETIME()' })
   lastSyncedAt!: Date;
+
+  @Column({ type: 'nvarchar', length: 50, nullable: true })
+  workflowStage?: string | null;
+
+  @Column({ type: 'nvarchar', length: 50, nullable: true })
+  eclaimStatus?: string | null;
+
+  @Column({ type: 'nvarchar', length: 'max', nullable: true })
+  eclaimConfigJson?: string | null;
+
+  @Column({ type: 'nvarchar', length: 'max', nullable: true })
+  emrFormsJson?: string | null;
+
+  @Column({ type: 'nvarchar', length: 'max', nullable: true })
+  transferConfigJson?: string | null;
+
+  @Column({ type: 'nvarchar', length: 50, nullable: true })
+  retryResumeState?: string | null;
+
 
   @OneToMany(() => ClientResourceDepartment, (d) => d.resource, { cascade: true })
   departments!: ClientResourceDepartment[];

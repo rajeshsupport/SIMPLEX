@@ -64,6 +64,7 @@ export const ClientsPage: React.FC = () => {
   const [toast, setToast] = useState<LaunchToast | null>(null);
   const [launchingClientIds, setLaunchingClientIds] = useState<Record<string, boolean>>({});
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
 
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
@@ -75,8 +76,8 @@ export const ClientsPage: React.FC = () => {
       setLoading(true);
       const data = await ApiClient.request<ClientWithCredentialInfo[]>('/clients');
       setClients(data || []);
-    } catch (err) {
-      console.error('Failed to load clients', err);
+    } catch (err: any) {
+      setActionMessage(`Error loading clients: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -92,26 +93,38 @@ export const ClientsPage: React.FC = () => {
 
   const handleCreateClient = async (e: React.FormEvent) => {
     e.preventDefault();
+    setCreateError(null);
     try {
+      const isSimplex = clientForm.baseUrl.toLowerCase().includes('simplex');
+      const payload = {
+        ...clientForm,
+        applicationPath: isSimplex ? '' : (clientForm.applicationPath || ''),
+        usersRoute: isSimplex ? '/users' : (clientForm.usersRoute || '/users'),
+        servicesRoute: isSimplex ? '/services' : (clientForm.servicesRoute || '/services'),
+        loginRoute: clientForm.loginRoute || '/login',
+        applicationVersion: isSimplex && clientForm.clientCode.includes('9.1') ? 'MasterV9.1' : (clientForm.applicationVersion || 'v1.0'),
+      };
       await ApiClient.request('/clients', {
         method: 'POST',
-        body: JSON.stringify(clientForm),
+        body: JSON.stringify(payload),
       });
       setIsCreateModalOpen(false);
       setClientForm({
         clientCode: '',
         clientName: '',
         baseUrl: '',
-        applicationPath: '/hmc',
+        applicationPath: '',
         environment: 'Development',
         applicationVersion: 'v1.0',
         loginRoute: '/login',
-        usersRoute: '/hmc/users',
-        servicesRoute: '/hmc/services',
+        usersRoute: '/users',
+        servicesRoute: '/services',
       });
       await loadClients();
     } catch (err: any) {
-      setActionMessage(`Error creating client: ${err.message}`);
+      const errDetail = Array.isArray(err.errors) ? err.errors.join(', ') : (err.message || 'Validation failed');
+      setCreateError(errDetail);
+      setActionMessage(`Error creating client: ${errDetail}`);
     }
   };
 
@@ -570,8 +583,20 @@ export const ClientsPage: React.FC = () => {
       )}
 
       {/* Modal: Register Client */}
-      <Modal isOpen={isCreateModalOpen} onClose={() => setIsCreateModalOpen(false)} title="Register Client Instance">
+      <Modal
+        isOpen={isCreateModalOpen}
+        onClose={() => {
+          setIsCreateModalOpen(false);
+          setCreateError(null);
+        }}
+        title="Register Client Instance"
+      >
         <form onSubmit={handleCreateClient} className="space-y-4">
+          {createError && (
+            <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-400 font-mono">
+              ✕ {createError}
+            </div>
+          )}
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1">Client Code (Unique ID)</label>
             <input

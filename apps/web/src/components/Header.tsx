@@ -8,7 +8,7 @@ export const Header: React.FC = () => {
   return (
     <header className="h-16 bg-surface border-b border-surface-border flex items-center justify-between px-8">
       <div className="flex items-center gap-4">
-        <h1 className="text-lg font-semibold text-slate-100">Central Operations Console</h1>
+        <h1 className="text-lg font-semibold text-slate-100">SIMPLEX Central Operations Console</h1>
       </div>
 
       <div className="flex items-center gap-4">

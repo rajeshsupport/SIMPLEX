@@ -7,6 +7,49 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
+export interface DesktopAgentPollerOptions {
+  isExecutingGetter: () => boolean;
+  sendHeartbeat: (status: 'ONLINE' | 'BUSY') => Promise<any>;
+  handlePendingTask: (task: any) => Promise<void>;
+  onError?: (err: any) => void;
+}
+
+export class DesktopAgentPoller {
+  private pollInProgress = false;
+
+  constructor(private readonly options: DesktopAgentPollerOptions) {}
+
+  public isPollInProgress(): boolean {
+    return this.pollInProgress;
+  }
+
+  public async pollCycle(): Promise<void> {
+    if (this.pollInProgress) return;
+    this.pollInProgress = true;
+    try {
+      const status = this.options.isExecutingGetter() ? 'BUSY' : 'ONLINE';
+      const pendingTask = await this.options.sendHeartbeat(status);
+      if (pendingTask && !this.options.isExecutingGetter()) {
+        this.options.handlePendingTask(pendingTask).catch((err) => {
+          if (this.options.onError) {
+            this.options.onError(err);
+          } else {
+            console.error('[AGENT] Task execution error:', err);
+          }
+        });
+      }
+    } catch (err) {
+      if (this.options.onError) {
+        this.options.onError(err);
+      } else {
+        console.error('[AGENT] Error in heartbeat/task loop:', err);
+      }
+    } finally {
+      this.pollInProgress = false;
+    }
+  }
+}
+
 async function startAgentRunner() {
   console.log('================================================================');
   console.log('       HMC DESKTOP BROWSER AUTOMATION AGENT RUNNER              ');
@@ -47,50 +90,33 @@ async function startAgentRunner() {
     } finally {
       isExecuting = false;
     }
-    // Check next queued task immediately
-    setImmediate(pollCycle);
   };
 
-  // Dedicated Heartbeat Timer running independently
-  const heartbeatTimer = setInterval(async () => {
-    try {
-      const status = isExecuting ? 'BUSY' : 'ONLINE';
-      const pendingTask = await agentClient.sendHeartbeat(status);
-      if (pendingTask && !isExecuting) {
-        await handlePendingTask(pendingTask);
-      }
-    } catch (err) {
-      // quiet retry
-    }
-  }, 1500);
+  // Coordinated single-loop heartbeat and task poller
+  const poller = new DesktopAgentPoller({
+    isExecutingGetter: () => isExecuting,
+    sendHeartbeat: (status) => agentClient.sendHeartbeat(status),
+    handlePendingTask,
+  });
 
-  const pollCycle = async () => {
-    if (isExecuting) return;
-
-    try {
-      const pendingTask = await agentClient.sendHeartbeat('ONLINE');
-      if (pendingTask) {
-        await handlePendingTask(pendingTask);
-      }
-    } catch (err) {
-      console.error('[AGENT] Error in heartbeat/task loop:', err);
-      isExecuting = false;
-    }
-  };
-
-  const heartbeatInterval = setInterval(pollCycle, 500);
+  const heartbeatInterval = setInterval(() => poller.pollCycle(), 500);
 
   const shutdown = async () => {
     console.log('\n[AGENT] Shutting down agent runner...');
     clearInterval(heartbeatInterval);
-    clearInterval(heartbeatTimer);
-    await agentClient.sendHeartbeat('OFFLINE');
+    try {
+      await worker.shutdown();
+    } catch {}
+    try {
+      await agentClient.sendHeartbeat('OFFLINE');
+    } catch {}
     process.exit(0);
   };
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
+
 
 if (require.main === module) {
   startAgentRunner().catch((err) => {

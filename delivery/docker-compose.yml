@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # 1. Database (Data persists across restarts and updates)
+  simplex_db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: simplex_mssql_db
+    restart: always
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "${MSSQL_PASSWORD:-Rajesh@123}"
+      MSSQL_PID: "Developer"
+    ports:
+      - "${MSSQL_PORT:-1433}:1433"
+    volumes:
+      - simplex_mssql_data:/var/opt/mssql
+
+  # 2. Central API Backend (Pre-compiled container, Zero source code exposed)
+  simplex_api:
+    image: ${SIMPLEX_API_IMAGE:-simplex-central-api:latest}
+    container_name: simplex_central_api
+    restart: always
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      MSSQL_HOST: simplex_db
+      MSSQL_PORT: 1433
+      MSSQL_DATABASE: ${MSSQL_DATABASE:-SIMPLEX_CENTRAL_DB}
+      MSSQL_USER: sa
+      MSSQL_PASSWORD: "${MSSQL_PASSWORD:-Rajesh@123}"
+      MSSQL_ENCRYPT: "false"
+      MSSQL_TRUST_SERVER_CERTIFICATE: "true"
+      PORT: 3000
+      NODE_ENV: production
+      API_BASE_URL: http://localhost:${API_PORT:-3000}
+      WEB_BASE_URL: http://localhost:${WEB_PORT:-5173}
+      ENCRYPTION_MASTER_KEY: "${ENCRYPTION_MASTER_KEY:-e8b839655f46a7be7e3c15c6b7582b1c853f6517a942bcba5e7e600d89e574ac}"
+      JWT_SECRET: "${JWT_SECRET:-simplex_jwt_secret_production_2026_super_secure_token}"
+      JWT_REFRESH_SECRET: "${JWT_REFRESH_SECRET:-simplex_jwt_refresh_production_2026_super_secure_token}"
+      AGENT_SHARED_SECRET: "${AGENT_SHARED_SECRET:-simplex_agent_shared_key_2026}"
+    depends_on:
+      - simplex_db
+
+  # 3. Web Operations Console (Pre-built Static SPA via Nginx)
+  simplex_web:
+    image: ${SIMPLEX_WEB_IMAGE:-simplex-central-web:latest}
+    container_name: simplex_central_web
+    restart: always
+    ports:
+      - "${WEB_PORT:-5173}:80"
+    depends_on:
+      - simplex_api
+
+volumes:
+  # Persistent data volume: Preserved even when containers are updated!
+  simplex_mssql_data:
+    name: simplex_production_db_data

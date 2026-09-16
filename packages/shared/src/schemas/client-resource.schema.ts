@@ -28,7 +28,7 @@ export const MapResourceUserSchema = z.object({
   clientId: z.string().uuid('Invalid Client ID format'),
   remoteResourceId: z.string().min(1, 'Remote Resource ID is required'),
   resourceName: z.string().optional(),
-  remoteUserId: z.string().min(1, 'Remote User ID is required'),
+  remoteUserId: z.string().optional(),
   username: z.string().min(1, 'Username is required'),
   isShownInRegistration: z.boolean().default(true),
   branchId: z.string().optional(),
@@ -50,14 +50,44 @@ export const CombinedResourceUserRowSchema = z
     operatingTo: z.string().default('23:55').optional(),
     // User fields (mandatory if Human)
     username: z.string().optional(),
+    password: z.string().optional(),
     firstName: z.string().optional(),
     middleName: z.string().optional(),
     lastName: z.string().optional(),
+    nickName: z.string().optional(),
+    gender: z.string().optional(),
+    dob: z.string().optional(),
+    designation: z.string().optional(),
     mobile: z.string().optional(),
     email: z.string().optional(),
     nationality: z.string().optional(),
     roles: z.string().optional(),
+    branch: z.string().optional(),
     isShownInRegistration: z.union([z.boolean(), z.enum(['Yes', 'No', 'YES', 'NO', 'yes', 'no'])]).optional().default(true),
+    // Section 4: eClaim Configuration (optional)
+    eclaimLink: z.string().optional(),
+    eclaimName: z.string().optional(),
+    eclaimPassword: z.string().optional(),
+    eclaimDesignation: z.string().optional(),
+    eclaimProviderType: z.string().optional(),
+    eclaimActivityType: z.string().optional(),
+    eclaimLicenseNumber: z.string().optional(),
+    eclaimInsuranceCompany: z.string().optional(),
+    eclaimBranchName: z.string().optional(),
+    oldEclaimName: z.string().optional(),
+    oldEclaimPassword: z.string().optional(),
+    oldLicenseNo: z.string().optional(),
+    actualLicenseNo: z.string().optional(),
+    eclaimProviderId: z.string().optional(),
+    eclaimFacilityId: z.string().optional(),
+    eclaimSpecialtyCode: z.string().optional(),
+    // Section 5 & 6: EMR Form Assignment & Transfer (optional)
+    emrForms: z.string().optional(),
+    emrDefaultForm: z.string().optional(),
+    emrEncounterType: z.string().optional(),
+    emrGroup: z.string().optional(),
+    emrTransferTargetBranch: z.string().optional(),
+    emrTransferDefaultFormIndicator: z.string().optional(),
   })
   .refine(
     (data) => {
@@ -138,10 +168,11 @@ export const UpdateClientResourceSchema = z.object({
 
 export type UpdateClientResourceDto = z.infer<typeof UpdateClientResourceSchema>;
 
-// 10-Sheet Workbook Constants
+// Master Workbook Constants
 export const RESOURCE_IMPORT_SHEETS = [
   'Resource Import',
   'Instructions',
+  'EMR Forms',
   'Resource Types',
   'Specialties',
   'Departments',
@@ -152,24 +183,64 @@ export const RESOURCE_IMPORT_SHEETS = [
   'Template Info',
 ] as const;
 
-export const RESOURCE_IMPORT_COLUMNS = [
-  'S.No',
-  'Resource Name*',
-  'Is Resource Human*',
-  'Resource Type*',
-  'Specialty*',
-  'Departments*',
-  'Color Identification Code',
-  'Services*',
-  'Operating From*',
-  'Operating To*',
-  'Username* (Human Only)',
-  'First Name* (Human Only)',
-  'Middle Name',
-  'Last Name* (Human Only)',
-  'Mobile* (Human Only)',
-  'Email',
-  'Nationality* (Human Only)',
-  'Roles* (Human Only)',
-  'Is Shown in Registration',
+// 6-Sheet Integrated Master Workbook Constants
+export const RESOURCE_INTEGRATED_SHEETS = [
+  'Resource Details',
+  'Associated User',
+  'User–Resource Mapping',
+  'eClaim Configuration',
+  'EMR Form Assignment',
+  'Template Info',
 ] as const;
+
+export const RESOURCE_STEP_COLUMNS = [
+  // Step 1: Resource Core Profile (10 cols)
+  { step: 1, name: 'S.No', required: false, width: 8, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Resource Name*', required: true, width: 26, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Is Resource Human*', required: true, width: 22, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Resource Type*', required: true, width: 24, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Specialty*', required: true, width: 22, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Departments*', required: true, width: 20, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Color Identification Code', required: false, width: 25, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Services*', required: true, width: 20, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Operating From*', required: true, width: 18, group: 'Step 1: Resource Details' },
+  { step: 1, name: 'Operating To*', required: true, width: 18, group: 'Step 1: Resource Details' },
+
+  // Step 2: User Account & Credentials (9 cols - Password, Nick Name, Date of Birth, Designation removed)
+  { step: 2, name: 'Username* (Human Only)', required: true, width: 25, group: 'Step 2: Associated User' },
+  { step: 2, name: 'First Name* (Human Only)', required: true, width: 25, group: 'Step 2: Associated User' },
+  { step: 2, name: 'Middle Name', required: false, width: 18, group: 'Step 2: Associated User' },
+  { step: 2, name: 'Last Name* (Human Only)', required: true, width: 25, group: 'Step 2: Associated User' },
+  { step: 2, name: 'Gender', required: false, width: 14, group: 'Step 2: Associated User' },
+  { step: 2, name: 'Mobile* (Human Only)', required: true, width: 22, group: 'Step 2: Associated User' },
+  { step: 2, name: 'Email', required: false, width: 26, group: 'Step 2: Associated User' },
+  { step: 2, name: 'Nationality* (Human Only)', required: true, width: 26, group: 'Step 2: Associated User' },
+  { step: 2, name: 'Roles* (Comma-Separated, Human Only)', required: true, width: 32, group: 'Step 2: Associated User' },
+
+
+  // Step 3: Resource Mapping & Registration Display (1 col - Branch removed)
+  { step: 3, name: 'Is Shown in Registration*', required: true, width: 26, group: 'Step 3: User–Resource Mapping' },
+
+  // Step 4: eClaim Configuration (10 cols matching live /addUserEclaim screen)
+  { step: 4, name: 'Eclaim Link', required: false, width: 24, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Eclaim Name', required: false, width: 24, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Eclaim Password', required: false, width: 22, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'License No', required: false, width: 20, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Insurance Company', required: false, width: 26, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Branch Name', required: false, width: 22, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Old Eclaim Name', required: false, width: 24, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Old Eclaim Password', required: false, width: 22, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Old License No', required: false, width: 20, group: 'Step 4: eClaim Configuration' },
+  { step: 4, name: 'Actual License No', required: false, width: 22, group: 'Step 4: eClaim Configuration' },
+
+  // Step 5: EMR Form Assignment & Transfer (4 cols - EMR Group & EMR Target Branch removed)
+  { step: 5, name: 'EMR Forms* (Comma-Separated)', required: true, width: 32, group: 'Step 5: EMR Form Assignment' },
+  { step: 5, name: 'EMR Default Form', required: false, width: 24, group: 'Step 5: EMR Form Assignment' },
+  { step: 5, name: 'EMR Encounter Type', required: false, width: 22, group: 'Step 5: EMR Form Assignment' },
+  { step: 5, name: 'EMR Transfer Default (Yes/No)', required: false, width: 28, group: 'Step 5: EMR Form Assignment' },
+] as const;
+
+export const RESOURCE_IMPORT_COLUMNS = RESOURCE_STEP_COLUMNS.map((c) => c.name);
+
+
+

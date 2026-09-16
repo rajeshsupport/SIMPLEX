@@ -13,7 +13,11 @@ import {
   resolveClientRoleUrl,
   resolveClientResourceUrl,
   resolveClientResourceUserMappingUrl,
+  resolveClientEmrPanelUrl,
+  resolveClientEclaimUserUrl,
   normalizeClientBaseUrl,
+  ensureTrailingSlash,
+  DEFAULT_ROLE_MAPPING_ROUTE,
   validateRedirectHost,
   parseAndValidateRoles,
   assertValidOneTimeEventId,
@@ -192,6 +196,106 @@ function runSchemaTests() {
   }
   if ((clientA_Role as string) === (clientB_Role as string)) throw new Error('Test 13 Failed: Client A and Client B URLs must never match');
   console.log('✓ TEST 13: Distinct clients resolve isolated Role Master URLs.');
+
+  // Test 13A: Base URL without context path
+  const noContextRole = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com' });
+  if (noContextRole !== 'https://staging.simplexworld.com/addUserRole') {
+    throw new Error(`Test 13A Failed: Expected https://staging.simplexworld.com/addUserRole, got ${noContextRole}`);
+  }
+  console.log('✓ TEST 13A: Base URL without context path resolves endpoint correctly.');
+
+  // Test 13B: Base URL with context path
+  const withContextRole = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3' });
+  if (withContextRole !== 'https://staging.simplexworld.com/MasterV9.3/addUserRole') {
+    throw new Error(`Test 13B Failed: Expected https://staging.simplexworld.com/MasterV9.3/addUserRole, got ${withContextRole}`);
+  }
+  console.log('✓ TEST 13B: Base URL with context path preserves context and appends endpoint.');
+
+  // Test 13C: Base URL with trailing slash (without context and with context)
+  const noContextTrailing = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/' });
+  const withContextTrailing = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/' });
+  if (noContextTrailing !== 'https://staging.simplexworld.com/addUserRole' ||
+      withContextTrailing !== 'https://staging.simplexworld.com/MasterV9.3/addUserRole') {
+    throw new Error(`Test 13C Failed: trailing slash handling failed: noContext=${noContextTrailing}, withContext=${withContextTrailing}`);
+  }
+  console.log('✓ TEST 13C: Trailing slash stripped safely with or without context path.');
+
+  // Test 13D: Base URL without trailing slash
+  const withoutTrailing = resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3' });
+  if (withoutTrailing !== 'https://staging.simplexworld.com/MasterV9.3/addUserRole') {
+    throw new Error(`Test 13D Failed: Expected https://staging.simplexworld.com/MasterV9.3/addUserRole, got ${withoutTrailing}`);
+  }
+  console.log('✓ TEST 13D: Base URL without trailing slash appends endpoint exactly once.');
+
+  // Test 13E: Prevention of duplicate /MasterV9.3/MasterV9.3/... when route specifies context path
+  const duplicateContextRoute1 = resolveClientRoleUrl({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+    userRoleRoute: '/MasterV9.3/addUserRole',
+  });
+  const duplicateContextRoute2 = resolveClientRoleUrl({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.3/',
+    userRoleRoute: 'https://staging.simplexworld.com/MasterV9.3/addUserRole',
+  });
+  if (duplicateContextRoute1 !== 'https://staging.simplexworld.com/MasterV9.3/addUserRole' ||
+      duplicateContextRoute2 !== 'https://staging.simplexworld.com/MasterV9.3/addUserRole') {
+    throw new Error(`Test 13E Failed: Duplicate context generated: r1=${duplicateContextRoute1}, r2=${duplicateContextRoute2}`);
+  }
+  console.log('✓ TEST 13E: Prevention of duplicate /MasterV9.3/MasterV9.3/... validated.');
+
+  // Test 13F: Targeted URL Resolution with exact baseUrl & route /addUserRole
+  const t13fBaseUrl = 'https://staging.simplexworld.com/MasterV9.3';
+  const t13fRoute = '/addUserRole';
+  const t13fConstructed = new URL('addUserRole', ensureTrailingSlash(t13fBaseUrl)).toString();
+  const t13fResolved = resolveClientRoleUrl({ baseUrl: t13fBaseUrl, userRoleRoute: t13fRoute });
+  if (t13fConstructed !== 'https://staging.simplexworld.com/MasterV9.3/addUserRole') {
+    throw new Error(`Test 13F Failed: Expected https://staging.simplexworld.com/MasterV9.3/addUserRole from new URL, got ${t13fConstructed}`);
+  }
+  if (t13fResolved !== 'https://staging.simplexworld.com/MasterV9.3/addUserRole') {
+    throw new Error(`Test 13F Failed: Expected https://staging.simplexworld.com/MasterV9.3/addUserRole from resolveClientRoleUrl, got ${t13fResolved}`);
+  }
+  if (DEFAULT_ROLE_MAPPING_ROUTE !== '/addUserRole') {
+    throw new Error(`Test 13F Failed: Expected DEFAULT_ROLE_MAPPING_ROUTE to be /addUserRole, got ${DEFAULT_ROLE_MAPPING_ROUTE}`);
+  }
+  console.log('✓ TEST 13F: Direct proof: baseUrl = https://staging.simplexworld.com/MasterV9.3 + /addUserRole -> https://staging.simplexworld.com/MasterV9.3/addUserRole.');
+
+  // Test 13G: Application of same endpoint-append rule to /userRole, /users, and /addUsers
+  const t13gUserRole = resolveClientRoute({ baseUrl: t13fBaseUrl, route: '/userRole' });
+  const t13gUsers = resolveClientRoute({ baseUrl: t13fBaseUrl, route: '/users' });
+  const t13gAddUsers = resolveClientRoute({ baseUrl: t13fBaseUrl, route: '/addUsers' });
+  if (t13gUserRole !== 'https://staging.simplexworld.com/MasterV9.3/userRole') {
+    throw new Error(`Test 13G Failed: Expected /userRole endpoint, got ${t13gUserRole}`);
+  }
+  if (t13gUsers !== 'https://staging.simplexworld.com/MasterV9.3/users') {
+    throw new Error(`Test 13G Failed: Expected /users endpoint, got ${t13gUsers}`);
+  }
+  if (t13gAddUsers !== 'https://staging.simplexworld.com/MasterV9.3/addUsers') {
+    throw new Error(`Test 13G Failed: Expected /addUsers endpoint, got ${t13gAddUsers}`);
+  }
+  console.log('✓ TEST 13G: Endpoint-append rule verified for /userRole, /users, and /addUsers.');
+
+  // Test 13H: Rejection tests proving /MasterV9.3/MasterV9.3/ never appears under any combination
+  const t13hUrlsToTest = [
+    resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', userRoleRoute: '/addUserRole' }),
+    resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', userRoleRoute: '/MasterV9.3/addUserRole' }),
+    resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3/', userRoleRoute: '/MasterV9.3/addUserRole' }),
+    resolveClientRoleUrl({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', applicationPath: '/MasterV9.3', userRoleRoute: '/addUserRole' }),
+    resolveClientRoute({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', route: '/MasterV9.3/addUserRole' }),
+    resolveClientRoute({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', applicationPath: '/MasterV9.3', route: '/addUserRole' }),
+    resolveClientRoute({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', route: '/MasterV9.3/users' }),
+    resolveClientRoute({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', route: '/MasterV9.3/addUsers' }),
+    resolveClientRoute({ baseUrl: 'https://staging.simplexworld.com/MasterV9.3', route: '/MasterV9.3/userRole' }),
+  ];
+
+  for (const url of t13hUrlsToTest) {
+    if (url.includes('/MasterV9.3/MasterV9.3/')) {
+      throw new Error(`Test 13H Rejection Test Failed: Duplicate /MasterV9.3/MasterV9.3/ detected in '${url}'`);
+    }
+    const versionCount = (url.match(/\/MasterV9\.3/g) || []).length;
+    if (versionCount > 1) {
+      throw new Error(`Test 13H Rejection Test Failed: /MasterV9.3 appeared ${versionCount} times in '${url}'`);
+    }
+  }
+  console.log('✓ TEST 13H: Strict rejection test passed: /MasterV9.3/MasterV9.3/ never appears under any permutation.');
 
   // 5. Shared Role Parser Architecture & Comma-Separated Multi-Role Tests
   console.log('--- Testing Shared Role Parser Architecture & Multi-Role Validation ---');
@@ -430,9 +534,84 @@ function runSchemaTests() {
   if (!mismatchCheck.clientMismatch) {
     throw new Error('Test 32 Failed: Client mismatch was not detected');
   }
-  console.log('✓ TEST 32: 10-Sheet Workbook generated, parsed, and verified with client ID mismatch protection.');
+  // Test 33: EMR Panel URL Resolution across MasterV9.3, MasterV9.4, MasterV9.5, and HMC
+  console.log('\n--- Testing EMR Panel and eClaim URL Dynamic Resolution ---');
+  const emrHosts = [
+    { base: 'https://staging.simplexworld.com/MasterV9.3', expected: 'https://staging.simplexworld.com/MasterV9.3/emrPanelSelection' },
+    { base: 'https://hospital.example.com/HMC', expected: 'https://hospital.example.com/HMC/emrPanelSelection' },
+    { base: 'https://hospital.example.com/MasterV9.4', expected: 'https://hospital.example.com/MasterV9.4/emrPanelSelection' },
+    { base: 'https://hospital.example.com/MasterV9.5', expected: 'https://hospital.example.com/MasterV9.5/emrPanelSelection' },
+  ];
+  for (const item of emrHosts) {
+    const res = resolveClientEmrPanelUrl({ baseUrl: item.base });
+    if (res !== item.expected) {
+      throw new Error(`Test 33 Failed: Expected ${item.expected}, got ${res}`);
+    }
+  }
+  console.log('✓ TEST 33: resolveClientEmrPanelUrl dynamically resolves /emrPanelSelection correctly across MasterV9.3, HMC, MasterV9.4, and MasterV9.5.');
+
+  // Test 34: eClaim User URL Resolution
+  const eclaimHosts = [
+    { base: 'https://staging.simplexworld.com/MasterV9.3', expected: 'https://staging.simplexworld.com/MasterV9.3/addUserEclaim' },
+    { base: 'https://hospital.example.com/HMC', expected: 'https://hospital.example.com/HMC/addUserEclaim' },
+  ];
+  for (const item of eclaimHosts) {
+    const res = resolveClientEclaimUserUrl({ baseUrl: item.base });
+    if (res !== item.expected) {
+      throw new Error(`Test 34 Failed: Expected ${item.expected}, got ${res}`);
+    }
+  }
+  const customEclaim = resolveClientEclaimUserUrl({
+    baseUrl: 'https://staging.simplexworld.com/MasterV9.3',
+    eclaimUserRoute: '/eclaimUser',
+  });
+  if (customEclaim !== 'https://staging.simplexworld.com/MasterV9.3/eclaimUser') {
+    throw new Error(`Test 34 Failed: Expected custom route /eclaimUser, got ${customEclaim}`);
+  }
+  console.log('✓ TEST 34: resolveClientEclaimUserUrl resolves default and client-specific routes safely.');
+
+  // Test 35: All Six Stages Dynamic Routes Deduplication Invariant
+  const baseStaging = 'https://staging.simplexworld.com/MasterV9.3';
+  const stageEndpoints = [
+    '/addResourceParentDetails',
+    '/addUsers',
+    '/addParentResourceUser',
+    '/addUserRole',
+    '/emrPanelSelection',
+    '/addUserEclaim',
+  ];
+  for (const ep of stageEndpoints) {
+    const resolved = resolveClientRoute({ baseUrl: baseStaging, route: ep });
+    if (resolved.includes('/MasterV9.3/MasterV9.3/')) {
+      throw new Error(`Test 35 Failed: Duplicated application context detected for ${ep}: ${resolved}`);
+    }
+    const expected = `${baseStaging}${ep}`;
+    if (resolved !== expected) {
+      throw new Error(`Test 35 Failed: Expected ${expected}, got ${resolved}`);
+    }
+  }
+  console.log('✓ TEST 35: All six operational routes append cleanly with strictly zero application context duplication.');
+
+  // Test 36: 6-Sheet Integrated Master Workbook Multi-Section Parsing
+  console.log('\n--- Testing 6-Sheet Integrated Master Workbook Generation & Correlation ---');
+  const integratedWb = generateResourceImportWorkbook({
+    clientId: testClientId,
+    clientCode: 'CLI_INTEGRATED',
+    clientName: 'Integrated Clinic',
+    format: '6-SHEET',
+  });
+  const parsedIntegrated = parseAndValidateResourceWorkbook(integratedWb, testClientId);
+  if (!parsedIntegrated.isValid || parsedIntegrated.validRows.length !== 2) {
+    throw new Error(`Test 36 Failed: Expected 2 valid rows in 6-sheet workbook: ${JSON.stringify(parsedIntegrated.invalidRows)}`);
+  }
+  const row1 = parsedIntegrated.validRows[0].data;
+  if (!row1.username || row1.username !== 'dr_tariq_m') {
+    throw new Error(`Test 36 Failed: Associated User data was not correlated properly: ${JSON.stringify(row1)}`);
+  }
+  console.log('✓ TEST 36: 6-Sheet Integrated Master Workbook generated and correlated across all sheets successfully.');
 
   console.log('\nAll shared schema, URL architecture, Role Parser, Resource & Event-ID cryptographic tests passed successfully!');
 }
 
 runSchemaTests();
+

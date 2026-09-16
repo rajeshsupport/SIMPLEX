@@ -33,6 +33,7 @@ import {
   ExcelUserImportExecutionSummary,
   ClaimEphemeralCredentialDto,
   AckEphemeralCredentialDto,
+  MapExistingUserRolesDto,
 } from '@hmc/shared';
 
 @SkipThrottle()
@@ -142,12 +143,28 @@ export class ClientUsersController {
 
   @Post()
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_CREATE)
-  @HttpCode(HttpStatus.CREATED)
   async createClientUser(
     @Body() dto: CreateClientUserDto,
+    @CurrentUser() user: JwtPayload,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const result = await this.clientUsersService.createClientUser(dto, user);
+    if (result && typeof result === 'object' && 'operationStatus' in result && (result as any).operationStatus === 'AUTOMATION_IN_PROGRESS') {
+      res.status(HttpStatus.ACCEPTED);
+    } else {
+      res.status(HttpStatus.CREATED);
+    }
+    return result;
+  }
+
+  @Get('creation-status/:runId')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getCreationRunStatus(
+    @Param('runId') runId: string,
+    @Query('clientId') clientId: string,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.createClientUser(dto, user);
+    return this.clientUsersService.getCreationRunStatus(runId, user, clientId);
   }
 
   @Put(':id')
@@ -179,6 +196,46 @@ export class ClientUsersController {
     @CurrentUser() user: JwtPayload
   ) {
     return this.clientUsersService.resetUserPassword(id, user);
+  }
+
+  @Post('map-roles')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_EDIT)
+  @HttpCode(HttpStatus.OK)
+  async mapUserRoles(
+    @Body() dto: { clientId: string; username: string; roles: string[]; fullName?: string; firstName?: string; remoteUserId?: string; allowDeactivation?: boolean },
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.mapUserRoles(dto, user);
+  }
+
+  @Post(':id/roles')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_EDIT)
+  @HttpCode(HttpStatus.OK)
+  async mapExistingUserRoles(
+    @Param('id') id: string,
+    @Body() dto: MapExistingUserRolesDto,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.mapExistingUserRoles(id, dto, user);
+  }
+
+  @Get(':id/roles')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getUserRoles(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.getUserRoles(id, user);
+  }
+
+  @Post(':id/roles/refresh')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @HttpCode(HttpStatus.OK)
+  async refreshUserRoles(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.refreshUserRolesRemote(id, user);
   }
 
   @Get('export-excel')

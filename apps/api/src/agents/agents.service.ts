@@ -24,8 +24,11 @@ import {
   AgentHeartbeatPayload,
   AgentTaskAssignment,
   AutomationRunStepTelemetry,
+  resolveTaskModePolicy,
 } from '@hmc/shared';
 import { ClientsService } from '../clients/clients.service.js';
+import { ClientDirectoryReconciliationService } from './client-directory-reconciliation.service.js';
+import { EphemeralCredentialStore } from '../client-users/ephemeral-credential.store.js';
 
 @Injectable()
 export class AgentsService {
@@ -46,7 +49,8 @@ export class AgentsService {
     private versionRepo: Repository<AutomationWorkflowVersion>,
     @InjectRepository(AuditLog)
     private auditRepo: Repository<AuditLog>,
-    private clientsService: ClientsService
+    private clientsService: ClientsService,
+    private reconciliationService: ClientDirectoryReconciliationService
   ) {}
 
   async getAllAgents(): Promise<DesktopAgentSummary[]> {
@@ -195,29 +199,49 @@ export class AgentsService {
     await this.agentRepo.save(agent);
 
     // Check for pending/queued automation runs assigned to this agent or unassigned
-    let pendingRun = await this.runRepo.findOne({
-      where: [
-        { desktopAgentId: agent.id, status: In(['PENDING', 'QUEUED']) },
-        { status: In(['PENDING', 'QUEUED']) },
-      ],
-      relations: ['client'],
-      order: { createdAt: 'ASC' },
-    });
+    // IMPORTANT: Only assign new tasks if the agent is ONLINE / not currently BUSY
+    let pendingRun: AutomationRun | null = null;
+    if (agent.status !== 'BUSY') {
+      pendingRun = await this.runRepo.findOne({
+        where: [
+          { desktopAgentId: agent.id, status: In(['PENDING', 'QUEUED']) },
+          { status: In(['PENDING', 'QUEUED']) },
+        ],
+        relations: ['client'],
+        order: { createdAt: 'ASC' },
+      });
+    }
 
     if (pendingRun) {
-      pendingRun.desktopAgentId = agent.id;
-      const task = await this.buildTaskAssignment(pendingRun);
-      pendingRun.status = 'CLAIMED';
-      pendingRun.startedAt = new Date();
-      pendingRun.updatedAt = new Date();
-      await this.runRepo.save(pendingRun);
+      // Atomic status claim to prevent multiple agents or overlapping polls claiming the same run
+      const updateResult = await this.runRepo
+        .createQueryBuilder()
+        .update(AutomationRun)
+        .set({
+          status: 'CLAIMED',
+          desktopAgentId: agent.id,
+          startedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where('id = :id AND status IN (:...statuses)', {
+          id: pendingRun.id,
+          statuses: ['PENDING', 'QUEUED'],
+        })
+        .execute();
 
-      agent.status = 'BUSY';
-      agent.lastHeartbeatAt = new Date();
-      await this.agentRepo.save(agent);
+      if (updateResult.affected && updateResult.affected > 0) {
+        pendingRun.status = 'CLAIMED';
+        pendingRun.desktopAgentId = agent.id;
+        const task = await this.buildTaskAssignment(pendingRun);
 
-      return { acknowledged: true, pendingRun: task };
+        agent.status = 'BUSY';
+        agent.lastHeartbeatAt = new Date();
+        await this.agentRepo.save(agent);
+
+        return { acknowledged: true, pendingRun: task };
+      }
     }
+
 
     return { acknowledged: true };
   }
@@ -313,6 +337,7 @@ export class AgentsService {
       run.completedAt = new Date();
       await this.runRepo.save(run);
     }
+    this.reconciliationService.discardBuffer(runId);
     return run;
   }
 
@@ -330,18 +355,101 @@ export class AgentsService {
     if (!run) return;
 
     run.updatedAt = new Date(); // Refresh active task execution lease
-    if (dto.resultData?.stage) {
-      run.status = dto.resultData.stage as any;
-    } else if (dto.status) {
-      run.status = (dto.status === 'COMPLETED' ? 'SUCCEEDED' : dto.status) as any;
+    if (dto.totalDurationMs) run.totalDurationMs = dto.totalDurationMs;
+
+    const isCreationWorkflow = run.runType === 'PROCESS_USER_FULL_WORKFLOW' || run.runType === 'CREATE_CLIENT_USER';
+    const isRemoteVerificationDone =
+      dto.resultData?.stage === 'FINAL_ROLES_VERIFIED' ||
+      dto.status === 'FINAL_ROLES_VERIFIED' ||
+      dto.status === 'COMPLETED';
+
+    if (isCreationWorkflow && isRemoteVerificationDone) {
+      // Remote terminal stage FINAL_ROLES_VERIFIED reached.
+      // Central snapshot transaction must now execute before emitting completion.
+      try {
+        const stagesEmitted: string[] = ['FINAL_ROLES_VERIFIED'];
+        await this.reconciliationService.persistCreationCompletionSnapshot(run, dto.resultData, (stage) => {
+          stagesEmitted.push(stage);
+        });
+
+        // Central transaction succeeded: now emit CENTRAL_SNAPSHOT_PERSISTED and COMPLETED
+        run.status = 'COMPLETED' as any;
+        run.completedAt = new Date();
+        const existingSummary = dto.resultData ? { ...dto.resultData } : {};
+        existingSummary.stage = 'COMPLETED';
+        existingSummary.stagesEmitted = stagesEmitted;
+
+        const capturedPassword =
+          dto.resultData?.ephemeralDefaultPassword ||
+          dto.resultData?.defaultPassword ||
+          dto.resultData?.temporaryPassword;
+
+        if (capturedPassword) {
+          const operatorId = run.triggeredByUserId || '';
+          const deliveryRes = EphemeralCredentialStore.storeEphemeralCredential({
+            initiatingOperatorId: operatorId,
+            clientId: run.clientId,
+            username: dto.resultData?.username || '',
+            fullName: dto.resultData?.fullName,
+            password: capturedPassword,
+            user: { sub: operatorId, isSuperAdmin: true } as any,
+          });
+          existingSummary.oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
+          existingSummary.credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
+        }
+
+        run.resultSummaryJson = JSON.stringify(existingSummary);
+      } catch (persistErr: any) {
+        this.logger.error(`Failed to persist verified creation snapshot for run ${run.id}: ${persistErr.message}`);
+        // Requirement 4: If Central persistence fails after remote verification, return REMOTE_COMPLETED_CENTRAL_SYNC_PENDING. Never report COMPLETED.
+        run.status = 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING' as any;
+        run.errorMessage = `Remote execution verified, but Central DB snapshot persistence failed: ${persistErr.message}`;
+        const existingSummary = dto.resultData ? { ...dto.resultData } : {};
+        existingSummary.stage = 'FINAL_ROLES_VERIFIED';
+        existingSummary.overallStatus = 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING';
+        run.resultSummaryJson = JSON.stringify(existingSummary);
+      }
+    } else {
+      if (['COMPLETED', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(dto.status)) {
+        run.status = (dto.status === 'COMPLETED' ? 'SUCCEEDED' : dto.status) as any;
+        run.completedAt = new Date();
+      } else if (dto.resultData?.stage && !['SUCCEEDED', 'COMPLETED'].includes(dto.resultData.stage)) {
+        run.status = dto.resultData.stage as any;
+      } else if (dto.status) {
+        run.status = (dto.status === 'COMPLETED' ? 'SUCCEEDED' : dto.status) as any;
+      }
+
+      if (dto.errorMessage) run.errorMessage = dto.errorMessage;
+      if (dto.resultData !== undefined) {
+        const existingSummary = typeof dto.resultData === 'object' ? { ...dto.resultData } : {};
+        const capturedPass =
+          existingSummary.ephemeralDefaultPassword ||
+          existingSummary.defaultPassword ||
+          existingSummary.temporaryPassword;
+        if (capturedPass && !existingSummary.oneTimeCredentialEventId && isCreationWorkflow) {
+          const operatorId = run.triggeredByUserId || '';
+          const deliveryRes = EphemeralCredentialStore.storeEphemeralCredential({
+            initiatingOperatorId: operatorId,
+            clientId: run.clientId,
+            username: existingSummary.username || '',
+            fullName: existingSummary.fullName,
+            password: capturedPass,
+            user: { sub: operatorId, isSuperAdmin: true } as any,
+          });
+          existingSummary.oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
+          existingSummary.credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
+        }
+        run.resultSummaryJson = JSON.stringify(existingSummary);
+      }
+      if (['SUCCEEDED', 'COMPLETED', 'REMOTE_VERIFICATION_COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REQUIRES_MANUAL_INTERVENTION'].includes(run.status)) {
+        run.completedAt = run.completedAt || new Date();
+      }
     }
 
-    if (dto.errorMessage) run.errorMessage = dto.errorMessage;
-    if (dto.totalDurationMs) run.totalDurationMs = dto.totalDurationMs;
-    if (dto.resultData !== undefined) run.resultSummaryJson = JSON.stringify(dto.resultData);
-    if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REQUIRES_MANUAL_INTERVENTION'].includes(run.status)) {
-      run.completedAt = new Date();
+    if (['FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+      this.reconciliationService.discardBuffer(runId);
     }
+
     await this.runRepo.save(run);
 
     // Maintain active agent lease & status as BUSY while task telemetry is received
@@ -349,7 +457,7 @@ export class AgentsService {
       const agent = await this.agentRepo.findOne({ where: { id: run.desktopAgentId } });
       if (agent) {
         agent.lastHeartbeatAt = new Date();
-        if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(run.status)) {
+        if (['SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING'].includes(run.status)) {
           agent.status = 'ONLINE';
         } else {
           agent.status = 'BUSY';
@@ -509,26 +617,11 @@ export class AgentsService {
     };
 
     const params = run.parametersJson ? JSON.parse(run.parametersJson) : {};
-    const isMutation = [
-      'CREATE_CLIENT_USER',
-      'CREATE_USER',
-      'MAP_USER_ROLES',
-      'EDIT_CLIENT_USER',
-      'EDIT_AND_UPDATE_CLIENT',
-      'SET_CLIENT_USER_STATUS',
-      'CHANGE_CLIENT_USER_STATUS',
-      'RESET_CLIENT_USER_PASSWORD',
-    ].includes(run.runType);
-
-    const isInteractive = [
-      'OPEN_INTERACTIVE_CLIENT_SESSION',
-      'INTERACTIVE_LOGIN',
-      'TEST_LOGIN',
-    ].includes(run.runType);
-
-    const isHeaded = isMutation || isInteractive || params.isHeaded === true;
-    const leaveBrowserOpen = isInteractive || params.leaveBrowserOpen === true;
-    const executionMode = (isMutation || isInteractive) ? ('HEADED_MUTATION' as const) : ('HEADLESS_SYNC' as const);
+    const taskPolicy = resolveTaskModePolicy(run.runType, params);
+    const leaveBrowserOpen =
+      taskPolicy.namespace === 'interactive'
+        ? params.leaveBrowserOpen === true
+        : false;
 
     return {
       runId: run.id,
@@ -540,13 +633,13 @@ export class AgentsService {
       targetRoute: params.targetRoute || client.usersRoute || '/users',
       workflowVersion: versionConfig,
       payload: params.payload || params,
-      executionMode,
+      executionMode: taskPolicy.executionMode,
       credentials: params.credentials || {
         username: creds?.username,
         password: creds?.password,
       },
       options: {
-        isHeaded,
+        isHeaded: taskPolicy.isHeaded,
         leaveBrowserOpen,
       },
     };

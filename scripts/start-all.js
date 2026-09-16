@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * HMC Central Operations Console - Unified Service Orchestrator
+ * SIMPLEX Central Operations Console - Unified Service Orchestrator
  * Starts the NestJS API (3000), Vite Web UI (5173), and Desktop Automation Agent concurrently.
  */
 
@@ -23,7 +23,7 @@ const colors = {
 };
 
 console.log(`${colors.bold}${colors.cyan}======================================================================${colors.reset}`);
-console.log(`${colors.bold}${colors.cyan}       HMC CENTRAL OPERATIONS CONSOLE - UNIFIED RUNNER                ${colors.reset}`);
+console.log(`${colors.bold}${colors.cyan}       SIMPLEX CENTRAL OPERATIONS CONSOLE - UNIFIED RUNNER            ${colors.reset}`);
 console.log(`${colors.bold}${colors.cyan}======================================================================${colors.reset}`);
 console.log(`${colors.dim}Root Directory: ${ROOT_DIR}${colors.reset}\n`);
 
@@ -81,7 +81,7 @@ startService('AGENT', 'pnpm', ['--filter', '@hmc/desktop-agent', 'start:runner']
 
 setTimeout(() => {
   console.log(`\n${colors.bold}${colors.green}======================================================================${colors.reset}`);
-  console.log(`${colors.bold}${colors.green}       ✓ ALL HMC SERVICES ARE RUNNING!                                ${colors.reset}`);
+  console.log(`${colors.bold}${colors.green}       ✓ ALL SIMPLEX SERVICES ARE RUNNING!                            ${colors.reset}`);
   console.log(`${colors.bold}${colors.green}======================================================================${colors.reset}`);
   console.log(` • Web Console:   ${colors.bold}${colors.cyan}http://localhost:5173${colors.reset}`);
   console.log(` • Central Users: ${colors.bold}${colors.cyan}http://localhost:5173/users${colors.reset}`);

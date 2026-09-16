@@ -75,22 +75,26 @@ export class ClientResourcesController {
 
   @Get('template')
   @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_VIEW)
-  getTemplate(
+  async getTemplate(
     @Query('clientId') clientId: string,
     @Query('clientCode') clientCode: string,
+    @Query('format') format: '1-SHEET' | '6-SHEET' | '10-SHEET',
     @Res() res: Response
   ) {
-    const buffer = this.clientResourcesService.generateImportTemplate(clientId, clientCode);
+    const activeFormat = format || '1-SHEET';
+    const buffer = await this.clientResourcesService.generateImportTemplate(clientId, clientCode, activeFormat);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=HMC_Client_Resources_Template.xlsx');
+    const filenameSuffix = activeFormat === '6-SHEET' ? 'Integrated_6Sheet' : activeFormat === '1-SHEET' ? 'Master_1Sheet_StepWise' : 'Template';
+    res.setHeader('Content-Disposition', `attachment; filename=HMC_Client_Resources_${filenameSuffix}.xlsx`);
     res.send(buffer);
   }
+
 
   @Get('export')
   @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_EXPORT)
   async exportResources(
     @Query('clientId') clientId: string,
-    @Query('mode') mode: 'ALL' | 'ACTIVE_ONLY',
+    @Query('mode') mode: 'ALL' | 'ACTIVE_ONLY' | 'INACTIVE_ONLY',
     @CurrentUser() user: JwtPayload,
     @Res() res: Response
   ) {
@@ -99,14 +103,43 @@ export class ClientResourcesController {
     }
     const buffer = await this.clientResourcesService.exportResourcesWorkbook(clientId, mode || 'ALL', user);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=HMC_Resources_Export_${clientId.slice(0, 8)}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename=HMC_Resources_${(mode || 'ALL').toLowerCase()}.xlsx`);
     res.send(buffer);
+  }
+
+  @Get('emr-forms')
+  @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_VIEW)
+  async getEmrForms(
+    @Query('clientId') clientId: string,
+    @Query('username') username: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    if (!clientId) {
+      throw new BadRequestException('Query parameter "clientId" is required');
+    }
+    return this.clientResourcesService.getEmrForms(clientId, user, username);
+  }
+
+  @Get('eclaim-options')
+  @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_VIEW)
+  async getEclaimOptions(
+    @Query('clientId') clientId: string,
+    @CurrentUser() user: JwtPayload
+  ) {
+    if (!clientId) {
+      throw new BadRequestException('Query parameter "clientId" is required');
+    }
+    return this.clientResourcesService.getEclaimOptions(clientId, user);
   }
 
   @Get('resource-types')
   @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_VIEW)
-  async getResourceTypes(@Query('clientId') clientId: string, @CurrentUser() user: JwtPayload) {
-    return this.clientResourcesService.getResourceTypes(clientId, user);
+  async getResourceTypes(
+    @Query('clientId') clientId: string,
+    @Query('isResourceHuman') isResourceHuman: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientResourcesService.getResourceTypes(clientId, isResourceHuman, user);
   }
 
   @Get('specialties')
@@ -217,6 +250,46 @@ export class ClientResourcesController {
     return this.clientResourcesService.createClientResource(parsed.clientId, parsed, user);
   }
 
+  @Post('create-integrated')
+  @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_CREATE)
+  @RequireClientAccess()
+  async createIntegratedResource(
+    @Body() body: any,
+    @CurrentUser() user: JwtPayload,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const result = await this.clientResourcesService.createIntegratedResource(body.clientId, body, user);
+    if (result.status === 'IN_PROGRESS' || result.isPending) {
+      res.status(HttpStatus.ACCEPTED);
+    } else {
+      res.status(HttpStatus.CREATED);
+    }
+    return result;
+  }
+
+  @Post('resume-integrated')
+  @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_CREATE)
+  @RequireClientAccess()
+  async resumeIntegratedProvisioning(
+    @Body() body: any,
+    @CurrentUser() user: JwtPayload,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const result = await this.clientResourcesService.resumeIntegratedProvisioning(body.clientId, body, user);
+    if ((result as any).status === 'IN_PROGRESS' || (result as any).isPending) {
+      res.status(HttpStatus.ACCEPTED);
+    } else {
+      res.status(HttpStatus.OK);
+    }
+    return result;
+  }
+
+  @Get('runs/:runId/status')
+  @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_VIEW)
+  async getProvisioningRunStatus(@Param('runId') runId: string) {
+    return this.clientResourcesService.getProvisioningRunStatus(runId);
+  }
+
   @Post('status')
   @RequirePermissions(PERMISSIONS.CLIENT_RESOURCES_STATUS_CHANGE)
   @RequireClientAccess()
@@ -248,7 +321,8 @@ export class ClientResourcesController {
       parsed.clientId,
       parsed.remoteResourceId,
       parsed.username,
-      user
+      user,
+      parsed.resourceName
     );
   }
 }
