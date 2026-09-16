@@ -15,6 +15,7 @@ if %errorlevel% neq 0 (
 )
 
 echo Starting SIMPLEX Services (Database, API, Web Console)...
+docker rm -f simplex_central_web simplex_central_api simplex_mssql_db >nul 2>&1
 docker compose pull simplex_api
 docker compose up -d
 

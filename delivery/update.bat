@@ -9,7 +9,8 @@ docker compose pull
 
 echo.
 echo Applying updates and restarting services...
-echo (NOTE: All existing database records, users, and clients are 100% PRESERVED!)
+echo (NOTE: All existing database records, users, and clients are 100%% PRESERVED!)
+docker rm -f simplex_central_web simplex_central_api simplex_mssql_db >nul 2>&1
 docker compose up -d
 
 echo.
