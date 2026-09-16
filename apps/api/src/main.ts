@@ -4,7 +4,8 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
-import { EnvelopeEncryption } from '@hmc/database';
+import { EnvelopeEncryption, runMigrations, runSeeds, AppDataSource, ApplicationUser, Role } from '@hmc/database';
+import * as argon2 from 'argon2';
 
 // Load environment variables
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -123,6 +124,40 @@ async function bootstrap() {
     .build();
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
+
+  // Automated Database Schema Verification & Initial Seed Provisioning
+  try {
+    logger.log('Verifying database schema and migrations...');
+    await runMigrations();
+    await runSeeds();
+
+    // Ensure super administrator account exists (admin / Rajesh@123)
+    const userRepo = AppDataSource.getRepository(ApplicationUser);
+    const existingAdmin = await userRepo.findOne({ where: { username: 'admin' } });
+    if (!existingAdmin) {
+      logger.log('Provisioning default root administrator [admin]...');
+      const roleRepo = AppDataSource.getRepository(Role);
+      const superAdminRole = await roleRepo.findOne({ where: { name: 'SUPER_ADMIN' } });
+      const passwordHash = await argon2.hash('Rajesh@123', {
+        type: argon2.argon2id,
+        memoryCost: 65536,
+        timeCost: 3,
+        parallelism: 4,
+      });
+      const newAdmin = userRepo.create({
+        username: 'admin',
+        email: 'raja@gmail.com',
+        fullName: 'System Super Administrator',
+        passwordHash,
+        status: 'ACTIVE',
+        roles: superAdminRole ? [superAdminRole] : [],
+      });
+      await userRepo.save(newAdmin);
+      logger.log('✓ Default administrator user [admin] provisioned successfully.');
+    }
+  } catch (dbInitErr: any) {
+    logger.warn(`Database automated initialization notice: ${dbInitErr.message}`);
+  }
 
   const port = parseInt(process.env.PORT || '3000', 10);
   await app.listen(port);

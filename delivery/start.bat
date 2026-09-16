@@ -15,6 +15,7 @@ if %errorlevel% neq 0 (
 )
 
 echo Starting SIMPLEX Services (Database, API, Web Console)...
+docker compose pull simplex_api
 docker compose up -d
 
 echo Initializing SIMPLEX Database...

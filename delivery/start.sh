@@ -11,6 +11,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 echo "Starting SIMPLEX Services (Database, API, Web Console)..."
+docker compose pull simplex_api
 docker compose up -d
 
 echo "Initializing SIMPLEX Database..."
