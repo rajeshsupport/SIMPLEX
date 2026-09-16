@@ -11,7 +11,7 @@ services:
       SA_PASSWORD: "${MSSQL_PASSWORD:-Rajesh@123}"
       MSSQL_PID: "Developer"
     ports:
-      - "${MSSQL_PORT:-1433}:1433"
+      - "${MSSQL_PORT:-14333}:1433"
     volumes:
       - simplex_mssql_data:/var/opt/mssql
 

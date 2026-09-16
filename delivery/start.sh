@@ -13,6 +13,11 @@ fi
 echo "Starting SIMPLEX Services (Database, API, Web Console)..."
 docker compose up -d
 
+echo "Initializing SIMPLEX Database..."
+sleep 5
+docker exec -i simplex_mssql_db /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Rajesh@123" -C -Q "IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'SIMPLEX_CENTRAL_DB') CREATE DATABASE SIMPLEX_CENTRAL_DB;" >/dev/null 2>&1 || true
+docker compose restart simplex_api >/dev/null 2>&1 || true
+
 echo ""
 echo "======================================================================"
 echo "  [SUCCESS] SIMPLEX Central Operations Console is now running!"
