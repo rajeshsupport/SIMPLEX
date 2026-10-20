@@ -36,6 +36,7 @@ import {
   Sparkles,
   Globe,
   Info,
+  GitBranch,
 } from 'lucide-react';
 import { ApiClient, clientResourcesApi, clientUsersApi } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.js';
@@ -57,6 +58,8 @@ interface ClientOption {
   clientCode: string;
   clientName: string;
   environment: string;
+  branchName?: string | null;
+  branches?: string[];
 }
 
 interface ResourceItem {
@@ -118,6 +121,8 @@ export const ResourcesPage: React.FC = () => {
   // Client Selection State
   const [clients, setClients] = useState<ClientOption[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string>('');
+  const [selectedBranch, setSelectedBranch] = useState<string>('');
+  const [customBranch, setCustomBranch] = useState<string>('');
   const [isLoadingClients, setIsLoadingClients] = useState<boolean>(true);
 
   // Resources Data State
@@ -248,7 +253,7 @@ export const ResourcesPage: React.FC = () => {
   const [wIsShownInRegistration, setWIsShownInRegistration] = useState<boolean>(true);
 
   // Section 3: eClaim Configuration (/addUserEclaim)
-  const [wEclaimEnabled, setWEclaimEnabled] = useState<boolean>(true);
+  const [wEclaimEnabled, setWEclaimEnabled] = useState<boolean>(false);
   const [wEclaimLink, setWEclaimLink] = useState<string>('');
   const [wEclaimName, setWEclaimName] = useState<string>('');
   const [wEclaimPassword, setWEclaimPassword] = useState<string>('');
@@ -556,6 +561,8 @@ export const ResourcesPage: React.FC = () => {
           res[0];
         setSelectedClientId(defaultClient.id);
         localStorage.setItem('hmc_selected_client_id', defaultClient.id);
+        setSelectedBranch(defaultClient.branchName || (defaultClient.branches && defaultClient.branches[0]) || '');
+        setCustomBranch('');
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to load client list');
@@ -743,7 +750,7 @@ export const ResourcesPage: React.FC = () => {
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      const res = await clientResourcesApi.syncResources(selectedClientId);
+      const res = await clientResourcesApi.syncResources(selectedClientId, effectiveBranch || undefined);
       setSuccessMessage(res.message || 'Resource discovery completed.');
       fetchResources();
     } catch (err: any) {
@@ -807,7 +814,7 @@ export const ResourcesPage: React.FC = () => {
     setWMappingUsername('');
     setWIsShownInRegistration(true);
 
-    setWEclaimEnabled(true);
+    setWEclaimEnabled(false);
     setWEclaimLink('');
     setWEclaimName('');
     setWEclaimPassword('');
@@ -1793,6 +1800,7 @@ export const ResourcesPage: React.FC = () => {
       operatingTo: wOperatingTo !== undefined && wOperatingTo !== '' ? wOperatingTo : '23:55',
       branchId: wBranchId || undefined,
       branchName: wBranchName || undefined,
+      targetBranch: effectiveBranch || wBranchName || undefined,
 
       createAssociatedUser: wIsHuman && wCreateUser,
       username: wIsHuman && wCreateUser ? wUsername.trim() : (wMappingUsername.trim() || undefined),
@@ -1813,7 +1821,7 @@ export const ResourcesPage: React.FC = () => {
       isShownInRegistration: wIsShownInRegistration,
 
       eclaimConfig:
-        wEclaimEnabled
+        (wEclaimEnabled && (wEclaimProviderId.trim() || wEclaimLicense.trim() || wEclaimLink.trim() || wEclaimName.trim() || wEclaimPassword.trim() || wEclaimInsuranceCompany.trim()))
           ? {
               enabled: true,
               eclaimLink: (wEclaimLink.trim() || wEclaimName.trim() || (wCreateUser ? wUsername.trim() : (wMappingUsername.trim() || ''))).replace(/^https?:\/\//i, '').replace(/[:?#].*$/, '').replace(/[^A-Za-z0-9_/@.-]/g, '') || undefined,
@@ -1891,8 +1899,8 @@ export const ResourcesPage: React.FC = () => {
         operation: 'ECLAIM_CONFIGURATION',
         name: 'eClaim User Configuration',
         route: '/addUserEclaim',
-        status: wEclaimEnabled ? 'PENDING' : 'SKIPPED',
-        details: !wEclaimEnabled ? 'No eClaim configuration requested' : undefined,
+        status: (wEclaimEnabled && (wEclaimProviderId.trim() || wEclaimLicense.trim() || wEclaimLink.trim() || wEclaimName.trim() || wEclaimPassword.trim() || wEclaimInsuranceCompany.trim())) ? 'PENDING' : 'SKIPPED',
+        details: !(wEclaimEnabled && (wEclaimProviderId.trim() || wEclaimLicense.trim() || wEclaimLink.trim() || wEclaimName.trim() || wEclaimPassword.trim() || wEclaimInsuranceCompany.trim())) ? 'No eClaim configuration requested' : undefined,
       },
       {
         operation: 'EMR_FORM_ASSIGNMENT',
@@ -2022,7 +2030,8 @@ export const ResourcesPage: React.FC = () => {
           resourceType: wResourceType,
           specialty: wSpecialty,
           username: wUsername.trim() || undefined,
-          eclaimConfig: wEclaimEnabled ? {
+          targetBranch: effectiveBranch || wBranchName || undefined,
+          eclaimConfig: (wEclaimEnabled && (wEclaimProviderId.trim() || wEclaimLicense.trim() || wEclaimLink.trim() || wEclaimName.trim() || wEclaimPassword.trim() || wEclaimInsuranceCompany.trim())) ? {
             enabled: true,
             eclaimLink: (wEclaimLink.trim() || wEclaimName.trim() || (wCreateUser ? wUsername.trim() : (wMappingUsername.trim() || ''))).replace(/^https?:\/\//i, '').replace(/[:?#].*$/, '').replace(/[^A-Za-z0-9_/@.-]/g, '') || undefined,
             eclaimName: wEclaimName.trim() || (wCreateUser ? wUsername.trim() : (wMappingUsername.trim() || undefined)),
@@ -2378,6 +2387,7 @@ export const ResourcesPage: React.FC = () => {
   };
 
   const selectedClient = clients.find((c) => c.id === selectedClientId);
+  const effectiveBranch = selectedBranch === '__custom__' ? customBranch.trim() : selectedBranch;
   const totalPages = Math.ceil(totalCount / limit) || 1;
 
   // Compute stat counters
@@ -2402,25 +2412,61 @@ export const ResourcesPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Client Selection Dropdown & Sync */}
-        <div className="flex items-center gap-3">
-          <div className="text-xs text-slate-400 font-medium">Selected Client:</div>
-          <select
-            value={selectedClientId}
-            onChange={(e) => {
-              setSelectedClientId(e.target.value);
-              localStorage.setItem('hmc_selected_client_id', e.target.value);
-              setPage(1);
-            }}
-            disabled={isLoadingClients}
-            className="bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-2 font-medium focus:outline-none focus:border-sky-500"
-          >
-            {clients.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.clientCode} - {c.clientName} ({c.environment})
-              </option>
-            ))}
-          </select>
+        {/* Client Selection Dropdown & Branch & Sync */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-slate-400 font-medium">Selected Client:</div>
+            <select
+              value={selectedClientId}
+              onChange={(e) => {
+                const newId = e.target.value;
+                setSelectedClientId(newId);
+                localStorage.setItem('hmc_selected_client_id', newId);
+                const cl = clients.find((c) => c.id === newId);
+                setSelectedBranch(cl?.branchName || (cl?.branches && cl.branches[0]) || '');
+                setCustomBranch('');
+                setPage(1);
+              }}
+              disabled={isLoadingClients}
+              className="bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-2 font-medium focus:outline-none focus:border-sky-500"
+            >
+              {clients.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.clientCode} - {c.clientName} ({c.environment})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Branch Dropdown */}
+          <div className="flex items-center gap-2 bg-slate-900/90 px-3 py-1.5 rounded-lg border border-slate-700 shadow-md">
+            <GitBranch className="w-4 h-4 text-emerald-400 shrink-0" />
+            <label className="text-xs font-medium text-slate-300 whitespace-nowrap">Target Branch:</label>
+            <select
+              value={selectedBranch}
+              onChange={(e) => setSelectedBranch(e.target.value)}
+              className="bg-slate-800 border border-slate-600 rounded px-2.5 py-1 text-xs font-medium text-white focus:outline-none focus:border-emerald-500 max-w-[240px]"
+            >
+              <option value="">Auto (Default Branch)</option>
+              {(selectedClient?.branches || []).map((b) => (
+                <option key={b} value={b}>{b}</option>
+              ))}
+              {selectedClient?.branchName && !(selectedClient?.branches || []).includes(selectedClient.branchName) && (
+                <option value={selectedClient.branchName}>{selectedClient.branchName} (Configured)</option>
+              )}
+              <option value="__custom__">+ Custom Branch...</option>
+            </select>
+            {selectedBranch === '__custom__' && (
+              <input
+                type="text"
+                value={customBranch}
+                onChange={(e) => setCustomBranch(e.target.value)}
+                placeholder="Type branch name..."
+                className="bg-slate-800 border border-emerald-500 rounded px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:outline-none min-w-[180px]"
+                autoFocus
+              />
+            )}
+          </div>
 
           {hasPermission(PERMISSIONS.CLIENT_RESOURCES_SYNC) && (
             <button

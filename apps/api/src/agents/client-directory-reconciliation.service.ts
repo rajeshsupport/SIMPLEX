@@ -182,6 +182,30 @@ export class ClientDirectoryReconciliationService {
       });
     }
 
+    // Pre-filter: strip out any table header rows or filter instruction rows that might have been scraped
+    dto.users = (dto.users || []).filter((u, idx) => {
+      if (!u || !u.username || typeof u.username !== 'string') return false;
+      const cleanUsername = u.username.replace(/[\x00-\x1F\x7F\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim();
+      const lower = cleanUsername.toLowerCase();
+      if (
+        lower === 'name' ||
+        lower === 'user name' ||
+        lower === 'username' ||
+        lower === 'full name' ||
+        lower === 's.no' ||
+        lower === 'sno' ||
+        lower.includes('maximum characters') ||
+        lower.includes('max characters') ||
+        lower.includes('characters maximum') ||
+        lower.includes('no records found') ||
+        lower.includes('no data available')
+      ) {
+        this.logger.warn(`[INGEST SYNC BATCH] Skipped non-user table header/filter row at index ${idx}: '${cleanUsername}'`);
+        return false;
+      }
+      return true;
+    });
+
     for (let userIdx = 0; userIdx < dto.users.length; userIdx++) {
       const u = dto.users[userIdx];
       if (!u.username || typeof u.username !== 'string' || u.username.length > 100) {

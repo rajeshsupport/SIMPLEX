@@ -110,6 +110,20 @@ export class SelectorResolver {
     '#mfa-container:visible',
   ];
 
+  public static readonly BRANCH_CHOOSE_FALLBACKS = [
+    'text="CHOOSE BRANCH"',
+    'text="Choose Branch"',
+    '#chooseBranch',
+    '.choose-branch',
+    'h1:has-text("CHOOSE BRANCH" i)',
+    'h2:has-text("CHOOSE BRANCH" i)',
+    'h3:has-text("CHOOSE BRANCH" i)',
+    'h4:has-text("CHOOSE BRANCH" i)',
+    'div:has-text("CHOOSE BRANCH" i)',
+    '#branchSelect',
+    'select[name*="branch" i]',
+  ];
+
   /**
    * Converts an ElementSelectorConfig to a CSS or Playwright selector string
    */

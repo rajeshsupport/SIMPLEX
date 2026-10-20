@@ -200,6 +200,7 @@ export interface CreateIntegratedResourceInput {
   operatingTo?: string; // default '23:55'
   branchId?: string;
   branchName?: string;
+  targetBranch?: string;
 
   // Section 2: Associated User Details (optional linked user creation)
   createAssociatedUser?: boolean;

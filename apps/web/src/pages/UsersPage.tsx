@@ -29,6 +29,7 @@ import {
   RotateCcw,
   X,
   Check,
+  GitBranch,
 } from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { Modal } from '../components/Modal.js';
@@ -53,6 +54,8 @@ import { useAuth } from '../context/AuthContext.js';
 export const UsersPage: React.FC = () => {
   const [clients, setClients] = useState<ClientWithCredentialInfo[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string>('');
+  const [selectedBranch, setSelectedBranch] = useState<string>('');
+  const [customBranch, setCustomBranch] = useState<string>('');
   const [users, setUsers] = useState<ClientUser[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -487,6 +490,7 @@ export const UsersPage: React.FC = () => {
 
   const selectedClient = clients.find((c) => c.id === selectedClientId);
   const isProduction = selectedClient?.environment?.toUpperCase() === 'PRODUCTION';
+  const effectiveBranch = selectedBranch === '__custom__' ? customBranch.trim() : selectedBranch;
 
   const canCreate = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_CREATE);
   const canEdit = isSuperAdmin || hasPermission(PERMISSIONS.CLIENT_USERS_EDIT);
@@ -522,6 +526,8 @@ export const UsersPage: React.FC = () => {
             data[0];
           setSelectedClientId(defaultClient.id);
           localStorage.setItem('hmc_selected_client_id', defaultClient.id);
+          setSelectedBranch(defaultClient.branchName || (defaultClient.branches && defaultClient.branches[0]) || '');
+          setCustomBranch('');
         }
       } catch (err) {
         console.error('Failed to load clients', err);
@@ -598,8 +604,11 @@ export const UsersPage: React.FC = () => {
     setRoleFilter('ALL');
     setPage(1);
     setActionMessage(null);
+    const targetClient = clients.find((c) => c.id === newClientId);
     setSelectedClientId(newClientId);
     localStorage.setItem('hmc_selected_client_id', newClientId);
+    setSelectedBranch(targetClient?.branchName || (targetClient?.branches && targetClient.branches[0]) || '');
+    setCustomBranch('');
     setSelectedCreateRoles([]);
     setCreateRoleSearch('');
   };
@@ -878,7 +887,7 @@ export const UsersPage: React.FC = () => {
     try {
       const syncJob = await ApiClient.request<{ jobId: string; status: string; message: string }>('/client-users/sync-job', {
         method: 'POST',
-        body: JSON.stringify({ clientId: selectedClientId }),
+        body: JSON.stringify({ clientId: selectedClientId, targetBranch: effectiveBranch || undefined }),
       });
 
       jobId = syncJob.jobId;
@@ -1097,6 +1106,7 @@ export const UsersPage: React.FC = () => {
       const payload: CreateClientUserDto = {
         ...createForm,
         clientId: selectedClientId,
+        targetBranch: effectiveBranch || undefined,
         role: canonicalRolesString,
         roles: selectedCreateRoles,
       };
@@ -1309,7 +1319,7 @@ export const UsersPage: React.FC = () => {
       setStatusMutationStage(`Submitting ${nextStatus} request to Simplex portal…`);
       await ApiClient.request(`/client-users/${selectedUser.id}/status`, {
         method: 'POST',
-        body: JSON.stringify({ status: nextStatus }),
+        body: JSON.stringify({ status: nextStatus, targetBranch: effectiveBranch || undefined }),
       });
 
       setStatusMutationStage('Remote status verified. Synchronizing Central directory…');
@@ -1389,7 +1399,10 @@ export const UsersPage: React.FC = () => {
         oneTimeCredentialEventId?: string;
         message: string;
         username?: string;
-      }>(`/client-users/${selectedUser.id}/reset-password`, { method: 'POST' });
+      }>(`/client-users/${selectedUser.id}/reset-password`, {
+        method: 'POST',
+        body: JSON.stringify({ targetBranch: effectiveBranch || undefined }),
+      });
       setIsResetConfirmModalOpen(false);
       const isRestricted = res.credentialDeliveryStatus === 'RESTRICTED';
       const isUnavailable = res.credentialDeliveryStatus === 'UNAVAILABLE' || res.credentialDeliveryStatus === 'FAILED';
@@ -1442,6 +1455,7 @@ export const UsersPage: React.FC = () => {
         isSnapshotData: boolean;
       }>(`/client-users/${user.id}/roles/refresh`, {
         method: 'POST',
+        body: JSON.stringify({ targetBranch: effectiveBranch || undefined }),
       });
 
       const toNames = (arr: any[]) =>
@@ -1479,6 +1493,7 @@ export const UsersPage: React.FC = () => {
         isSnapshotData: boolean;
       }>(`/client-users/${manageRolesUser.id}/roles/refresh`, {
         method: 'POST',
+        body: JSON.stringify({ targetBranch: effectiveBranch || undefined }),
       });
 
       const toNames = (arr: any[]) =>
@@ -1525,6 +1540,7 @@ export const UsersPage: React.FC = () => {
         method: 'POST',
         body: JSON.stringify({
           clientId: manageRolesUser.clientId || selectedClientId,
+          targetBranch: effectiveBranch || undefined,
           rolesToAdd: diff.rolesToAdd,
           rolesToRemove: diff.rolesRemoved,
           rolesRemoved: diff.rolesRemoved,
@@ -1824,6 +1840,7 @@ export const UsersPage: React.FC = () => {
         method: 'POST',
         body: JSON.stringify({
           clientId: selectedClientId,
+          targetBranch: effectiveBranch || undefined,
           rows: allRows,
         }),
       });
@@ -1981,20 +1998,56 @@ export const UsersPage: React.FC = () => {
           </p>
         </div>
 
-        {/* Client Selector Dropdown */}
-        <div className="flex items-center gap-3">
-          <label className="text-xs font-medium text-slate-400 whitespace-nowrap">Target Client:</label>
-          <select
-            value={selectedClientId}
-            onChange={(e) => handleClientChange(e.target.value)}
-            className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-semibold text-sky-300 focus:outline-none focus:border-sky-500 shadow-md min-w-[280px]"
-          >
-            {clients.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.clientCode} — {c.clientName} — {c.environment}
-              </option>
-            ))}
-          </select>
+        {/* Client & Branch Selector Dropdown */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-medium text-slate-400 whitespace-nowrap">Target Client:</label>
+            <select
+              value={selectedClientId}
+              onChange={(e) => handleClientChange(e.target.value)}
+              className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-semibold text-sky-300 focus:outline-none focus:border-sky-500 shadow-md min-w-[240px]"
+            >
+              {clients.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.clientCode} — {c.clientName} — {c.environment}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Branch Dropdown */}
+          <div className="flex items-center gap-2 bg-slate-900/90 px-3 py-1.5 rounded-lg border border-slate-700 shadow-md">
+            <GitBranch className="w-4 h-4 text-emerald-400 shrink-0" />
+            <label className="text-xs font-medium text-slate-300 whitespace-nowrap">Target Branch:</label>
+            <select
+              value={selectedBranch}
+              onChange={(e) => setSelectedBranch(e.target.value)}
+              className="bg-slate-800 border border-slate-600 rounded px-2.5 py-1 text-xs font-medium text-white focus:outline-none focus:border-emerald-500 max-w-[260px]"
+            >
+              <option value="">Auto (Default Branch)</option>
+              {(selectedClient?.branches || []).map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+              {selectedClient?.branchName && !(selectedClient?.branches || []).includes(selectedClient.branchName) && (
+                <option value={selectedClient.branchName}>
+                  {selectedClient.branchName} (Configured)
+                </option>
+              )}
+              <option value="__custom__">+ Custom Branch...</option>
+            </select>
+            {selectedBranch === '__custom__' && (
+              <input
+                type="text"
+                value={customBranch}
+                onChange={(e) => setCustomBranch(e.target.value)}
+                placeholder="Type branch name..."
+                className="bg-slate-800 border border-emerald-500 rounded px-2.5 py-1 text-xs text-white placeholder-slate-500 focus:outline-none min-w-[180px]"
+                autoFocus
+              />
+            )}
+          </div>
         </div>
       </div>
 
@@ -2037,6 +2090,13 @@ export const UsersPage: React.FC = () => {
             <div>
               <span className="text-slate-500 block text-[10px] uppercase font-semibold">Environment</span>
               <EnvironmentBadge environment={selectedClient.environment} />
+            </div>
+            <div>
+              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Active Branch</span>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                <GitBranch className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="truncate max-w-[180px]">{effectiveBranch || 'Auto / Default'}</span>
+              </span>
             </div>
             <div>
               <span className="text-slate-500 block text-[10px] uppercase font-semibold">Client Endpoint</span>
@@ -2600,8 +2660,13 @@ export const UsersPage: React.FC = () => {
         <form onSubmit={handleCreateUser} className="space-y-4 text-xs">
           {/* Options Synchronization Toolbar */}
           <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-slate-400">Target Client: <strong className="text-white">{selectedClient?.clientCode}</strong> ({selectedClient?.applicationVersion || 'v9.4'})</span>
+              <span className="text-slate-600">•</span>
+              <span className="text-slate-400 flex items-center gap-1">
+                <GitBranch className="w-3.5 h-3.5 text-emerald-400" />
+                Branch: <strong className="text-emerald-300">{effectiveBranch || 'Auto / Default'}</strong>
+              </span>
             </div>
             <div className="flex items-center gap-3">
               {optionsSyncTime && !isLoadingOptions && !optionsError && (

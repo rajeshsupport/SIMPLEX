@@ -34,6 +34,7 @@ export class AutomationRun {
   @Column({ type: 'nvarchar', length: 50, default: 'INTERACTIVE_LOGIN' })
   runType!:
     | 'OPEN_INTERACTIVE_CLIENT_SESSION'
+    | 'OPEN_MULTIPLE_TABS_SESSION'
     | 'SYNC_CLIENT_USERS_HEADLESS'
     | 'SYNC_CLIENT_USERS'
     | 'INTERACTIVE_LOGIN'

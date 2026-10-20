@@ -10,6 +10,7 @@ import {
   redactSensitiveData,
 } from '@hmc/shared';
 import { UserManagementExecutor } from './user-management-executor.js';
+import { WorkflowExecutor } from './workflow-executor.js';
 
 export interface ScrapedClientResource {
   remoteResourceId?: string;
@@ -90,6 +91,7 @@ export interface ResourceWorkflowExecutionOptions {
     loginUrl?: string;
   };
   credentials?: { username: string; password?: string };
+  targetBranch?: string;
   startStage?: ResourceImportStage;
   existingState?: {
     remoteResourceId?: string | null;
@@ -150,24 +152,74 @@ export class ResourceManagementExecutor {
     loginUrl?: string,
     credentials?: { username: string; password?: string },
     destinationUrl?: string,
-    onProgress?: (msg: string) => void
+    onProgress?: (msg: string) => void,
+    targetBranch?: string
   ): Promise<void> {
     const authRes = await UserManagementExecutor.ensureAuthenticated(page, {
       loginUrl: loginUrl || (destinationUrl ? destinationUrl.replace(/\/[^/]+$/, '/login') : undefined),
       credentials,
+      targetBranch,
+      targetUrl: destinationUrl,
     });
     if (!authRes.authenticated) {
-      throw new Error(authRes.errorMessage || 'CLIENT_AUTO_LOGIN_FAILED: Stored client administrator credentials required for authentication');
+      const err: any = new Error(authRes.errorMessage || 'CLIENT_AUTO_LOGIN_FAILED: Stored client administrator credentials required for authentication');
+      err.errorCode = authRes.errorCode;
+      throw err;
     }
+    if (
+      page.url().toLowerCase().includes('/userbasebranch') ||
+      page.url().toLowerCase().includes('/changeuserbranch') ||
+      page.url().toLowerCase().includes('/logincheck') ||
+      (await WorkflowExecutor.checkBranchSelectionScreen(page))
+    ) {
+      onProgress?.(`[BRANCH REQUIRED] Session landed on branch selection screen. Selecting branch: ${targetBranch || 'default'}…`);
+      const bRes = await WorkflowExecutor.handleBranchSelection(page, targetBranch, undefined, destinationUrl);
+      if (!bRes.selected && bRes.errorCode) {
+        const err: any = new Error(bRes.errorMessage || 'Failed to select branch');
+        err.errorCode = bRes.errorCode;
+        throw err;
+      }
+    }
+
     if (destinationUrl) {
       try {
         const destUrlObj = new URL(destinationUrl);
         const currentUrlObj = new URL(page.url());
         if (currentUrlObj.pathname.toLowerCase() !== destUrlObj.pathname.toLowerCase()) {
+          if (
+            page.url().toLowerCase().includes('/userbasebranch') ||
+            page.url().toLowerCase().includes('/changeuserbranch') ||
+            page.url().toLowerCase().includes('/logincheck') ||
+            (await WorkflowExecutor.checkBranchSelectionScreen(page))
+          ) {
+            const bRes = await WorkflowExecutor.handleBranchSelection(page, targetBranch, undefined, destinationUrl);
+            if (!bRes.selected && bRes.errorCode) {
+              const err: any = new Error(bRes.errorMessage || 'Failed to select branch');
+              err.errorCode = bRes.errorCode;
+              throw err;
+            }
+          }
           onProgress?.(`[NAVIGATION RECOVERY] Authenticated session landed on '${page.url()}'. Explicitly navigating to destination URL: ${destinationUrl}`);
           await page.goto(destinationUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          if (
+            page.url().toLowerCase().includes('/userbasebranch') ||
+            page.url().toLowerCase().includes('/changeuserbranch') ||
+            page.url().toLowerCase().includes('/logincheck') ||
+            (await WorkflowExecutor.checkBranchSelectionScreen(page))
+          ) {
+            onProgress?.(`[BRANCH REQUIRED] Navigation bounced to branch selection screen. Selecting branch: ${targetBranch || 'default'}…`);
+            const bRes2 = await WorkflowExecutor.handleBranchSelection(page, targetBranch, undefined, destinationUrl);
+            if (!bRes2.selected && bRes2.errorCode) {
+              const err: any = new Error(bRes2.errorMessage || 'Failed to select branch');
+              err.errorCode = bRes2.errorCode;
+              throw err;
+            }
+            await page.goto(destinationUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          }
         }
-      } catch {}
+      } catch (navErr: any) {
+        if (navErr.errorCode) throw navErr;
+      }
     }
   }
 
@@ -180,14 +232,24 @@ export class ResourceManagementExecutor {
       resourcesUrl: string;
       loginUrl?: string;
       credentials?: { username: string; password?: string };
+      targetBranch?: string;
       onProgress?: (update: { stage: string; message: string; count: number }) => void;
     }
   ): Promise<SyncResourcesResult> {
-    const { resourcesUrl, loginUrl, credentials, onProgress } = options;
+    const { resourcesUrl, loginUrl, credentials, targetBranch, onProgress } = options;
 
-    onProgress?.({ stage: 'NAVIGATION', message: `Navigating to ${resourcesUrl}`, count: 0 });
-    await page.goto(resourcesUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await this.ensureAuthenticated(page, loginUrl, credentials);
+    if (page.url() !== 'about:blank' && !page.url().includes('/login')) {
+      onProgress?.({ stage: 'NAVIGATION', message: `Navigating to ${resourcesUrl}`, count: 0 });
+      await page.goto(resourcesUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    }
+    await this.ensureAuthenticated(
+      page,
+      loginUrl,
+      credentials,
+      resourcesUrl,
+      (msg) => onProgress?.({ stage: 'AUTHENTICATION', message: msg, count: 0 }),
+      targetBranch
+    );
 
     // After login, ensure we are strictly on resourcesUrl
     if (!page.url().includes('/ResourceParent') && !page.url().includes('/resource')) {
@@ -214,7 +276,18 @@ export class ResourceManagementExecutor {
         const userIdx = headerTexts.findIndex((h) => h.includes('USER'));
         const statusIdx = headerTexts.findIndex((h) => h === 'STATUS');
 
-        const rows = Array.from(table ? table.querySelectorAll('tbody tr') : document.querySelectorAll('table tbody tr'));
+        const rawRows = Array.from(table ? table.querySelectorAll('tbody tr') : document.querySelectorAll('table tbody tr'));
+        const rows = rawRows.filter((r) => {
+          if (r.closest('thead') || r.closest('tfoot')) return false;
+          const tds = r.querySelectorAll('td');
+          if (tds.length === 0) return false;
+          const cls = (r.className || '').toLowerCase();
+          const id = (r.id || '').toLowerCase();
+          if (cls.includes('filter') || cls.includes('search') || cls.includes('header') || id.includes('filter') || id.includes('search')) return false;
+          const txt = (r.textContent || '').trim().toLowerCase();
+          if (!txt || txt.includes('maximum characters') || txt.includes('no records found') || txt.includes('no data available')) return false;
+          return true;
+        });
         const resList: any[] = [];
         const depts = new Set<string>();
         const types = new Set<string>();
@@ -328,7 +401,15 @@ export class ResourceManagementExecutor {
             status = sText.includes('INACT') || sText.includes('DEACT') ? 'INACTIVE' : 'ACTIVE';
           }
 
-          if (name) {
+          const nameLower = name.trim().toLowerCase();
+          if (
+            nameLower &&
+            nameLower !== 'name' &&
+            nameLower !== 'resource name' &&
+            nameLower !== 's.no' &&
+            !nameLower.includes('maximum characters') &&
+            !nameLower.includes('max characters')
+          ) {
             if (dept) depts.add(dept);
             if (type) types.add(type);
             resList.push({
@@ -684,12 +765,13 @@ export class ResourceManagementExecutor {
       };
       loginUrl?: string;
       credentials?: { username: string; password?: string };
+      targetBranch?: string;
       reconcileOnly?: boolean;
       allowReuseIfExisting?: boolean;
       onProgress?: (msg: string) => void;
     }
   ): Promise<ResourceMutationResult> {
-    const { addResourceUrl, resource, loginUrl, credentials, reconcileOnly, allowReuseIfExisting, onProgress } = options;
+    const { addResourceUrl, resource, loginUrl, credentials, reconcileOnly, allowReuseIfExisting, onProgress, targetBranch } = options as any;
 
     // Fail-closed gate: reject empty or missing resource name immediately with 0 submit clicks
     if (!resource || !resource.resourceName || !resource.resourceName.trim()) {
@@ -715,12 +797,28 @@ export class ResourceManagementExecutor {
       effectiveAddResourceUrl = u.toString().replace(/\/+$/, '');
     } catch {}
 
+    // 0. Ensure authentication and mandatory branch context are established and verified first
+    try {
+      await this.ensureAuthenticated(page, loginUrl, credentials, effectiveAddResourceUrl, onProgress, targetBranch);
+    } catch (authErr: any) {
+      if (['BRANCH_NOT_FOUND', 'BRANCH_AMBIGUOUS', 'BRANCH_CONFIRMATION_FAILED'].includes(authErr.errorCode)) {
+        onProgress?.(`[BRANCH ERROR] ${authErr.message || authErr.errorMessage}`);
+        return {
+          success: false,
+          resourceCode: resource.resourceName,
+          errorCode: authErr.errorCode,
+          errorMessage: authErr.message || authErr.errorMessage,
+        };
+      }
+      throw authErr;
+    }
+
     // Pre-Submit Read-Only Reconciliation: Check if resource already exists on /ResourceParent
     let listUrl = effectiveAddResourceUrl.replace(/\/addResourceParentDetails.*$/i, '/ResourceParent');
     try {
       onProgress?.(`[STEP 1 RECONCILE] Checking /ResourceParent read-only for existing resource '${resource.resourceName}'...`);
       await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await this.ensureAuthenticated(page, loginUrl, credentials, listUrl, onProgress);
+      await this.ensureAuthenticated(page, loginUrl, credentials, listUrl, onProgress, targetBranch);
 
       const existingMatch = await ResourceManagementExecutor.findExactResourceOnList(page, {
         targetResourceName: resource.resourceName,
@@ -752,17 +850,75 @@ export class ResourceManagementExecutor {
           };
         }
       }
-    } catch {}
+    } catch (recErr: any) {
+      if (['BRANCH_NOT_FOUND', 'BRANCH_AMBIGUOUS', 'BRANCH_CONFIRMATION_FAILED'].includes(recErr.errorCode)) {
+        return {
+          success: false,
+          resourceCode: resource.resourceName,
+          errorCode: recErr.errorCode,
+          errorMessage: recErr.message || recErr.errorMessage,
+        };
+      }
+    }
 
     onProgress?.(`[STEP 1 NAVIGATION] Attempting navigation to: ${effectiveAddResourceUrl}`);
     await page.goto(effectiveAddResourceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await this.ensureAuthenticated(page, loginUrl, credentials, effectiveAddResourceUrl, onProgress);
+    try {
+      await this.ensureAuthenticated(page, loginUrl, credentials, effectiveAddResourceUrl, onProgress, targetBranch);
+    } catch (authErr2: any) {
+      if (['BRANCH_NOT_FOUND', 'BRANCH_AMBIGUOUS', 'BRANCH_CONFIRMATION_FAILED'].includes(authErr2.errorCode)) {
+        return {
+          success: false,
+          resourceCode: resource.resourceName,
+          errorCode: authErr2.errorCode,
+          errorMessage: authErr2.message || authErr2.errorMessage,
+        };
+      }
+      throw authErr2;
+    }
 
-    // Explicit post-login navigation verification: If session landed on /dashboard, /login, or any non-resource route, explicitly navigate to effectiveAddResourceUrl
+    // Explicit post-login navigation verification: If session landed on /userBaseBranch, /changeUserBranch or /loginCheck, select branch!
+    if (
+      page.url().toLowerCase().includes('/userbasebranch') ||
+      page.url().toLowerCase().includes('/changeuserbranch') ||
+      page.url().toLowerCase().includes('/logincheck') ||
+      (await WorkflowExecutor.checkBranchSelectionScreen(page))
+    ) {
+      onProgress?.(`[BRANCH REQUIRED] Quick Resource navigation intercepted by branch selection. Selecting branch: ${targetBranch || 'default'}…`);
+      const bRes = await WorkflowExecutor.handleBranchSelection(page, targetBranch, undefined, effectiveAddResourceUrl);
+      if (!bRes.selected && bRes.errorCode) {
+        return {
+          success: false,
+          resourceCode: resource.resourceName,
+          errorCode: bRes.errorCode,
+          errorMessage: bRes.errorMessage,
+        };
+      }
+      await page.goto(effectiveAddResourceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+
     const currentUrlLower = page.url().toLowerCase();
     if (!currentUrlLower.includes('/addresourceparentdetails')) {
       onProgress?.(`[STEP 1 NAVIGATION] Authenticated session landed on '${page.url()}'. Explicitly navigating to Step 1 URL: ${effectiveAddResourceUrl}`);
       await page.goto(effectiveAddResourceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      if (
+        page.url().toLowerCase().includes('/userbasebranch') ||
+        page.url().toLowerCase().includes('/changeuserbranch') ||
+        page.url().toLowerCase().includes('/logincheck') ||
+        (await WorkflowExecutor.checkBranchSelectionScreen(page))
+      ) {
+        onProgress?.(`[BRANCH REQUIRED] Quick Resource navigation intercepted by branch selection. Selecting branch: ${targetBranch || 'default'}…`);
+        const bRes2 = await WorkflowExecutor.handleBranchSelection(page, targetBranch, undefined, effectiveAddResourceUrl);
+        if (!bRes2.selected && bRes2.errorCode) {
+          return {
+            success: false,
+            resourceCode: resource.resourceName,
+            errorCode: bRes2.errorCode,
+            errorMessage: bRes2.errorMessage,
+          };
+        }
+        await page.goto(effectiveAddResourceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
     }
 
     // Wait for the resource form to be available in DOM
@@ -1906,14 +2062,15 @@ export class ResourceManagementExecutor {
       status: ClientResourceStatus;
       loginUrl?: string;
       credentials?: { username: string; password?: string };
+      targetBranch?: string;
       onProgress?: (msg: string) => void;
     }
   ): Promise<ResourceMutationResult> {
-    const { resourcesUrl, resourceCode, status, loginUrl, credentials, onProgress } = options;
+    const { resourcesUrl, resourceCode, status, loginUrl, credentials, onProgress, targetBranch } = options as any;
 
     onProgress?.(`Navigating to ${resourcesUrl} to set status of [${resourceCode}] to ${status}`);
     await page.goto(resourcesUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await this.ensureAuthenticated(page, loginUrl, credentials);
+    await this.ensureAuthenticated(page, loginUrl, credentials, undefined, onProgress, targetBranch);
 
     onProgress?.(`Resource [${resourceCode}] status updated to ${status}.`);
     return {
@@ -1938,9 +2095,10 @@ export class ResourceManagementExecutor {
       loginUrl?: string;
       credentials?: { username: string; password?: string };
       onProgress?: (msg: string) => void;
+      targetBranch?: string;
     }
   ): Promise<ResourceMutationResult> {
-    const { mappingUrl, resourceCode, resourceName, username, isShownInRegistration = true, loginUrl, credentials, onProgress } = options;
+    const { mappingUrl, resourceCode, resourceName, username, isShownInRegistration = true, loginUrl, credentials, onProgress, targetBranch } = options as any;
 
     let effectiveMappingUrl = mappingUrl;
     try {
@@ -1963,7 +2121,7 @@ export class ResourceManagementExecutor {
     if (!isAlreadyOnMappingPage) {
       onProgress?.(`[STEP 4 NAVIGATION] Navigating to Resource-User Mapping: ${effectiveMappingUrl}`);
       await page.goto(effectiveMappingUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await this.ensureAuthenticated(page, loginUrl, credentials, effectiveMappingUrl, onProgress);
+      await this.ensureAuthenticated(page, loginUrl, credentials, effectiveMappingUrl, onProgress, targetBranch);
 
       if (!page.url().toLowerCase().includes('/addparentresourceuser') && !page.url().toLowerCase().includes('/resourceusermapping')) {
         onProgress?.(`[STEP 4 NAVIGATION] Authenticated session landed on '${page.url()}'. Explicitly navigating to Step 4 URL: ${effectiveMappingUrl}`);
@@ -3436,10 +3594,11 @@ export class ResourceManagementExecutor {
       licenseNo?: string;
       loginUrl?: string;
       credentials?: { username: string; password?: string };
+      targetBranch?: string;
       onProgress?: (msg: string) => void;
     }
   ): Promise<{ success: boolean; errorCode?: string; errorMessage?: string }> {
-    const { eclaimUrl, username, resourceCode, providerId = 'PRV-10023', facilityId = 'FAC-001', licenseNo = 'LIC-77889', loginUrl, credentials, onProgress } = options;
+    const { eclaimUrl, username, resourceCode, providerId = 'PRV-10023', facilityId = 'FAC-001', licenseNo = 'LIC-77889', loginUrl, credentials, targetBranch, onProgress } = options;
 
     let effectiveEclaimUrl = eclaimUrl;
     try {
@@ -3456,7 +3615,7 @@ export class ResourceManagementExecutor {
 
     onProgress?.(`[STEP 4 NAVIGATION] Attempting navigation to: ${effectiveEclaimUrl}`);
     await page.goto(effectiveEclaimUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await this.ensureAuthenticated(page, loginUrl, credentials, effectiveEclaimUrl, onProgress);
+    await this.ensureAuthenticated(page, loginUrl, credentials, effectiveEclaimUrl, onProgress, targetBranch);
 
     if (!page.url().toLowerCase().includes('/addusereclaim') && !page.url().toLowerCase().includes('/addeclaimuser')) {
       onProgress?.(`[STEP 4 NAVIGATION] Authenticated session landed on '${page.url()}'. Explicitly navigating to Step 4 URL: ${effectiveEclaimUrl}`);
@@ -4164,7 +4323,8 @@ export class ResourceManagementExecutor {
     page: Page,
     options: ResourceWorkflowExecutionOptions
   ): Promise<ResourceWorkflowResult> {
-    const { row, routes, credentials, startStage = ResourceImportStage.NOT_STARTED, existingState, emrForms, transferConfig, eclaimConfig, onEphemeralPassword, onProgress } = options;
+    const { row, routes, credentials, targetBranch: optionsTargetBranch, startStage = ResourceImportStage.NOT_STARTED, existingState, emrForms, transferConfig, eclaimConfig, onEphemeralPassword, onProgress } = options;
+    const targetBranch = optionsTargetBranch || (row as any).targetBranch || (row as any).branchName || undefined;
 
     const isHuman =
       typeof row.isResourceHuman === 'boolean'
@@ -4181,7 +4341,7 @@ export class ResourceManagementExecutor {
       ? String((row as any).emrForms).split(',').map((s: string) => s.trim()).filter(Boolean)
       : [];
 
-    const hasEclaimConfig = !!(
+    let hasEclaimConfig = !!(
       (eclaimConfig && eclaimConfig.enabled !== false && (eclaimConfig.providerId || eclaimConfig.facilityId || (eclaimConfig as any).licenseNumber || (eclaimConfig as any).eclaimLink)) ||
       (row as any).eclaimProviderId ||
       (row as any).eclaimFacilityId
@@ -4261,14 +4421,17 @@ export class ResourceManagementExecutor {
     // ------------------------------------------------------------------------
     // PRE-FLIGHT CHECK: Fast-path known routes or inspect before mutation
     // ------------------------------------------------------------------------
-    const isStandardEclaim = routes.eclaimUserRoute && routes.eclaimUserRoute.toLowerCase().includes('addeclaim');
+    const isStandardEclaim = routes.eclaimUserRoute && /eclaim/i.test(routes.eclaimUserRoute);
     if (hasEclaimConfig && !isStandardEclaim) {
       onProgress?.('PREFLIGHT_ECLAIM_PROBE', 'Probing custom eClaim route availability before resource creation...');
       const basePrefix = routes.loginUrl ? routes.loginUrl.replace(/\/[^/]+$/, '') : (routes.quickResourceRoute ? routes.quickResourceRoute.replace(/\/[^/]+$/, '') : '');
       const candidateRoutes = Array.from(new Set([
         routes.eclaimUserRoute,
+        basePrefix ? `${basePrefix}/userEclaim` : undefined,
         basePrefix ? `${basePrefix}/addUserEclaim` : undefined,
         basePrefix ? `${basePrefix}/addEclaimUser` : undefined,
+        basePrefix ? `${basePrefix}/eclaimUser` : undefined,
+        basePrefix ? `${basePrefix}/hmc/userEclaim` : undefined,
         basePrefix ? `${basePrefix}/hmc/addUserEclaim` : undefined,
         basePrefix ? `${basePrefix}/hmc/addEclaimUser` : undefined,
       ].filter(Boolean))) as string[];
@@ -4280,19 +4443,13 @@ export class ResourceManagementExecutor {
       });
 
       if (!probe.verified) {
+        onProgress?.('PREFLIGHT_ECLAIM_PROBE', `Notice: eClaim route could not be verified on remote portal (${probe.reason || 'Route unavailable'}). Skipping eClaim configuration and proceeding with resource creation.`);
         updateStep('ECLAIM_CONFIGURATION', {
-          status: 'VERIFICATION_REQUIRED',
-          errorCode: 'ECLAIM_ROUTE_UNVERIFIED',
-          errorMessage: probe.reason || 'eClaim route could not be verified on remote client portal',
+          status: 'SKIPPED',
+          errorCode: 'ECLAIM_ROUTE_UNAVAILABLE',
+          errorMessage: probe.reason || 'eClaim route could not be verified on remote client portal; skipping eClaim step.',
         });
-        return {
-          success: false,
-          stage: ResourceImportStage.FAILED_BEFORE_RESOURCE_CREATION,
-          retryStartingPoint: ResourceImportStage.FAILED_BEFORE_RESOURCE_CREATION,
-          errorCode: 'ECLAIM_ROUTE_VERIFICATION_REQUIRED',
-          errorMessage: probe.reason || 'eClaim route is unverified or unavailable on remote client portal. Workflow halted before resource creation to prevent inconsistent state.',
-          stepOutcomes,
-        };
+        hasEclaimConfig = false;
       } else if (probe.activeRoute) {
         routes.eclaimUserRoute = probe.activeRoute;
         updateStep('ECLAIM_CONFIGURATION', { route: probe.activeRoute });
@@ -4354,6 +4511,7 @@ export class ResourceManagementExecutor {
         },
         loginUrl: routes.loginUrl,
         credentials,
+        targetBranch,
         onProgress: (m) => onProgress?.('STAGE_RESOURCE_CREATION', m),
       });
 
@@ -4428,7 +4586,8 @@ export class ResourceManagementExecutor {
           },
           loginUrl: routes.loginUrl,
           credentials,
-        });
+          targetBranch,
+        } as any);
 
         if (!userCreate.success) {
           updateStep('USER_PROVISIONING', {
@@ -4538,6 +4697,7 @@ export class ResourceManagementExecutor {
             requestedRoles: row.roles.split(',').map((r) => r.trim()).filter(Boolean),
             loginUrl: routes.loginUrl,
             credentials,
+            targetBranch,
           }).catch((err: any) => ({ success: false, errorMessage: err?.message || String(err) }));
 
           if (roleRes.success) {
@@ -4598,6 +4758,7 @@ export class ResourceManagementExecutor {
           isShownInRegistration: true,
           loginUrl: routes.loginUrl,
           credentials,
+          targetBranch,
           onProgress: (m) => onProgress?.('STAGE_RESOURCE_USER_MAPPING', m),
         });
 
@@ -4657,6 +4818,7 @@ export class ResourceManagementExecutor {
           licenseNo: eclaimConfig?.licenseNumber || (row as any).eclaimLicenseNumber || (row as any).licenseNo,
           loginUrl: routes.loginUrl,
           credentials,
+          targetBranch,
           onProgress: (m) => onProgress?.('STAGE_ECLAIM_CONFIG', m),
         });
 
@@ -4694,7 +4856,7 @@ export class ResourceManagementExecutor {
         const transferRes = await this.transferGroupForms(page, {
           emrPanelUrl: routes.emrPanelRoute,
           targetBranchId: transferConfig?.targetBranchId || (row as any).transferTargetBranch,
-          targetBranchName: transferConfig?.targetBranchName || (row as any).transferTargetBranchName,
+          targetBranchName: transferConfig?.targetBranchName || (row as any).transferTargetBranchName || targetBranch,
           username: currentUserId,
           formIds: targetForms,
           defaultFormIndicator: transferConfig?.defaultFormIndicator ?? (row as any).transferDefaultFormIndicator ?? 'S',

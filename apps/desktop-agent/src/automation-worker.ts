@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import { BrowserContext, Page } from 'playwright';
-import { BrowserProfileManager, BrowserLifecycleManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate, SelectorResolver } from '@hmc/automation';
-import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, resolveClientEmrPanelUrl, resolveClientEclaimUserUrl, normalizeClientBaseUrl, resolveTaskModePolicy, isMutationTaskType } from '@hmc/shared';
+import { BrowserProfileManager, BrowserLifecycleManager, ChromeGuestLauncher, ClientMutationLockManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate, SelectorResolver, MultiTabExecutor } from '@hmc/automation';
+import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, resolveClientEmrPanelUrl, resolveClientEclaimUserUrl, normalizeClientBaseUrl, resolveTaskModePolicy, isMutationTaskType, MultiTabTargetItem } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
 
@@ -39,6 +39,7 @@ export class AutomationWorker {
   // Single-flight task locks per client profile key
   private singleFlightTasks: Map<string, Promise<void>> = new Map();
   private browserLifecycleManager = BrowserLifecycleManager.getInstance();
+  private clientMutationLockManager = ClientMutationLockManager.getInstance();
 
   constructor(private agentClient: AgentClient) {}
 
@@ -103,22 +104,82 @@ export class AutomationWorker {
         : 'interactive';
 
     const profileKey = `${task.clientId}_${effectiveUserId}_${namespace}`;
+    const isMutation = namespace === 'mutation' || isMutationTaskType(task.taskType);
+    const taskKey = `${task.taskType}_${task.payload?.username || task.payload?.resourceCode || task.payload?.email || task.payload?.payload?.username || task.runId}`;
 
-    // Single-flight lock: Prevent duplicate concurrent launches for the same client profile namespace
-    const inFlight = this.singleFlightTasks.get(profileKey);
-    if (inFlight) {
-      onProgress?.(`A task is already in-flight for client [${task.clientId}] (${namespace}). Awaiting execution...`);
-      return inFlight;
+    if (isMutation) {
+      if (this.clientMutationLockManager.hasDuplicateActiveTask(task.clientId, taskKey)) {
+        const duplicateMsg = `DUPLICATE_TASK_SUBMISSION_REJECTED: Duplicate mutation task [${task.taskType}] for client [${task.clientId}] is already active or unresolved.`;
+        onProgress?.(`✗ ${duplicateMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: duplicateMsg,
+          totalDurationMs: 0,
+          resultData: {
+            success: false,
+            errorCode: 'DUPLICATE_TASK_SUBMISSION_REJECTED',
+            errorMessage: duplicateMsg,
+          },
+        });
+        return;
+      }
+
+      onProgress?.(`[MUTATION LOCK] Queuing mutation task [${task.taskType}] for client [${task.clientId}]...`);
+      await this.clientMutationLockManager.executeWithLock(
+        {
+          clientId: task.clientId,
+          runId: task.runId,
+          taskType: task.taskType,
+          taskKey,
+        },
+        async () => {
+          onProgress?.(`[MUTATION LOCK] Lock acquired for client [${task.clientId}]. Executing mutation...`);
+          try {
+            await this.performTaskExecution(resolvedTask, profileKey, effectiveUserId, namespace, onProgress);
+          } catch (err: any) {
+            await this.handleTaskExecutionError(task, err, onProgress);
+          }
+        }
+      );
+    } else {
+      // Single-flight lock for read-only or interactive tasks per client profile key
+      const inFlight = this.singleFlightTasks.get(profileKey);
+      if (inFlight) {
+        onProgress?.(`A task is already in-flight for client [${task.clientId}] (${namespace}). Awaiting execution...`);
+        return inFlight;
+      }
+
+      const taskExecutionPromise = this.performTaskExecution(resolvedTask, profileKey, effectiveUserId, namespace, onProgress);
+      this.singleFlightTasks.set(profileKey, taskExecutionPromise);
+
+      try {
+        await taskExecutionPromise;
+      } catch (err: any) {
+        await this.handleTaskExecutionError(task, err, onProgress);
+      } finally {
+        this.singleFlightTasks.delete(profileKey);
+      }
     }
+  }
 
-    const taskExecutionPromise = this.performTaskExecution(resolvedTask, profileKey, effectiveUserId, namespace, onProgress);
-    this.singleFlightTasks.set(profileKey, taskExecutionPromise);
-
-    try {
-      await taskExecutionPromise;
-    } finally {
-      this.singleFlightTasks.delete(profileKey);
+  private async handleTaskExecutionError(task: AgentTaskAssignment, err: any, onProgress?: (msg: string) => void): Promise<void> {
+    const rawMsg = err.message || String(err);
+    if (rawMsg.includes('GOOGLE_CHROME_GUEST_UNAVAILABLE') || err.code === 'GOOGLE_CHROME_GUEST_UNAVAILABLE') {
+      const safeMsg = 'GOOGLE_CHROME_GUEST_UNAVAILABLE: Google Chrome is not installed or Guest Mode could not be launched.';
+      onProgress?.(`✗ [FATAL] ${safeMsg}`);
+      await this.agentClient.sendTelemetry(task.runId, {
+        status: 'FAILED',
+        errorMessage: safeMsg,
+        totalDurationMs: 0,
+        resultData: {
+          success: false,
+          errorCode: 'GOOGLE_CHROME_GUEST_UNAVAILABLE',
+          errorMessage: safeMsg,
+        },
+      });
+      return;
     }
+    throw err;
   }
 
   private async performTaskExecution(
@@ -194,6 +255,7 @@ export class AutomationWorker {
           credentials: task.credentials?.password
             ? { username: task.credentials.username, password: task.credentials.password }
             : undefined,
+          targetBranch: task.targetBranch || (task.payload as any)?.targetBranch,
           onProgress: (update: SyncProgressUpdate) => {
             onProgress?.(`[SYNC PROGRESS] ${update.message}`);
             this.agentClient
@@ -216,8 +278,28 @@ export class AutomationWorker {
         if (syncRes.success) {
           onProgress?.(`✓ [BACKGROUND SYNC COMPLETED] Scraped ${syncRes.totalScraped} users in ${totalDurationMs}ms.`);
 
-          // Byte-aware chunking: maximum 100 records per batch and strictly <= 400 KB (409,600 bytes) UTF-8 payload target
-          const scrapedUsers = syncRes.users || [];
+          // Clean & filter scraped users: exclude table headers, instructions, or invalid username tokens
+          const scrapedUsers = (syncRes.users || []).filter((u) => {
+            if (!u || !u.username || typeof u.username !== 'string') return false;
+            const uname = u.username.replace(/[\x00-\x1F\x7F\r\n\t]/g, '').trim();
+            if (!uname || !/^[a-zA-Z0-9._@:-]{1,100}$/.test(uname)) return false;
+            const lower = uname.toLowerCase();
+            if (
+              lower === 'name' ||
+              lower === 'username' ||
+              lower === 'user name' ||
+              lower === 'full name' ||
+              lower === 's.no' ||
+              lower === 'sno' ||
+              lower.includes('maximum characters') ||
+              lower.includes('max characters') ||
+              lower.includes('characters maximum') ||
+              lower.includes('no records found')
+            ) {
+              return false;
+            }
+            return true;
+          });
           const batchId = crypto.randomUUID();
           const maxRecordsPerBatch = 100;
           const maxPayloadBytes = 400 * 1024; // 400 KB safe target (well within 500 KB parser limit)
@@ -511,6 +593,7 @@ export class AutomationWorker {
         const syncRes = await ResourceManagementExecutor.syncResourcesHeadless(syncPage, {
           resourcesUrl,
           loginUrl,
+          targetBranch: task.targetBranch || (task.payload as any)?.targetBranch,
           credentials: task.credentials?.password
             ? { username: task.credentials.username, password: task.credentials.password }
             : undefined,
@@ -657,6 +740,10 @@ export class AutomationWorker {
     // =========================================================================
     // 3. INTERACTIVE & DIRECT CLIENT APPLICATION WORKFLOWS (namespace: 'interactive')
     // =========================================================================
+    if (task.taskType === 'OPEN_MULTIPLE_TABS_SESSION') {
+      await this.executeMultipleTabsWorkflow(task, effectiveUserId, startTime, onProgress);
+      return;
+    }
     await this.executeInteractiveWorkflow(task, effectiveUserId, startTime, onProgress);
   }
 
@@ -694,16 +781,41 @@ export class AutomationWorker {
       try {
         onProgress?.(`Launching isolated visible Chrome mutation context (attempt ${attempt}/${maxAttempts})...`);
         
-        lease = await this.browserLifecycleManager.acquireLease({
-          taskId: task.taskType,
-          runId: task.runId,
-          clientId: task.clientId,
-          userId: effectiveUserId,
-          ownerType: 'AUTOMATION_OWNED',
-          namespace: 'mutation', // Isolated worker-owned mutation profile
-          isHeaded: true,
-          slowMo: 50,
-        });
+        try {
+          lease = await this.browserLifecycleManager.acquireLease({
+            taskId: task.taskType,
+            runId: task.runId,
+            clientId: task.clientId,
+            userId: effectiveUserId,
+            ownerType: 'AUTOMATION_OWNED',
+            namespace: 'mutation', // Isolated worker-owned mutation profile
+            isHeaded: true,
+            slowMo: 50,
+            useGuestMode: true,
+          });
+        } catch (launchErr: any) {
+          if (launchErr.message?.includes('GOOGLE_CHROME_GUEST_UNAVAILABLE') || launchErr.code === 'GOOGLE_CHROME_GUEST_UNAVAILABLE') {
+            const safeMsg = 'GOOGLE_CHROME_GUEST_UNAVAILABLE: Google Chrome is not installed or Guest Mode could not be launched.';
+            onProgress?.(`✗ [FATAL] ${safeMsg}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeMsg,
+              totalDurationMs: Date.now() - startTime,
+              resultData: {
+                success: false,
+                errorCode: 'GOOGLE_CHROME_GUEST_UNAVAILABLE',
+                errorMessage: safeMsg,
+              },
+            });
+            return;
+          }
+          throw launchErr;
+        }
+
+        const launchInfo = lease.isGuestMode
+          ? `[BROWSER LAUNCH] Google Chrome Guest session started (${lease.executablePath || 'chrome'} ${lease.launchArgs?.join(' ') || '--guest'})`
+          : `[BROWSER LAUNCH] Browser session started`;
+        onProgress?.(launchInfo);
 
         lease.context.on('close', () => {
           contextClosed = true;
@@ -714,6 +826,7 @@ export class AutomationWorker {
 
 
         mutationPhase = 'PRE_ACTION';
+        const effectiveBranch = task.targetBranch || (task.payload as any)?.targetBranch || (task.payload as any)?.payload?.targetBranch;
 
         // 1. Create User
         if (task.taskType === 'CREATE_CLIENT_USER' || task.taskType === 'CREATE_USER') {
@@ -731,9 +844,10 @@ export class AutomationWorker {
           const createRes = await UserManagementExecutor.createUser(mutationPage, {
             addUsersUrl,
             usersListUrl,
-            dto: payloadData as any,
+            dto: { ...(payloadData || {}), targetBranch: effectiveBranch } as any,
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             onMutationDispatched: () => {
               mutationPhase = 'MUTATION_DISPATCHED';
             },
@@ -771,9 +885,10 @@ export class AutomationWorker {
           const editRes = await UserManagementExecutor.editUser(mutationPage, {
             usersListUrl,
             username: task.payload.username,
-            dto: task.payload as any,
+            dto: { ...(task.payload || {}), targetBranch: effectiveBranch } as any,
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             onMutationDispatched: () => {
               mutationPhase = 'MUTATION_DISPATCHED';
             },
@@ -818,6 +933,7 @@ export class AutomationWorker {
             remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             onProgress: reportProgress,
             onMutationDispatched: () => {
               mutationPhase = 'MUTATION_DISPATCHED';
@@ -831,27 +947,15 @@ export class AutomationWorker {
             reportProgress(`✓ Remote status verified: '${statusRes.username}' is ${statusRes.status}.`);
             await this.agentClient.sendTelemetry(task.runId, { status: 'COMPLETED', totalDurationMs, resultData: serializableResult });
           } else {
-            const safeError = sanitizeErrorMessage(statusRes.errorMessage || statusRes.message || 'Remote status verification failed');
-            onProgress?.(`✗ Remote status verification failed: ${safeError}`);
-            await this.agentClient.sendTelemetry(task.runId, {
-              status: 'FAILED',
-              errorMessage: safeError,
-              totalDurationMs,
-              resultData: {
-                ...serializableResult,
-                overallStatus: (statusRes as any).overallStatus || 'PARTIAL_FAILED',
-                statusChangeState: (statusRes as any).statusChangeState || 'MUTATION_SUBMITTED_VERIFICATION_PENDING',
-                retryStartingPoint: (statusRes as any).retryStartingPoint || 'STATUS_VERIFICATION',
-                errorCode: statusRes.errorCode || 'REMOTE_STATUS_VERIFICATION_UNKNOWN',
-                errorMessage: safeError,
-              },
-            });
+            const safeError = sanitizeErrorMessage(statusRes.message || statusRes.errorMessage || 'Status update failed');
+            reportProgress(`✗ Failed to update user status: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, { status: 'FAILED', errorMessage: safeError, totalDurationMs, resultData: { ...serializableResult, errorMessage: safeError } });
           }
           return;
         }
 
         // 4. Reset User Password
-        if (task.taskType === 'RESET_CLIENT_USER_PASSWORD') {
+        if (task.taskType === 'RESET_CLIENT_USER_PASSWORD' || (task.taskType as string) === 'RESET_USER_PASSWORD') {
           const reportProgress = (msg: string) => {
             onProgress?.(msg);
             this.agentClient
@@ -861,6 +965,11 @@ export class AutomationWorker {
               })
               .catch(() => {});
           };
+
+          reportProgress(`Logging in to selected Simplex client…`);
+          reportProgress(`Opening Users screen…`);
+          reportProgress(`Searching for '${task.payload.username}'…`);
+          reportProgress(`Initiating password reset on remote client…`);
 
           const addUsersUrl = resolveClientRoute({
             baseUrl: task.clientBaseUrl,
@@ -876,6 +985,7 @@ export class AutomationWorker {
             remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             onProgress: reportProgress,
             onMutationDispatched: () => {
               mutationPhase = 'MUTATION_DISPATCHED';
@@ -886,7 +996,7 @@ export class AutomationWorker {
           const totalDurationMs = Date.now() - startTime;
 
           if (resetRes.success) {
-            reportProgress(`✓ Password reset confirmed for '${resetRes.username}'.`);
+            onProgress?.(`✓ Password reset confirmed for '${resetRes.username}'.`);
             await this.agentClient.sendTelemetry(task.runId, {
               status: 'COMPLETED',
               totalDurationMs,
@@ -930,7 +1040,8 @@ export class AutomationWorker {
             roleUrl,
             loginUrl,
             credentials: task.credentials,
-            userDto: payloadData as any,
+            targetBranch: effectiveBranch,
+            userDto: { ...(payloadData || {}), targetBranch: effectiveBranch } as any,
             onProgress: (comment: string, partial?: any) => {
               onProgress?.(comment);
               this.agentClient.sendTelemetry(task.runId, {
@@ -999,6 +1110,7 @@ export class AutomationWorker {
             allowDeactivation: payloadData?.allowDeactivation ?? (rolesToRemove && rolesToRemove.length > 0 ? true : false),
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             onProgress: (comment: string) => {
               onProgress?.(comment);
               this.agentClient.sendTelemetry(task.runId, {
@@ -1081,6 +1193,7 @@ export class AutomationWorker {
             resource: resourceDto,
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             allowReuseIfExisting: task.payload?.allowReuseIfExisting ?? task.payload?.reconcileOnly ?? true,
             onProgress: (msg: string) => {
               onProgress?.(msg);
@@ -1195,6 +1308,7 @@ export class AutomationWorker {
             status: targetStatus,
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             onProgress: (msg: string) => onProgress?.(msg),
           });
 
@@ -1239,6 +1353,7 @@ export class AutomationWorker {
             username,
             loginUrl,
             credentials: task.credentials,
+            targetBranch: effectiveBranch,
             onProgress: (msg: string) => onProgress?.(msg),
           });
 
@@ -1300,10 +1415,12 @@ export class AutomationWorker {
             eclaimUserRoute: task.payload?.eclaimUserRoute || '/addUserEclaim',
           });
 
-          onProgress?.(`Starting resource full workflow for '${payloadData.resourceName}'…`);
+          const targetBranch = task.targetBranch || task.payload?.targetBranch || task.payload?.row?.targetBranch || undefined;
+          onProgress?.(`Starting resource full workflow for '${payloadData.resourceName}' (target branch: ${targetBranch || 'default'})…`);
 
           const workflowRes = await ResourceManagementExecutor.processResourceFullWorkflow(mutationPage, {
             row: payloadData,
+            targetBranch,
             routes: {
               quickResourceRoute,
               addUsersRoute,
@@ -1446,9 +1563,10 @@ export class AutomationWorker {
       } finally {
         if (lease) {
           try {
+            onProgress?.(`[CLEANUP] Closing task-owned Chrome Guest browser process...`);
             await new Promise((r) => setTimeout(r, 400));
             await lease.close({ reason: 'MUTATION_FINISHED' });
-            onProgress?.(`Visible Chrome mutation window closed safely.`);
+            onProgress?.(`✓ Visible Chrome Guest window closed safely.`);
           } catch {}
         }
       }
@@ -1573,6 +1691,7 @@ export class AutomationWorker {
           isHeaded: task.options?.isHeaded ?? true,
           slowMo: 0,
           existingContext,
+          allowMultipleTabs: isOperatorOwned,
         });
       } catch (err: any) {
         const isLockErr = err.message && (err.message.includes('lock') || err.message.includes('EBUSY') || err.message.includes('Process singleton'));
@@ -1598,6 +1717,7 @@ export class AutomationWorker {
         context.on('close', () => {
           this.activeOperatorContexts.delete(profileKey);
         });
+        lease.detachInterceptors?.();
       }
 
       const resolvedLoginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
@@ -1606,6 +1726,7 @@ export class AutomationWorker {
       const isSessionActive = await WorkflowExecutor.checkSessionActive(page, task.workflowVersion);
 
       if (isSessionActive && (task.taskType === 'INTERACTIVE_LOGIN' || task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION')) {
+        lease.detachInterceptors?.();
         const totalDurationMs = Date.now() - startTime;
         onProgress?.(`Login successful — client ready.`);
         await this.agentClient.sendTelemetry(task.runId, {
@@ -1645,6 +1766,7 @@ export class AutomationWorker {
       const totalDurationMs = Date.now() - startTime;
 
       if (result.success) {
+        lease.detachInterceptors?.();
         onProgress?.(`Login successful — client ready.`);
         await this.agentClient.sendTelemetry(task.runId, {
           status: 'COMPLETED',
@@ -1701,6 +1823,134 @@ export class AutomationWorker {
         await lease.close({ reason: 'AUTOMATION_OWNED_AUTO_CLOSE' }).catch(() => {});
         this.activeOperatorContexts.delete(profileKey);
       }
+    }
+  }
+
+  /**
+   * Executes multi-tab session opening across one or multiple clients.
+   * Dispatches only one properly structured browser-agent task.
+   * Launches one isolated Google Chrome Guest session and opens requested tabs.
+   */
+  private async executeMultipleTabsWorkflow(
+    task: AgentTaskAssignment,
+    effectiveUserId: string,
+    startTime: number,
+    onProgress?: (msg: string) => void
+  ): Promise<void> {
+    const tabs: MultiTabTargetItem[] = task.payload?.tabs || [];
+    if (!tabs || tabs.length === 0) {
+      const errMsg = 'NO_TABS_SPECIFIED: No tabs provided in multi-tab task payload.';
+      onProgress?.(`✗ ${errMsg}`);
+      await this.agentClient.sendTelemetry(task.runId, {
+        status: 'FAILED',
+        errorMessage: errMsg,
+        totalDurationMs: Date.now() - startTime,
+        resultData: { success: false, errorMessage: errMsg },
+      });
+      return;
+    }
+
+    onProgress?.(`Launching isolated Google Chrome Guest session for ${tabs.length} tabs…`);
+
+    let lease: any = null;
+    try {
+      lease = await this.browserLifecycleManager.acquireLease({
+        taskId: task.taskType,
+        runId: task.runId,
+        clientId: task.clientId,
+        userId: effectiveUserId,
+        ownerType: 'OPERATOR_OWNED',
+        namespace: 'interactive',
+        isHeaded: task.options?.isHeaded ?? true,
+        allowMultipleTabs: true,
+      });
+    } catch (err: any) {
+      const isLockErr = err.message && (err.message.includes('lock') || err.message.includes('EBUSY') || err.message.includes('Process singleton'));
+      const errCode = isLockErr ? 'PROFILE_ALREADY_IN_USE' : 'CLIENT_WINDOW_LAUNCH_FAILED';
+      const safeMsg = sanitizeErrorMessage(err.message || errCode);
+      onProgress?.(`✗ Chrome Guest Mode launch failed: ${errCode}`);
+      await this.agentClient.sendTelemetry(task.runId, {
+        status: 'FAILED',
+        errorMessage: safeMsg,
+        totalDurationMs: Date.now() - startTime,
+        resultData: { success: false, errorCode: errCode, errorMessage: safeMsg },
+      });
+      return;
+    }
+
+    const browser = lease.browser;
+    if (!browser) {
+      const errMsg = 'GOOGLE_CHROME_GUEST_UNAVAILABLE: Browser instance could not be established.';
+      onProgress?.(`✗ ${errMsg}`);
+      await this.agentClient.sendTelemetry(task.runId, {
+        status: 'FAILED',
+        errorMessage: errMsg,
+        totalDurationMs: Date.now() - startTime,
+        resultData: { success: false, errorMessage: errMsg },
+      });
+      return;
+    }
+
+    try {
+      const result = await MultiTabExecutor.execute({
+        tabs,
+        workflowVersion: task.workflowVersion,
+        browser,
+        initialContext: lease.context,
+        initialPage: lease.primaryPage,
+        isHeaded: task.options?.isHeaded ?? true,
+        onItemStatusUpdate: (updatedItem, index) => {
+          this.agentClient.sendTelemetry(task.runId, {
+            status: 'RUNNING',
+            resultData: {
+              currentTabUpdate: updatedItem,
+              currentIndex: index,
+            },
+          });
+        },
+        onProgress: (msg) => onProgress?.(msg),
+      });
+
+      // Track all operator-owned contexts in activeOperatorContexts so agent cleanup never touches them
+      for (const ctx of result.contexts) {
+        const ctxKey = `multitab_${task.runId}_${Date.now()}_${Math.random()}`;
+        this.activeOperatorContexts.set(ctxKey, ctx);
+        ctx.on('close', () => {
+          this.activeOperatorContexts.delete(ctxKey);
+        });
+      }
+
+      const totalDurationMs = Date.now() - startTime;
+      const allFailed = result.tabs.every((t) => t.status === 'FAILED');
+
+      if (allFailed) {
+        const firstErr = result.tabs.find((t) => t.errorMessage)?.errorMessage || 'All requested tabs failed to open';
+        onProgress?.(`✗ Multiple tab session failed: ${firstErr}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: firstErr,
+          totalDurationMs,
+          resultData: { success: false, tabs: result.tabs },
+        });
+      } else {
+        const successCount = result.tabs.filter((t) => t.status === 'READY' || t.status === 'NAVIGATION_SUCCESS').length;
+        onProgress?.(`✓ Multiple tab session ready: ${successCount}/${result.tabs.length} tabs open.`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'COMPLETED',
+          totalDurationMs,
+          resultData: { success: true, tabs: result.tabs },
+        });
+      }
+    } catch (err: any) {
+      const totalDurationMs = Date.now() - startTime;
+      const safeMsg = sanitizeErrorMessage(err.message || 'Error executing multiple tabs session');
+      onProgress?.(`✗ [FATAL] Multiple tab error: ${safeMsg}`);
+      await this.agentClient.sendTelemetry(task.runId, {
+        status: 'FAILED',
+        errorMessage: safeMsg,
+        totalDurationMs,
+        resultData: { success: false, errorMessage: safeMsg },
+      });
     }
   }
 

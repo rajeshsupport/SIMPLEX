@@ -13,9 +13,11 @@ export const CreateClientSchema = z.object({
   environment: z.enum(['Production', 'Staging', 'UAT', 'Test', 'Development', 'Local']),
   applicationVersion: z.string().default('v1.0'),
   loginRoute: z.string().default('/login'),
-  usersRoute: z.string().default('/hmc/users'),
-  servicesRoute: z.string().default('/hmc/services'),
+  usersRoute: z.string().default('/users'),
+  servicesRoute: z.string().default('/services'),
   userRoleRoute: z.string().default('/addUserRole').optional(),
+  branchName: z.string().optional().nullable(),
+  branches: z.array(z.string()).optional().default([]),
   status: z.enum(['ACTIVE', 'INACTIVE', 'ARCHIVED']).default('ACTIVE'),
   allowedDesktopAgents: z.array(z.string()).optional().default([]),
 });

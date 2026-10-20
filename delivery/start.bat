@@ -21,7 +21,7 @@ docker compose up -d
 
 echo Initializing SIMPLEX Database...
 timeout /t 5 /nobreak >nul
-docker exec -i simplex_mssql_db /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Rajesh@123" -C -Q "IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'SIMPLEX_CENTRAL_DB') CREATE DATABASE SIMPLEX_CENTRAL_DB;" >nul 2>&1
+docker exec -i simplex_mssql_db /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Rajesh@123" -C < init-db.sql >nul 2>&1
 docker compose restart simplex_api >nul 2>&1
 
 echo.

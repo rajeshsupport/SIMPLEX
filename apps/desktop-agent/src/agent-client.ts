@@ -39,6 +39,8 @@ export class AgentClient {
           buildCommit: '6d63f04',
           buildTimestamp: new Date().toISOString(),
           supportedTaskTypes: [
+            'OPEN_MULTIPLE_TABS_SESSION',
+            'OPEN_INTERACTIVE_CLIENT_SESSION',
             'SYNC_CLIENT_USERS_HEADLESS',
             'CREATE_CLIENT_USER',
             'EDIT_CLIENT_USER',
@@ -93,6 +95,8 @@ export class AgentClient {
         buildCommit: '6d63f04',
         buildTimestamp: new Date().toISOString(),
         supportedTaskTypes: [
+          'OPEN_MULTIPLE_TABS_SESSION',
+          'OPEN_INTERACTIVE_CLIENT_SESSION',
           'SYNC_CLIENT_USERS_HEADLESS',
           'CREATE_CLIENT_USER',
           'EDIT_CLIENT_USER',

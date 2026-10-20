@@ -1,7 +1,7 @@
 import * as http from 'http';
 import * as assert from 'assert';
 import { chromium } from 'playwright';
-import { startFixtureServer } from '../fixture/server.js';
+import { startFixtureServer, fixtureBranchState } from '../fixture/server.js';
 import { ResourceManagementExecutor } from '../engine/resource-management-executor.js';
 import { UserManagementExecutor } from '../engine/user-management-executor.js';
 import { ResourceImportStage, CreateClientUserDto } from '@hmc/shared';
@@ -2662,8 +2662,223 @@ async function runClientResourceTests() {
     }
     console.log('✓ TEST 29E Passed: All terminal paths adhere strictly to standardized status enum and publish readable remarks.');
 
+    // ========================================================================
+    // TEST 30: Master V9.4 Mandatory /userBaseBranch Selection Suite
+    // ========================================================================
+    console.log('\n[TEST 30] Master V9.4 Mandatory /userBaseBranch Selection Suite...');
+
+    // 30A: Detect /userBaseBranch, select exact targetBranch via normalized equality, verify active branch, and create resource
+    console.log('  [TEST 30A] Testing normalized equality branch selection on /userBaseBranch and active context verification...');
+    fixtureBranchState.reset();
+    fixtureBranchState.enabled = true;
+    fixtureBranchState.branches = [
+      { id: 'GAG', name: '  GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC  ' },
+      { id: 'BR-001', name: 'MAIN HOSPITAL CAMPUS' },
+    ];
+
+    const context30A = await browser.newContext();
+    const page30A = await context30A.newPage();
+
+    let postCount30A = 0;
+    page30A.on('request', (req: any) => {
+      if (req.method() === 'POST' && req.url().includes('/userBaseBranch')) {
+        postCount30A++;
+      }
+    });
+
+    const res30A = await ResourceManagementExecutor.createResource(page30A, {
+      addResourceUrl: `${baseUrl}/MasterV9.4/addResourceParentDetails`,
+      resource: {
+        resourceName: `Dr. Branch Test 30A`,
+        isResourceHuman: true,
+        resourceType: 'Consultant Physician',
+        specialty: 'Cardiology',
+      },
+      loginUrl: `${baseUrl}/login`,
+      credentials: { username: 'admin', password: 'password123' },
+      targetBranch: 'gaelan medical care one day surgery hospital llc', // case-insensitive & trimmed
+    });
+
+    assert.strictEqual(res30A.success, true, 'Resource creation must succeed after branch selection');
+    assert.strictEqual(postCount30A, 1, 'Branch confirmation action must be completed exactly once');
+    assert.strictEqual(fixtureBranchState.activeBranch, 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC');
+    console.log('  ✓ TEST 30A Passed: /userBaseBranch detected, normalized branch selected, confirmed exactly once, active context verified.');
+    await context30A.close();
+
+    // 30B: When Central provides no branch and exactly one branch is available, auto-select verified single branch
+    console.log('  [TEST 30B] Testing auto-selection of verified single branch when Central provides no branch...');
+    fixtureBranchState.reset();
+    fixtureBranchState.enabled = true;
+    fixtureBranchState.branches = [
+      { id: 'GAG', name: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+    ];
+
+    const context30B = await browser.newContext();
+    const page30B = await context30B.newPage();
+
+    const res30B = await ResourceManagementExecutor.createResource(page30B, {
+      addResourceUrl: `${baseUrl}/MasterV9.4/addResourceParentDetails`,
+      resource: {
+        resourceName: `Dr. Single Branch 30B`,
+        isResourceHuman: true,
+        resourceType: 'Consultant Physician',
+        specialty: 'Neurology',
+      },
+      loginUrl: `${baseUrl}/login`,
+      credentials: { username: 'admin', password: 'password123' },
+      // targetBranch omitted
+    });
+
+    assert.strictEqual(res30B.success, true, 'Must auto-select single available branch');
+    assert.strictEqual(fixtureBranchState.activeBranch, 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC');
+    console.log('  ✓ TEST 30B Passed: Single available branch auto-selected when Central omitted branch.');
+    await context30B.close();
+
+    // 30C: Surface BRANCH_NOT_FOUND when target branch is missing from live list; halt before Submit with 0 clicks
+    console.log('  [TEST 30C] Testing BRANCH_NOT_FOUND error when target branch is missing...');
+    fixtureBranchState.reset();
+    fixtureBranchState.enabled = true;
+    fixtureBranchState.branches = [
+      { id: 'GAG', name: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+      { id: 'BR-001', name: 'MAIN HOSPITAL CAMPUS' },
+    ];
+
+    const context30C = await browser.newContext();
+    const page30C = await context30C.newPage();
+
+    let submitCount30C = 0;
+    page30C.on('request', (req: any) => {
+      if (req.method() === 'POST' && (req.url().includes('/addResourceParentDetails') || req.url().includes('/userBaseBranch'))) {
+        submitCount30C++;
+      }
+    });
+
+    const res30C = await ResourceManagementExecutor.createResource(page30C, {
+      addResourceUrl: `${baseUrl}/MasterV9.4/addResourceParentDetails`,
+      resource: {
+        resourceName: `Dr. Missing Branch 30C`,
+        isResourceHuman: true,
+        resourceType: 'Consultant Physician',
+      },
+      loginUrl: `${baseUrl}/login`,
+      credentials: { username: 'admin', password: 'password123' },
+      targetBranch: 'Nonexistent Riyadh Clinic Branch',
+    });
+
+    assert.strictEqual(res30C.success, false);
+    assert.strictEqual(res30C.errorCode, 'BRANCH_NOT_FOUND');
+    assert.strictEqual(submitCount30C, 0, 'Must halt before Submit with 0 submit clicks');
+    console.log('  ✓ TEST 30C Passed: Surfaced BRANCH_NOT_FOUND with 0 submit clicks.');
+    await context30C.close();
+
+    // 30D: Surface BRANCH_AMBIGUOUS when multiple branches exist and no target branch was specified
+    console.log('  [TEST 30D] Testing BRANCH_AMBIGUOUS when multiple branches exist without target...');
+    fixtureBranchState.reset();
+    fixtureBranchState.enabled = true;
+    fixtureBranchState.branches = [
+      { id: 'GAG', name: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+      { id: 'BR-001', name: 'MAIN HOSPITAL CAMPUS' },
+    ];
+
+    const context30D = await browser.newContext();
+    const page30D = await context30D.newPage();
+
+    const res30D = await ResourceManagementExecutor.createResource(page30D, {
+      addResourceUrl: `${baseUrl}/MasterV9.4/addResourceParentDetails`,
+      resource: {
+        resourceName: `Dr. Ambiguous Branch 30D`,
+        isResourceHuman: true,
+      },
+      loginUrl: `${baseUrl}/login`,
+      credentials: { username: 'admin', password: 'password123' },
+      // targetBranch omitted
+    });
+
+    assert.strictEqual(res30D.success, false);
+    assert.strictEqual(res30D.errorCode, 'BRANCH_AMBIGUOUS');
+    console.log('  ✓ TEST 30D Passed: Surfaced BRANCH_AMBIGUOUS when multiple branches exist without target.');
+    await context30D.close();
+
+    // 30E: Surface BRANCH_CONFIRMATION_FAILED when confirmation action fails to establish active branch
+    console.log('  [TEST 30E] Testing BRANCH_CONFIRMATION_FAILED when confirmation fails to establish context...');
+    fixtureBranchState.reset();
+    fixtureBranchState.enabled = true;
+    fixtureBranchState.confirmationFails = true;
+    fixtureBranchState.branches = [
+      { id: 'GAG', name: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+    ];
+
+    const context30E = await browser.newContext();
+    const page30E = await context30E.newPage();
+
+    const res30E = await ResourceManagementExecutor.createResource(page30E, {
+      addResourceUrl: `${baseUrl}/MasterV9.4/addResourceParentDetails`,
+      resource: {
+        resourceName: `Dr. Confirm Fail 30E`,
+        isResourceHuman: true,
+      },
+      loginUrl: `${baseUrl}/login`,
+      credentials: { username: 'admin', password: 'password123' },
+      targetBranch: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC',
+    });
+
+    assert.strictEqual(res30E.success, false);
+    assert.strictEqual(res30E.errorCode, 'BRANCH_CONFIRMATION_FAILED');
+    console.log('  ✓ TEST 30E Passed: Surfaced BRANCH_CONFIRMATION_FAILED when confirmation action failed.');
+    await context30E.close();
+
+    // 30F: Surface RESOURCE_FORM_NOT_FOUND ONLY when branch is verified but form is missing
+    console.log('  [TEST 30F] Testing RESOURCE_FORM_NOT_FOUND only when branch is verified but form is missing...');
+    fixtureBranchState.reset();
+    fixtureBranchState.enabled = true;
+    fixtureBranchState.branches = [
+      { id: 'GAG', name: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+    ];
+
+    const context30F = await browser.newContext();
+    const page30F = await context30F.newPage();
+
+    const res30F = await ResourceManagementExecutor.createResource(page30F, {
+      addResourceUrl: `${baseUrl}/hmc/dashboard`, // page without #addResourceParent
+      resource: {
+        resourceName: `Dr. Missing Form 30F`,
+        isResourceHuman: true,
+      },
+      loginUrl: `${baseUrl}/login`,
+      credentials: { username: 'admin', password: 'password123' },
+      targetBranch: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC',
+    });
+
+    assert.strictEqual(res30F.success, false);
+    assert.strictEqual(res30F.errorCode, 'RESOURCE_FORM_NOT_FOUND');
+    console.log('  ✓ TEST 30F Passed: Surfaced RESOURCE_FORM_NOT_FOUND only after branch was verified.');
+    await context30F.close();
+
+    // 30G: Regression test: Master V9.3 single-branch portal functions cleanly
+    console.log('  [TEST 30G] Testing Master V9.3 single-branch backwards compatibility...');
+    fixtureBranchState.reset(); // disabled, standard single-branch mode
+
+    const context30G = await browser.newContext();
+    const page30G = await context30G.newPage();
+
+    const res30G = await ResourceManagementExecutor.createResource(page30G, {
+      addResourceUrl: `${baseUrl}/MasterV9.3/addResourceParentDetails`,
+      resource: {
+        resourceName: `Dr. V93 Regression 30G`,
+        isResourceHuman: true,
+        resourceType: 'Consultant Physician',
+        specialty: 'Cardiology',
+      },
+      loginUrl: `${baseUrl}/login`,
+      credentials: { username: 'admin', password: 'password123' },
+    });
+
+    assert.strictEqual(res30G.success, true, 'Single branch Master V9.3 creation must succeed');
+    console.log('  ✓ TEST 30G Passed: Master V9.3 single-branch portal backwards compatibility preserved.');
+    await context30G.close();
+
     console.log('\n================================================================');
-    console.log('✓ ALL CLIENT RESOURCE AUTOMATION TESTS PASSED (29/29 with 24A-24F, 25A-25D, 26A-26E, 27A-27D, 28A-28G, 29A-29E)');
+    console.log('✓ ALL CLIENT RESOURCE AUTOMATION TESTS PASSED (30/30 with 30A-30G)');
     console.log('================================================================');
   } finally {
     if (browser) await browser.close();

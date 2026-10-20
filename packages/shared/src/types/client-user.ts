@@ -134,6 +134,7 @@ export interface CreateClientUserDto {
   profileFilename?: string;
   status?: ClientUserStatus;
   overrideDuplicateName?: boolean;
+  targetBranch?: string;
 }
 
 export interface UpdateClientUserDto {
@@ -155,6 +156,7 @@ export interface UpdateClientUserDto {
   profileBase64?: string;
   profileFilename?: string;
   status?: ClientUserStatus;
+  targetBranch?: string;
 }
 
 export interface ClientUserRoleItem {

@@ -80,13 +80,15 @@ export class ClientsService {
       clientCode: dto.clientCode.toUpperCase(),
       clientName: dto.clientName,
       baseUrl: dto.baseUrl.replace(/\/$/, ''),
-      applicationPath: dto.applicationPath || '/hmc',
+      applicationPath: dto.applicationPath !== undefined ? dto.applicationPath : '',
       environment: dto.environment,
       applicationVersion: dto.applicationVersion || 'v1.0',
       loginRoute: dto.loginRoute || '/login',
-      usersRoute: dto.usersRoute || '/hmc/users',
-      servicesRoute: dto.servicesRoute || '/hmc/services',
+      usersRoute: dto.usersRoute || '/users',
+      servicesRoute: dto.servicesRoute || '/services',
       userRoleRoute: dto.userRoleRoute || '/addUserRole',
+      branchName: dto.branchName !== undefined ? dto.branchName : null,
+      branchesJson: dto.branches ? JSON.stringify(dto.branches) : null,
       status: dto.status || 'ACTIVE',
       connectionStatus: 'UNKNOWN',
       allowedDesktopAgentsJson: dto.allowedDesktopAgents ? JSON.stringify(dto.allowedDesktopAgents) : null,
@@ -112,13 +114,15 @@ export class ClientsService {
 
     if (dto.clientName) client.clientName = dto.clientName;
     if (dto.baseUrl) client.baseUrl = dto.baseUrl.replace(/\/$/, '');
-    if (dto.applicationPath) client.applicationPath = dto.applicationPath;
+    if (dto.applicationPath !== undefined) client.applicationPath = dto.applicationPath;
     if (dto.environment) client.environment = dto.environment;
     if (dto.applicationVersion) client.applicationVersion = dto.applicationVersion;
     if (dto.loginRoute) client.loginRoute = dto.loginRoute;
     if (dto.usersRoute) client.usersRoute = dto.usersRoute;
     if (dto.servicesRoute) client.servicesRoute = dto.servicesRoute;
     if (dto.userRoleRoute !== undefined) client.userRoleRoute = dto.userRoleRoute;
+    if (dto.branchName !== undefined) client.branchName = dto.branchName;
+    if (dto.branches !== undefined) client.branchesJson = JSON.stringify(dto.branches);
     if (dto.status) client.status = dto.status;
     if (dto.allowedDesktopAgents) client.allowedDesktopAgentsJson = JSON.stringify(dto.allowedDesktopAgents);
 
@@ -246,6 +250,8 @@ export class ClientsService {
       usersRoute: client.usersRoute,
       servicesRoute: client.servicesRoute,
       userRoleRoute: client.userRoleRoute || '/addUserRole',
+      branchName: client.branchName || null,
+      branches: client.branchesJson ? JSON.parse(client.branchesJson) : (client.branchName ? [client.branchName] : []),
       status: client.status,
       connectionStatus: client.connectionStatus,
       allowedDesktopAgents: client.allowedDesktopAgentsJson ? JSON.parse(client.allowedDesktopAgentsJson) : [],

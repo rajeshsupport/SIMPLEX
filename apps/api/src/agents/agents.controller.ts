@@ -113,8 +113,25 @@ export class AgentsController {
   async dispatchOpenAndLogin(
     @Body('clientId') clientId: string,
     @Body('agentId') agentId: string,
+    @Body('targetBranch') targetBranch: string,
     @CurrentUser('sub') userId: string
   ) {
-    return this.agentsService.dispatchOpenAndLogin(clientId, userId, agentId);
+    return this.agentsService.dispatchOpenAndLogin(clientId, userId, agentId, targetBranch);
+  }
+
+  @Post('dispatch-multiple-tabs')
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermissions(PERMISSIONS.CLIENT_OPEN)
+  async dispatchMultipleTabs(
+    @Body('items') items: Array<{
+      clientId: string;
+      targetBranch?: string;
+      targetRoute?: string;
+      screenName?: string;
+    }>,
+    @Body('agentId') agentId: string,
+    @CurrentUser('sub') userId: string
+  ) {
+    return this.agentsService.dispatchMultipleTabs(items, userId, agentId);
   }
 }

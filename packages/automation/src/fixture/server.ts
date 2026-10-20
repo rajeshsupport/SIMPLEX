@@ -26,6 +26,31 @@ export const fixtureClickCounters = {
   },
 };
 
+export const fixtureBranchState = {
+  enabled: false,
+  useLoginCheck: false,
+  useTreeOnUserBaseBranch: false,
+  branches: [
+    { id: 'GAG', name: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+    { id: 'BR-001', name: 'MAIN HOSPITAL CAMPUS' },
+  ],
+  activeBranch: '',
+  confirmationFails: false,
+  requireBranchForResourceForm: true,
+  reset() {
+    this.enabled = false;
+    this.useLoginCheck = false;
+    this.useTreeOnUserBaseBranch = false;
+    this.branches = [
+      { id: 'GAG', name: 'GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC' },
+      { id: 'BR-001', name: 'MAIN HOSPITAL CAMPUS' },
+    ];
+    this.activeBranch = '';
+    this.confirmationFails = false;
+    this.requireBranchForResourceForm = true;
+  },
+};
+
 export function createFixtureApp(): express.Express {
   const app = express();
   app.use(express.urlencoded({ extended: true }));
@@ -260,8 +285,179 @@ export function createFixtureApp(): express.Express {
       return res.redirect(`${loginPath}?error=` + encodeURIComponent('Invalid credentials'));
     }
     res.setHeader('Set-Cookie', 'session_auth=true; Path=/');
+    if (fixtureBranchState.enabled) {
+      if (fixtureBranchState.useLoginCheck) {
+        return res.redirect('/MasterV9.4/loginCheck');
+      }
+      return res.redirect('/MasterV9.4/userBaseBranch');
+    }
     res.redirect('/hmc/dashboard');
   };
+
+  const handleLoginCheckGet = (req: Request, res: Response) => {
+    const branchNodes = fixtureBranchState.branches
+      .map(
+        (b) => `
+        <div class="node" id="node_${b.id}">
+          <a href="/MasterV9.4/selectBranchNode?id=${encodeURIComponent(b.id)}">${b.name}</a>
+        </div>`
+      )
+      .join('\n');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Master V9.4 - Choose Branch Tree</title></head>
+      <body>
+        <div id="wrapper">
+          <nav>
+            <a href="#">Menu</a>
+            <a href="#">Support</a>
+            <a href="#">My Profile</a>
+            <a href="#">Switch Branch</a>
+            <a href="#">About Us</a>
+          </nav>
+          <h2>CHOOSE BRANCH</h2>
+          <div id="chart" class="jOrgChart">
+            <div class="node">ADMIN</div>
+            ${branchNodes}
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleSelectBranchNodeGet = (req: Request, res: Response) => {
+    const branchId = req.query.id as string;
+    const branchObj = fixtureBranchState.branches.find(
+      (b) => b.id === branchId || b.name === branchId || b.name.trim() === (branchId || '').trim()
+    );
+    if (!branchObj || fixtureBranchState.confirmationFails) {
+      return res.redirect('/MasterV9.4/loginCheck?error=failed');
+    }
+    fixtureBranchState.activeBranch = branchObj.name.trim();
+    res.setHeader('Set-Cookie', `session_branch=${encodeURIComponent(branchObj.name.trim())}; Path=/`);
+    res.redirect('/MasterV9.4/ResourceParent');
+  };
+
+  const handleUserBaseBranchGet = (req: Request, res: Response) => {
+    if (fixtureBranchState.useTreeOnUserBaseBranch) {
+      const branchNodes = fixtureBranchState.branches
+        .map(
+          (b) => `
+          <div class="node" id="node_${b.id}">
+            <div class="branch-name">${b.name}</div>
+          </div>`
+        )
+        .join('\n');
+
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Master V9.4 - Choose Base Branch</title></head>
+        <body>
+          <div id="page">
+            <nav class="navbar">
+              <button class="navbar-toggle" type="button">Menu</button>
+              <button class="btn btn-default" type="button">Admin Simplex</button>
+              <button class="btn btn-default" type="button">Support</button>
+            </nav>
+            <h2>Select Branch</h2>
+            <div id="chart" class="jOrgChart">
+              <div class="node">ADMIN</div>
+              ${branchNodes}
+            </div>
+            <form id="userBaseBranch" method="POST" action="${req.path}">
+              <input type="hidden" name="branch" id="hdnBranch" value="" />
+              <button type="submit" id="btnSubmit">Confirm Branch</button>
+            </form>
+            <script>
+              document.querySelectorAll('.node').forEach(function(n) {
+                n.addEventListener('click', function() {
+                  var name = this.querySelector('.branch-name') ? this.querySelector('.branch-name').textContent.trim() : this.textContent.trim();
+                  var id = this.id.replace('node_', '');
+                  document.getElementById('hdnBranch').value = name || id;
+                });
+              });
+            </script>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    const branchOptions = fixtureBranchState.branches
+      .map((b) => `<option value="${b.id}">${b.name}</option>`)
+      .join('\n');
+
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Master V9.4 - Choose Base Branch</title></head>
+      <body>
+        <div id="page">
+          <nav class="navbar">
+            <button class="navbar-toggle" type="button">Menu</button>
+            <button class="btn btn-default" type="button">Admin Simplex</button>
+            <button class="btn btn-default" type="button">Support</button>
+          </nav>
+          <h2>Select Branch</h2>
+          <form id="userBaseBranch" method="POST" action="${req.path}">
+            <select name="branch" id="ddlBranch">
+              <option value="">-- Select Branch --</option>
+              ${branchOptions}
+            </select>
+            <button type="submit" id="btnSubmit">Confirm Branch</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+  };
+
+  const handleUserBaseBranchPost = (req: Request, res: Response) => {
+    const selectedVal = req.body.branch;
+    const branchObj = fixtureBranchState.branches.find(
+      (b) => b.id === selectedVal || b.name === selectedVal
+    );
+
+    if (fixtureBranchState.confirmationFails || !branchObj) {
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Master V9.4 - Choose Base Branch</title></head>
+        <body>
+          <div id="page">
+            <h2>Select Branch</h2>
+            <div class="alert-danger" data-testid="error-message">Branch selection could not be confirmed.</div>
+            <form id="userBaseBranch" method="POST" action="${req.path}">
+              <select name="branch" id="ddlBranch">
+                <option value="">-- Select Branch --</option>
+                ${fixtureBranchState.branches.map((b) => `<option value="${b.id}">${b.name}</option>`).join('\n')}
+              </select>
+              <button type="submit" id="btnSubmit">Confirm Branch</button>
+            </form>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    fixtureBranchState.activeBranch = branchObj.name.trim();
+    res.setHeader('Set-Cookie', `session_branch=${encodeURIComponent(branchObj.name.trim())}; Path=/`);
+    res.redirect('/MasterV9.4/ResourceParent');
+  };
+
+  ['/userBaseBranch', '/MasterV9.4/userBaseBranch'].forEach((p) => {
+    app.get(p, handleUserBaseBranchGet);
+    app.post(p, handleUserBaseBranchPost);
+  });
+
+  ['/loginCheck', '/MasterV9.4/loginCheck'].forEach((p) => {
+    app.get(p, handleLoginCheckGet);
+  });
+  app.get('/MasterV9.4/selectBranchNode', handleSelectBranchNodeGet);
 
   app.get('/login', handleLoginGet);
   app.post('/login', handleLoginPost);
@@ -1430,7 +1626,8 @@ export function createFixtureApp(): express.Express {
         </style>
       </head>
       <body>
-        <div class="card">
+        <div class="card header-user-name" id="page">
+          <div class="header-branch" data-testid="active-branch">${fixtureBranchState.activeBranch || ''}</div>
           <h2>Resource Master Directory</h2>
           <table id="gridResources" class="table-resources">
             <thead>
@@ -1516,6 +1713,12 @@ export function createFixtureApp(): express.Express {
     if (req.query.requireAuth === 'true' && !req.headers.cookie?.includes('session_auth=true')) {
       return res.redirect('/login');
     }
+    if (fixtureBranchState.enabled && fixtureBranchState.requireBranchForResourceForm && !fixtureBranchState.activeBranch) {
+      if (fixtureBranchState.useLoginCheck) {
+        return res.redirect('/MasterV9.4/loginCheck');
+      }
+      return res.redirect('/MasterV9.4/userBaseBranch');
+    }
     res.send(`
       <!DOCTYPE html>
       <html lang="en">
@@ -1533,7 +1736,8 @@ export function createFixtureApp(): express.Express {
         </style>
       </head>
       <body>
-        <div class="card">
+        <div class="card header-user-name" id="page">
+          <div class="header-branch" data-testid="active-branch">${fixtureBranchState.activeBranch || ''}</div>
           <h2 class="screen-title">ADD-RESOURCE DETAILS</h2>
           ${req.query.msg ? `<div class="alert-success" id="successMsg">${req.query.msg}</div>` : ''}
           ${req.query.error ? `<div class="alert-danger" id="errorMsg" style="background: #7f1d1d; color: #fca5a5; padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem;">${req.query.error}</div>` : ''}

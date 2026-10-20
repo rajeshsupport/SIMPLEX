@@ -79,10 +79,42 @@ export type AgentTaskType =
   | 'PROCESS_RESOURCE_WORKFLOW'
   | 'PROCESS_RESOURCE_ROW_WORKFLOW'
   | 'CREATE_SERVICE'
-  // INTERACTIVE (3)
+  // INTERACTIVE (4)
   | 'OPEN_INTERACTIVE_CLIENT_SESSION'
+  | 'OPEN_MULTIPLE_TABS_SESSION'
   | 'INTERACTIVE_LOGIN'
   | 'TEST_LOGIN';
+
+export type TabItemStatus =
+  | 'QUEUED'
+  | 'OPENING'
+  | 'LOGIN_SUCCESS'
+  | 'BRANCH_SELECTED'
+  | 'READY'
+  | 'NAVIGATION_SUCCESS' // Kept as alias to READY for backward compatibility
+  | 'FAILED';
+
+export interface MultiTabTargetItem {
+  id: string;
+  clientId: string;
+  clientCode: string;
+  clientName?: string;
+  baseUrl: string;
+  loginRoute?: string;
+  targetRoute?: string;
+  screenName?: string;
+  targetBranch?: string;
+  credentials?: { username?: string; password?: string };
+  status?: TabItemStatus;
+  errorMessage?: string;
+  finalUrl?: string;
+}
+
+export interface MultiTabSessionPayload {
+  tabs: MultiTabTargetItem[];
+  leaveBrowserOpen?: boolean;
+  isHeaded?: boolean;
+}
 
 export interface AgentTaskAssignment {
   runId: string;
@@ -94,6 +126,7 @@ export interface AgentTaskAssignment {
   targetRoute?: string;
   addUsersRoute?: string;
   remoteUserId?: string;
+  targetBranch?: string;
   workflowVersion: any;
   payload: Record<string, any>;
   executionMode?: ExecutionMode;
@@ -159,8 +192,9 @@ export const TASK_MODE_POLICY = {
   PROCESS_RESOURCE_ROW_WORKFLOW: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
   CREATE_SERVICE: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
 
-  // Interactive (3)
+  // Interactive (4)
   OPEN_INTERACTIVE_CLIENT_SESSION: { namespace: 'interactive', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  OPEN_MULTIPLE_TABS_SESSION: { namespace: 'interactive', executionMode: 'HEADED_MUTATION', isHeaded: true },
   INTERACTIVE_LOGIN: { namespace: 'interactive', executionMode: 'HEADED_MUTATION', isHeaded: true },
   TEST_LOGIN: { namespace: 'interactive', executionMode: 'HEADED_MUTATION', isHeaded: true },
 } satisfies Record<AgentTaskType, TaskModePolicy>;
@@ -213,6 +247,7 @@ export const MUTATION_HEADED_TASK_TYPES = [
 
 export const INTERACTIVE_TASK_TYPES = [
   'OPEN_INTERACTIVE_CLIENT_SESSION',
+  'OPEN_MULTIPLE_TABS_SESSION',
   'INTERACTIVE_LOGIN',
   'TEST_LOGIN',
 ] as const;

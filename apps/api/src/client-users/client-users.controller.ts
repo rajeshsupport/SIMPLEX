@@ -76,9 +76,10 @@ export class ClientUsersController {
   @HttpCode(HttpStatus.OK)
   async syncClientUsers(
     @Body('clientId') clientId: string,
+    @Body('targetBranch') targetBranch: string | undefined,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.syncClientUsers(clientId, user);
+    return this.clientUsersService.syncClientUsers(clientId, user, targetBranch);
   }
 
   @Post('sync-job')
@@ -87,9 +88,10 @@ export class ClientUsersController {
   @HttpCode(HttpStatus.ACCEPTED)
   async startSyncJob(
     @Body('clientId') clientId: string,
+    @Body('targetBranch') targetBranch: string | undefined,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.startSyncJob(clientId, user);
+    return this.clientUsersService.startSyncJob(clientId, user, targetBranch);
   }
 
   @Get('sync-status/:jobId')
@@ -183,9 +185,10 @@ export class ClientUsersController {
   async setUserStatus(
     @Param('id') id: string,
     @Body('status') status: ClientUserStatus,
+    @Body('targetBranch') targetBranch: string | undefined,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.setUserStatus(id, status, user);
+    return this.clientUsersService.setUserStatus(id, status, user, targetBranch);
   }
 
   @Post(':id/reset-password')
@@ -193,16 +196,17 @@ export class ClientUsersController {
   @HttpCode(HttpStatus.OK)
   async resetUserPassword(
     @Param('id') id: string,
+    @Body('targetBranch') targetBranch: string | undefined,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.resetUserPassword(id, user);
+    return this.clientUsersService.resetUserPassword(id, user, targetBranch);
   }
 
   @Post('map-roles')
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_EDIT)
   @HttpCode(HttpStatus.OK)
   async mapUserRoles(
-    @Body() dto: { clientId: string; username: string; roles: string[]; fullName?: string; firstName?: string; remoteUserId?: string; allowDeactivation?: boolean },
+    @Body() dto: { clientId: string; username: string; roles: string[]; fullName?: string; firstName?: string; remoteUserId?: string; allowDeactivation?: boolean; targetBranch?: string },
     @CurrentUser() user: JwtPayload
   ) {
     return this.clientUsersService.mapUserRoles(dto, user);
@@ -233,9 +237,10 @@ export class ClientUsersController {
   @HttpCode(HttpStatus.OK)
   async refreshUserRoles(
     @Param('id') id: string,
+    @Body('targetBranch') targetBranch: string | undefined,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.refreshUserRolesRemote(id, user);
+    return this.clientUsersService.refreshUserRolesRemote(id, user, targetBranch);
   }
 
   @Get('export-excel')
@@ -281,9 +286,10 @@ export class ClientUsersController {
   async importExecute(
     @Body('clientId') clientId: string,
     @Body('rows') rows: ExcelUserImportRow[],
+    @Body('targetBranch') targetBranch: string | undefined,
     @CurrentUser() user: JwtPayload
   ) {
-    return this.clientUsersService.importExecute(clientId, rows, user);
+    return this.clientUsersService.importExecute(clientId, rows, user, targetBranch);
   }
 
   @Post('export-import-results')

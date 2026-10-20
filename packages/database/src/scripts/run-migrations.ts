@@ -8,6 +8,7 @@ import { AlignClientResourceSnapshotsSchema1700000000004 } from '../migrations/1
 import { AddClientUserLastVerifiedAt1700000000005 } from '../migrations/1700000000005-AddClientUserLastVerifiedAt.js';
 import { ExpandClientUserSnapshotRole1700000000006 } from '../migrations/1700000000006-ExpandClientUserSnapshotRole.js';
 import { AddClientResourceWorkflowColumns1700000000007 } from '../migrations/1700000000007-AddClientResourceWorkflowColumns.js';
+import { AddClientBranchesColumns1700000000008 } from '../migrations/1700000000008-AddClientBranchesColumns.js';
 
 export async function runMigrations(): Promise<void> {
   console.log('[MIGRATION] Initializing DataSource for migrations...');
@@ -27,6 +28,7 @@ export async function runMigrations(): Promise<void> {
     { timestamp: 1700000000005, name: 'AddClientUserLastVerifiedAt1700000000005', instance: new AddClientUserLastVerifiedAt1700000000005() },
     { timestamp: 1700000000006, name: 'ExpandClientUserSnapshotRole1700000000006', instance: new ExpandClientUserSnapshotRole1700000000006() },
     { timestamp: 1700000000007, name: 'AddClientResourceWorkflowColumns1700000000007', instance: new AddClientResourceWorkflowColumns1700000000007() },
+    { timestamp: 1700000000008, name: 'AddClientBranchesColumns1700000000008', instance: new AddClientBranchesColumns1700000000008() },
   ];
 
   try {

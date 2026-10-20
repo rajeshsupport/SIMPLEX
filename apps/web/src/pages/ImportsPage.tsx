@@ -12,6 +12,7 @@ import {
   Server,
   Layers,
   Check,
+  GitBranch,
 } from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { EnvironmentBadge } from '../components/EnvironmentBadge.js';
@@ -29,6 +30,8 @@ export const ImportsPage: React.FC = () => {
   const [customMappings, setCustomMappings] = useState<Record<string, string>>({});
   const [clients, setClients] = useState<ClientWithCredentialInfo[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string>('');
+  const [selectedBranch, setSelectedBranch] = useState<string>('');
+  const [customBranch, setCustomBranch] = useState<string>('');
   const [oneRecordTestMode, setOneRecordTestMode] = useState<boolean>(false);
   const [typedConfirmation, setTypedConfirmation] = useState<string>('');
   const [loading, setLoading] = useState(false);
@@ -45,6 +48,7 @@ export const ImportsPage: React.FC = () => {
         setClients(clientsData || []);
         if (clientsData && clientsData.length > 0) {
           setSelectedClientId(clientsData[0].id);
+          setSelectedBranch(clientsData[0].branchName || (clientsData[0].branches && clientsData[0].branches[0]) || '');
         }
         setJobs(jobsData || []);
       } catch (err) {
@@ -53,6 +57,9 @@ export const ImportsPage: React.FC = () => {
     }
     loadData();
   }, []);
+
+  const selectedClient = clients.find((c) => c.id === selectedClientId);
+  const effectiveBranch = selectedBranch === '__custom__' ? customBranch.trim() : selectedBranch;
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -97,6 +104,9 @@ export const ImportsPage: React.FC = () => {
     const formData = new FormData();
     formData.append('file', selectedFile);
     formData.append('clientId', selectedClientId);
+    if (effectiveBranch) {
+      formData.append('targetBranch', effectiveBranch);
+    }
     formData.append('jobType', jobType);
     formData.append('oneRecordTestMode', String(oneRecordTestMode));
     if (typedConfirmation) {
@@ -162,8 +172,6 @@ export const ImportsPage: React.FC = () => {
       setSelectedJob(await ApiClient.request(`/imports/jobs/${selectedJob.id}`));
     }
   };
-
-  const selectedClient = clients.find((c) => c.id === selectedClientId);
 
   return (
     <div className="space-y-6">
@@ -290,12 +298,18 @@ export const ImportsPage: React.FC = () => {
               </div>
 
               {/* Step 4: Target Client & Production Confirmations */}
-              <div className="pt-4 border-t border-surface-border grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="pt-4 border-t border-surface-border grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">Target HMC Client</label>
                   <select
                     value={selectedClientId}
-                    onChange={(e) => setSelectedClientId(e.target.value)}
+                    onChange={(e) => {
+                      const newId = e.target.value;
+                      setSelectedClientId(newId);
+                      const cl = clients.find((c) => c.id === newId);
+                      setSelectedBranch(cl?.branchName || (cl?.branches && cl.branches[0]) || '');
+                      setCustomBranch('');
+                    }}
                     className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white"
                   >
                     {clients.map((c) => (
@@ -304,6 +318,39 @@ export const ImportsPage: React.FC = () => {
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1">
+                    <GitBranch className="w-3.5 h-3.5 text-emerald-400" />
+                    Target Branch
+                  </label>
+                  <div className="space-y-1.5">
+                    <select
+                      value={selectedBranch}
+                      onChange={(e) => setSelectedBranch(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white focus:border-emerald-500"
+                    >
+                      <option value="">Auto (Default Branch)</option>
+                      {(selectedClient?.branches || []).map((b) => (
+                        <option key={b} value={b}>{b}</option>
+                      ))}
+                      {selectedClient?.branchName && !(selectedClient?.branches || []).includes(selectedClient.branchName) && (
+                        <option value={selectedClient.branchName}>{selectedClient.branchName} (Configured)</option>
+                      )}
+                      <option value="__custom__">+ Custom Branch...</option>
+                    </select>
+                    {selectedBranch === '__custom__' && (
+                      <input
+                        type="text"
+                        value={customBranch}
+                        onChange={(e) => setCustomBranch(e.target.value)}
+                        placeholder="Type branch name..."
+                        className="w-full px-2.5 py-1.5 bg-slate-800 border border-emerald-500 rounded text-xs text-white focus:outline-none"
+                        autoFocus
+                      />
+                    )}
+                  </div>
                 </div>
 
                 <div>

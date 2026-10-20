@@ -28,7 +28,7 @@ export class Client {
   @Column({ type: 'nvarchar', length: 500 })
   baseUrl!: string;
 
-  @Column({ type: 'nvarchar', length: 255, default: '/hmc' })
+  @Column({ type: 'nvarchar', length: 255, default: '' })
   applicationPath!: string;
 
   @Column({ type: 'nvarchar', length: 50, default: 'Development' })
@@ -40,10 +40,10 @@ export class Client {
   @Column({ type: 'nvarchar', length: 255, default: '/login' })
   loginRoute!: string;
 
-  @Column({ type: 'nvarchar', length: 255, default: '/hmc/users' })
+  @Column({ type: 'nvarchar', length: 255, default: '/users' })
   usersRoute!: string;
 
-  @Column({ type: 'nvarchar', length: 255, default: '/hmc/services' })
+  @Column({ type: 'nvarchar', length: 255, default: '/services' })
   servicesRoute!: string;
 
   @Column({ type: 'nvarchar', length: 255, default: '/addUserRole', nullable: true })
@@ -57,6 +57,12 @@ export class Client {
 
   @Column({ type: 'nvarchar', length: 255, default: null, nullable: true })
   resourceDirectoryRoute?: string | null;
+
+  @Column({ type: 'nvarchar', length: 255, default: null, nullable: true })
+  branchName?: string | null;
+
+  @Column({ type: 'nvarchar', length: 'max', nullable: true })
+  branchesJson?: string | null;
 
   @Column({ type: 'nvarchar', length: 50, default: 'ACTIVE' })
   status!: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';

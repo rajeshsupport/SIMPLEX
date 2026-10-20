@@ -25,6 +25,7 @@ import {
   AgentTaskAssignment,
   AutomationRunStepTelemetry,
   resolveTaskModePolicy,
+  MultiTabTargetItem,
 } from '@hmc/shared';
 import { ClientsService } from '../clients/clients.service.js';
 import { ClientDirectoryReconciliationService } from './client-directory-reconciliation.service.js';
@@ -246,7 +247,7 @@ export class AgentsService {
     return { acknowledged: true };
   }
 
-  async dispatchOpenAndLogin(clientId: string, userId: string, agentId?: string): Promise<AutomationRun> {
+  async dispatchOpenAndLogin(clientId: string, userId: string, agentId?: string, targetBranch?: string): Promise<AutomationRun> {
     const client = await this.clientRepo.findOne({
       where: { id: clientId },
       relations: ['credential'],
@@ -287,7 +288,12 @@ export class AgentsService {
       triggeredByUserId: userId,
       runType: 'OPEN_INTERACTIVE_CLIENT_SESSION',
       status: 'PENDING',
-      parametersJson: JSON.stringify({ isHeaded: true, leaveBrowserOpen: true, userId }),
+      parametersJson: JSON.stringify({
+        isHeaded: true,
+        leaveBrowserOpen: true,
+        userId,
+        targetBranch: targetBranch || client.branchName || undefined,
+      }),
     });
 
     const savedRun = await this.runRepo.save(run);
@@ -306,6 +312,136 @@ export class AgentsService {
         runId: savedRun.id,
         targetAgentId: targetAgentId || 'ANY_AVAILABLE',
         onlineAgentsCount: onlineAgents.length,
+        targetBranch: targetBranch || client.branchName || 'DEFAULT',
+      }),
+      correlationId,
+    });
+    await this.auditRepo.save(audit);
+
+    return savedRun;
+  }
+
+  async dispatchMultipleTabs(
+    items: Array<{
+      clientId: string;
+      targetBranch?: string;
+      targetRoute?: string;
+      screenName?: string;
+    }>,
+    userId: string,
+    agentId?: string
+  ): Promise<AutomationRun> {
+    if (!items || items.length < 2) {
+      throw new BadRequestException('INVALID_SELECTION: At least two clients or screens must be selected to open multiple tabs.');
+    }
+
+    // Resolve unique clients
+    const uniqueClientIds = Array.from(new Set(items.map((i) => i.clientId)));
+    const clients = await this.clientRepo.find({
+      where: { id: In(uniqueClientIds) },
+      relations: ['credential'],
+    });
+
+    const clientMap = new Map<string, Client>();
+    for (const c of clients) {
+      clientMap.set(c.id, c);
+    }
+
+    const resolvedTabs: MultiTabTargetItem[] = [];
+    const decryptedCredsMap = new Map<string, { username: string; password?: string }>();
+
+    for (const item of items) {
+      const client = clientMap.get(item.clientId);
+      if (!client) {
+        throw new NotFoundException(`Client ${item.clientId} not found`);
+      }
+
+      if (!client.baseUrl || !client.baseUrl.startsWith('http')) {
+        throw new BadRequestException(`CLIENT_URL_INVALID: Client ${client.clientCode} base URL is not configured or invalid.`);
+      }
+
+      if (!client.credential || !client.credential.isActive) {
+        throw new BadRequestException(`CLIENT_AUTO_LOGIN_FAILED: Saved login credentials unavailable for ${client.clientCode}.`);
+      }
+
+      let creds = decryptedCredsMap.get(client.id);
+      if (!creds) {
+        try {
+          const rawCreds = await this.clientsService.getDecryptedCredentials(client.id);
+          if (!rawCreds || !rawCreds.username) {
+            throw new Error('Empty credentials');
+          }
+          creds = { username: rawCreds.username, password: rawCreds.password };
+          decryptedCredsMap.set(client.id, creds);
+        } catch (err: any) {
+          throw new BadRequestException(`CLIENT_AUTO_LOGIN_FAILED: Credentials could not be decrypted for ${client.clientCode}.`);
+        }
+      }
+
+      resolvedTabs.push({
+        id: `${item.clientId}_${item.screenName || 'screen'}_${crypto.randomUUID().slice(0, 6)}`,
+        clientId: client.id,
+        clientCode: client.clientCode,
+        clientName: client.clientName,
+        baseUrl: client.baseUrl,
+        loginRoute: client.loginRoute,
+        targetRoute: item.targetRoute || '/hmc/dashboard',
+        screenName: item.screenName || 'Dashboard',
+        targetBranch: item.targetBranch || client.branchName || undefined,
+        credentials: creds,
+        status: 'QUEUED',
+      });
+    }
+
+    // Check available online desktop agents
+    const allAgents = await this.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Start the agent.');
+    }
+
+    let targetAgentId = agentId;
+    if (!targetAgentId) {
+      targetAgentId = onlineAgents[0].id;
+    }
+
+    const correlationId = crypto.randomUUID();
+
+    const run = this.runRepo.create({
+      clientId: resolvedTabs[0].clientId,
+      desktopAgentId: targetAgentId || null,
+      triggeredByUserId: userId,
+      runType: 'OPEN_MULTIPLE_TABS_SESSION',
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        isHeaded: true,
+        leaveBrowserOpen: true,
+        userId,
+        tabs: resolvedTabs,
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    // Record Security Audit Log
+    const audit = this.auditRepo.create({
+      action: 'CLIENT_MULTIPLE_TABS_LAUNCH',
+      actorUserId: userId,
+      actorUsername: userId,
+      entityType: 'CLIENT',
+      entityId: resolvedTabs[0].clientId,
+      result: 'SUCCESS',
+      detailsJson: JSON.stringify({
+        tabCount: resolvedTabs.length,
+        clientCount: uniqueClientIds.length,
+        runId: savedRun.id,
+        targetAgentId: targetAgentId || 'ANY_AVAILABLE',
+        onlineAgentsCount: onlineAgents.length,
+        tabs: resolvedTabs.map((t) => ({
+          clientCode: t.clientCode,
+          screen: t.screenName,
+          route: t.targetRoute,
+        })),
       }),
       correlationId,
     });
@@ -356,6 +492,25 @@ export class AgentsService {
 
     run.updatedAt = new Date(); // Refresh active task execution lease
     if (dto.totalDurationMs) run.totalDurationMs = dto.totalDurationMs;
+
+    // Automatic Live Branch Discovery: If agent discovered branches on /loginCheck, persist to client profile
+    if (Array.isArray(dto.resultData?.discoveredBranches) && dto.resultData.discoveredBranches.length > 0) {
+      try {
+        const client = await this.clientRepo.findOne({ where: { id: run.clientId } });
+        if (client) {
+          const currentBranches: string[] = client.branchesJson ? JSON.parse(client.branchesJson) : [];
+          const merged = Array.from(new Set([...currentBranches, ...dto.resultData.discoveredBranches]));
+          client.branchesJson = JSON.stringify(merged);
+          if (!client.branchName && merged.length > 0) {
+            client.branchName = merged[0];
+          }
+          await this.clientRepo.save(client);
+          this.logger.log(`Auto-discovered and saved ${merged.length} branches for client ${client.clientCode}`);
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed to auto-save discovered branches: ${err.message}`);
+      }
+    }
 
     const isCreationWorkflow = run.runType === 'PROCESS_USER_FULL_WORKFLOW' || run.runType === 'CREATE_CLIENT_USER';
     const isRemoteVerificationDone =
@@ -421,25 +576,30 @@ export class AgentsService {
 
       if (dto.errorMessage) run.errorMessage = dto.errorMessage;
       if (dto.resultData !== undefined) {
-        const existingSummary = typeof dto.resultData === 'object' ? { ...dto.resultData } : {};
-        const capturedPass =
-          existingSummary.ephemeralDefaultPassword ||
-          existingSummary.defaultPassword ||
-          existingSummary.temporaryPassword;
-        if (capturedPass && !existingSummary.oneTimeCredentialEventId && isCreationWorkflow) {
-          const operatorId = run.triggeredByUserId || '';
-          const deliveryRes = EphemeralCredentialStore.storeEphemeralCredential({
-            initiatingOperatorId: operatorId,
-            clientId: run.clientId,
-            username: existingSummary.username || '',
-            fullName: existingSummary.fullName,
-            password: capturedPass,
-            user: { sub: operatorId, isSuperAdmin: true } as any,
-          });
-          existingSummary.oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
-          existingSummary.credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
+        const isTerminalTelemetry = ['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'].includes(dto.status);
+        const isCurrentlyTerminal = ['SUCCEEDED', 'COMPLETED', 'FAILED', 'TIMED_OUT', 'CANCELLED'].includes(run.status);
+
+        if (!isCurrentlyTerminal || isTerminalTelemetry) {
+          const existingSummary = typeof dto.resultData === 'object' ? { ...dto.resultData } : {};
+          const capturedPass =
+            existingSummary.ephemeralDefaultPassword ||
+            existingSummary.defaultPassword ||
+            existingSummary.temporaryPassword;
+          if (capturedPass && !existingSummary.oneTimeCredentialEventId && isCreationWorkflow) {
+            const operatorId = run.triggeredByUserId || '';
+            const deliveryRes = EphemeralCredentialStore.storeEphemeralCredential({
+              initiatingOperatorId: operatorId,
+              clientId: run.clientId,
+              username: existingSummary.username || '',
+              fullName: existingSummary.fullName,
+              password: capturedPass,
+              user: { sub: operatorId, isSuperAdmin: true } as any,
+            });
+            existingSummary.oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
+            existingSummary.credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
+          }
+          run.resultSummaryJson = JSON.stringify(existingSummary);
         }
-        run.resultSummaryJson = JSON.stringify(existingSummary);
       }
       if (['SUCCEEDED', 'COMPLETED', 'REMOTE_VERIFICATION_COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REQUIRES_MANUAL_INTERVENTION'].includes(run.status)) {
         run.completedAt = run.completedAt || new Date();
@@ -631,6 +791,7 @@ export class AgentsService {
       clientAppPath: params.clientAppPath || client.applicationPath,
       loginRoute: params.loginRoute || client.loginRoute,
       targetRoute: params.targetRoute || client.usersRoute || '/users',
+      targetBranch: params.targetBranch || client.branchName || undefined,
       workflowVersion: versionConfig,
       payload: params.payload || params,
       executionMode: taskPolicy.executionMode,

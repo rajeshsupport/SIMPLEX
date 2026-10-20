@@ -1544,8 +1544,13 @@ export class ClientResourcesService {
         clientAppPath: client.applicationPath,
         loginRoute,
         credentials,
+        targetBranch: (dto as any).targetBranch || dto.branchName || client.branchName || undefined,
         payload: {
-          row: rowPayload,
+          row: {
+            ...rowPayload,
+            targetBranch: (dto as any).targetBranch || dto.branchName || client.branchName || undefined,
+          },
+          targetBranch: (dto as any).targetBranch || dto.branchName || client.branchName || undefined,
           quickResourceRoute,
           addUsersRoute,
           addUserRoleRoute,
@@ -1823,7 +1828,9 @@ export class ClientResourcesService {
         clientAppPath: client.applicationPath,
         loginRoute: client.loginRoute || '/login',
         credentials,
+        targetBranch: (dto.updatedDto as any)?.targetBranch || (dto as any)?.targetBranch || (snapshot as any)?.targetBranch || client.branchName || undefined,
         payload: {
+          targetBranch: (dto.updatedDto as any)?.targetBranch || (dto as any)?.targetBranch || (snapshot as any)?.targetBranch || client.branchName || undefined,
           row: {
             resourceName: mergedData.resourceName || snapshot?.resourceName,
             isResourceHuman: mergedData.isResourceHuman ?? true,
@@ -1832,6 +1839,7 @@ export class ClientResourcesService {
             username: verifiedUserId || mergedData.username,
             createAssociatedUser: false, // User already exists / created
             skipUserCreation: true,
+            targetBranch: (dto.updatedDto as any)?.targetBranch || (dto as any)?.targetBranch || (snapshot as any)?.targetBranch || client.branchName || undefined,
           },
           quickResourceRoute,
           addUsersRoute,
@@ -2061,7 +2069,7 @@ export class ClientResourcesService {
   /**
    * Headless resource sync or gated discovery notification.
    */
-  async syncClientResources(clientId: string, user: JwtPayload): Promise<any> {
+  async syncClientResources(clientId: string, user: JwtPayload, targetBranch?: string): Promise<any> {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client with ID '${clientId}' not found`);
 
@@ -2092,6 +2100,7 @@ export class ClientResourcesService {
         loginRoute: client.loginRoute || '/login',
         resourceDirectoryRoute,
         credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
         payload: {
           resourceDirectoryRoute,
           quickResourceRoute: client.quickResourceRoute || '/addResourceParentDetails',
@@ -2101,10 +2110,10 @@ export class ClientResourcesService {
 
     const savedRun = await this.runRepo.save(run);
 
-    // Wait for agent completion (up to 90s for multi-category and pagination sync)
+    // Wait for agent completion (up to 180s for multi-category and pagination sync across network)
     const startTime = Date.now();
     let completedRun: AutomationRun | null = null;
-    while (Date.now() - startTime < 90000) {
+    while (Date.now() - startTime < 180000) {
       await new Promise((r) => setTimeout(r, 400));
       const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
       if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {

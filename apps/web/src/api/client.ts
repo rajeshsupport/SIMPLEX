@@ -206,10 +206,10 @@ export const clientResourcesApi = {
     return ApiClient.request<{ data: any[]; total: number; page: number; limit: number }>(`/client-resources?${q.toString()}`);
   },
 
-  syncResources: (clientId: string) =>
+  syncResources: (clientId: string, targetBranch?: string) =>
     ApiClient.request<{ success: boolean; message: string; count?: number }>('/client-resources/sync', {
       method: 'POST',
-      body: JSON.stringify({ clientId }),
+      body: JSON.stringify({ clientId, targetBranch }),
     }),
 
   createResource: (payload: any) =>

@@ -232,6 +232,50 @@ export class InitialSchema1700000000000 implements MigrationInterface {
       END
     `);
 
+    // 11b. Client User Snapshots Table
+    await queryRunner.query(`
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'client_user_snapshots')
+      BEGIN
+        CREATE TABLE client_user_snapshots (
+          id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+          clientId UNIQUEIDENTIFIER NOT NULL,
+          clientCode NVARCHAR(50) NOT NULL,
+          remoteUserId NVARCHAR(100) NULL,
+          username NVARCHAR(100) NOT NULL,
+          firstName NVARCHAR(100) NOT NULL,
+          middleName NVARCHAR(100) NULL,
+          lastName NVARCHAR(100) NOT NULL,
+          fullName NVARCHAR(250) NOT NULL,
+          nickName NVARCHAR(100) NULL,
+          email NVARCHAR(255) NULL,
+          mobileNumber NVARCHAR(50) NULL,
+          nationality NVARCHAR(100) NULL,
+          role NVARCHAR(MAX) NULL,
+          profileRole NVARCHAR(100) NULL,
+          status NVARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+          barcodeNumber NVARCHAR(100) NULL,
+          hasSignature BIT NOT NULL DEFAULT 0,
+          signatureDataUrl NVARCHAR(MAX) NULL,
+          hasStamp BIT NOT NULL DEFAULT 0,
+          stampDataUrl NVARCHAR(MAX) NULL,
+          hasProfileImage BIT NOT NULL DEFAULT 0,
+          profileImageDataUrl NVARCHAR(MAX) NULL,
+          remoteCreatedAt NVARCHAR(100) NULL,
+          remoteUpdatedAt NVARCHAR(100) NULL,
+          isPresentRemotely BIT NOT NULL DEFAULT 1,
+          syncRunId NVARCHAR(100) NULL,
+          lastSyncedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          lastVerifiedAt DATETIME2 NULL,
+          createdAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          updatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          CONSTRAINT FK_client_user_snapshots_client FOREIGN KEY (clientId) REFERENCES clients(id) ON DELETE CASCADE
+        );
+        CREATE UNIQUE INDEX UQ_client_user_snapshots_client_user ON client_user_snapshots (clientId, username);
+        CREATE INDEX IX_client_user_snapshots_clientId ON client_user_snapshots (clientId);
+        CREATE INDEX IX_client_user_snapshots_username ON client_user_snapshots (username);
+      END
+    `);
+
     // 12. Import Job Rows Table
     await queryRunner.query(`
       IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'import_job_rows')

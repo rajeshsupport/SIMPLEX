@@ -230,12 +230,13 @@ export class ClientResourcesController {
   @HttpCode(HttpStatus.OK)
   async syncClientResources(
     @Body('clientId') clientId: string,
+    @Body('targetBranch') targetBranch: string | undefined,
     @CurrentUser() user: JwtPayload
   ) {
     if (!clientId) {
       throw new BadRequestException('Body property "clientId" is required');
     }
-    return this.clientResourcesService.syncClientResources(clientId, user);
+    return this.clientResourcesService.syncClientResources(clientId, user, targetBranch);
   }
 
   @Post('create')

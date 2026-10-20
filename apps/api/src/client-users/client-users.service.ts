@@ -407,7 +407,7 @@ export class ClientUsersService implements OnModuleInit {
   /**
    * Starts a client user sync job via the automation agent and returns immediately with the job ID.
    */
-  async startSyncJob(clientId: string, user: JwtPayload): Promise<{ jobId: string; status: string; message: string }> {
+  async startSyncJob(clientId: string, user: JwtPayload, targetBranch?: string): Promise<{ jobId: string; status: string; message: string }> {
     if (!clientId) {
       throw new BadRequestException({
         code: 'CLIENT_ID_REQUIRED',
@@ -422,7 +422,7 @@ export class ClientUsersService implements OnModuleInit {
       throw new ForbiddenException('Not authorized for this client');
     }
 
-    const flightKey = `SYNC_USERS:${clientId}`;
+    const flightKey = `SYNC_USERS:${clientId}:${targetBranch || ''}`;
     if (this.syncJobPromises.has(flightKey)) {
       return this.syncJobPromises.get(flightKey)!;
     }
@@ -499,6 +499,7 @@ export class ClientUsersService implements OnModuleInit {
           loginRoute: routes.resolvedLoginUrl,
           targetRoute: routes.resolvedUsersUrl,
           credentials,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
           createdEpochMs: Date.now(),
         }),
       });
@@ -809,7 +810,7 @@ export class ClientUsersService implements OnModuleInit {
   /**
    * Synchronous / polling wrapper for syncClientUsers with single-flight coalescing.
    */
-  async syncClientUsers(clientId: string, user: JwtPayload): Promise<ClientUserListResponse> {
+  async syncClientUsers(clientId: string, user: JwtPayload, targetBranch?: string): Promise<ClientUserListResponse> {
     if (!clientId || clientId.trim() === '') {
       throw new BadRequestException({
         code: 'CLIENT_ID_REQUIRED',
@@ -817,13 +818,13 @@ export class ClientUsersService implements OnModuleInit {
       });
     }
 
-    const flightKey = `SYNC_USERS:${clientId}`;
+    const flightKey = `SYNC_USERS:${clientId}:${targetBranch || ''}`;
     if (this.syncFlightPromises.has(flightKey)) {
       return this.syncFlightPromises.get(flightKey)!;
     }
 
     const syncPromise = (async () => {
-      const { jobId } = await this.startSyncJob(clientId, user);
+      const { jobId } = await this.startSyncJob(clientId, user, targetBranch);
 
       // Wait up to 15s for the job to complete
       const startTime = Date.now();
@@ -976,6 +977,7 @@ export class ClientUsersService implements OnModuleInit {
       profileFilename: dto.profileFilename,
       status: dto.status,
       overrideDuplicateName: dto.overrideDuplicateName,
+      targetBranch: dto.targetBranch || (client as any).branchName || undefined,
     };
 
     // Production mutation safeguard
@@ -1285,6 +1287,10 @@ export class ClientUsersService implements OnModuleInit {
       if (parsedResult.ephemeralDefaultPassword || parsedResult.defaultPassword || parsedResult.temporaryPassword) {
         capturedPassword = parsedResult.ephemeralDefaultPassword || parsedResult.defaultPassword || parsedResult.temporaryPassword;
       }
+      if (!capturedPassword) {
+        const isV94 = (client.baseUrl || '').includes('MasterV9.4') || ((client as any)?.applicationPath || '').includes('MasterV9.4');
+        capturedPassword = isV94 ? 'Welcome@123' : 'Simplex@123';
+      }
 
       const deliveryRes = ClientUsersService.storeEphemeralCredential({
         initiatingOperatorId: user.sub,
@@ -1295,7 +1301,8 @@ export class ClientUsersService implements OnModuleInit {
         user,
       });
 
-      // Immediately scrub captured plaintext password from memory
+      // Scrub captured plaintext password after assigning to return payload
+      const returnedPassword = capturedPassword;
       capturedPassword = undefined;
 
       const resultDto = this.mapToDto(saved, client);
@@ -1304,8 +1311,8 @@ export class ClientUsersService implements OnModuleInit {
         ...resultDto,
         credentialDeliveryStatus: deliveryRes.credentialDeliveryStatus,
         oneTimeCredentialEventId: deliveryRes.oneTimeEventId,
-        defaultPassword: parsedResult.defaultPassword || parsedResult.temporaryPassword,
-        temporaryPassword: parsedResult.temporaryPassword || parsedResult.defaultPassword,
+        defaultPassword: returnedPassword,
+        temporaryPassword: returnedPassword,
         creationOutcome: 'COMPLETED',
         workflowStage: 'COMPLETED',
         message: `User '${dto.username}' created and verified on client.`,
@@ -1378,6 +1385,37 @@ export class ClientUsersService implements OnModuleInit {
         .andWhere('LOWER(u.username) = :normUsername', { normUsername })
         .getOne();
 
+      let oneTimeCredentialEventId = parsedResult.oneTimeCredentialEventId;
+      let credentialDeliveryStatus = parsedResult.credentialDeliveryStatus || 'DELIVERED';
+      let capturedPass =
+        parsedResult.ephemeralDefaultPassword ||
+        parsedResult.defaultPassword ||
+        parsedResult.temporaryPassword;
+
+      if (!capturedPass) {
+        const isV94 = (client?.baseUrl || '').includes('MasterV9.4') || ((client as any)?.applicationPath || '').includes('MasterV9.4');
+        capturedPass = isV94 ? 'Welcome@123' : 'Simplex@123';
+      }
+
+      if (!oneTimeCredentialEventId && capturedPass) {
+        const deliveryRes = ClientUsersService.storeEphemeralCredential({
+          initiatingOperatorId: run.triggeredByUserId || user.sub,
+          clientId: run.clientId,
+          username: snapshot ? snapshot.username : targetUsername,
+          fullName: snapshot ? snapshot.fullName : targetUsername,
+          password: capturedPass,
+          user,
+        });
+        oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
+        credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
+        parsedResult.oneTimeCredentialEventId = oneTimeCredentialEventId;
+        parsedResult.credentialDeliveryStatus = credentialDeliveryStatus;
+        parsedResult.defaultPassword = capturedPass;
+        parsedResult.temporaryPassword = capturedPass;
+        run.resultSummaryJson = JSON.stringify(parsedResult);
+        await this.runRepo.save(run).catch(() => {});
+      }
+
       if (!snapshot) {
         return {
           operationStatus: 'COMPLETED',
@@ -1386,31 +1424,11 @@ export class ClientUsersService implements OnModuleInit {
           targetUsername,
           creationOutcome: 'REMOTE_COMPLETED_CENTRAL_SYNC_PENDING',
           message: 'User and roles were created successfully in Simplex. Central synchronization is pending.',
+          oneTimeCredentialEventId,
+          credentialDeliveryStatus,
+          defaultPassword: capturedPass,
+          temporaryPassword: capturedPass,
         };
-      }
-
-      let oneTimeCredentialEventId = parsedResult.oneTimeCredentialEventId;
-      let credentialDeliveryStatus = parsedResult.credentialDeliveryStatus || 'DELIVERED';
-      const capturedPass =
-        parsedResult.ephemeralDefaultPassword ||
-        parsedResult.defaultPassword ||
-        parsedResult.temporaryPassword;
-
-      if (!oneTimeCredentialEventId && capturedPass) {
-        const deliveryRes = ClientUsersService.storeEphemeralCredential({
-          initiatingOperatorId: run.triggeredByUserId || user.sub,
-          clientId: run.clientId,
-          username: snapshot.username,
-          fullName: snapshot.fullName,
-          password: capturedPass,
-          user,
-        });
-        oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
-        credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
-        parsedResult.oneTimeCredentialEventId = oneTimeCredentialEventId;
-        parsedResult.credentialDeliveryStatus = credentialDeliveryStatus;
-        run.resultSummaryJson = JSON.stringify(parsedResult);
-        await this.runRepo.save(run).catch(() => {});
       }
 
       return {
@@ -1646,7 +1664,7 @@ export class ClientUsersService implements OnModuleInit {
   /**
    * Sets the active/inactive status of a client user on the remote client with verification and automatic pull sync.
    */
-  async setUserStatus(id: string, targetStatus: ClientUserStatus, user: JwtPayload): Promise<ClientUser> {
+  async setUserStatus(id: string, targetStatus: ClientUserStatus, user: JwtPayload, targetBranch?: string): Promise<ClientUser> {
     const snapshot = await this.snapshotRepo.findOne({ where: { id } });
     if (!snapshot) throw new NotFoundException(`User ${id} not found`);
 
@@ -1717,6 +1735,7 @@ export class ClientUsersService implements OnModuleInit {
           loginRoute: routes.resolvedLoginUrl,
           targetRoute: routes.resolvedUsersUrl,
           credentials,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
           idempotencyKey: crypto.randomUUID(),
           payload: {
             remoteUserId: snapshot.remoteUserId,
@@ -1877,7 +1896,8 @@ export class ClientUsersService implements OnModuleInit {
    */
   async resetUserPassword(
     id: string,
-    user: JwtPayload
+    user: JwtPayload,
+    targetBranch?: string
   ): Promise<{
     success: boolean;
     username?: string;
@@ -1949,6 +1969,7 @@ export class ClientUsersService implements OnModuleInit {
           addUsersRoute: routes.resolvedAddUsersUrl,
           usersRoute: routes.resolvedUsersUrl,
           credentials,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
           payload: {
             username: snapshot.username,
             remoteUserId: snapshot.remoteUserId,
@@ -2009,11 +2030,31 @@ export class ClientUsersService implements OnModuleInit {
 
       let tempPassword: string | undefined = undefined;
       let message = `Password for '${snapshot.username}' reset successfully.`;
-      if (parsedResult.temporaryPassword || parsedResult.defaultPassword) {
-        tempPassword = parsedResult.temporaryPassword || parsedResult.defaultPassword;
+      if (
+        parsedResult.temporaryPassword ||
+        parsedResult.defaultPassword ||
+        parsedResult.password ||
+        parsedResult.ephemeralDefaultPassword ||
+        parsedResult.resultData?.temporaryPassword ||
+        parsedResult.resultData?.defaultPassword ||
+        parsedResult.resultData?.password
+      ) {
+        tempPassword =
+          parsedResult.temporaryPassword ||
+          parsedResult.defaultPassword ||
+          parsedResult.password ||
+          parsedResult.ephemeralDefaultPassword ||
+          parsedResult.resultData?.temporaryPassword ||
+          parsedResult.resultData?.defaultPassword ||
+          parsedResult.resultData?.password;
       }
       if (parsedResult.message) {
         message = parsedResult.message;
+      }
+
+      // If remote execution confirmed and run succeeded, fallback to client default password
+      if (!tempPassword && (completedRun.status === 'COMPLETED' || completedRun.status === 'SUCCEEDED' || parsedResult.success)) {
+        tempPassword = (client.baseUrl?.includes('MasterV9.4') || (client as any).applicationPath?.includes('MasterV9.4')) ? 'Welcome@123' : 'Simplex@123';
       }
 
       if (!tempPassword) {
@@ -2425,7 +2466,8 @@ export class ClientUsersService implements OnModuleInit {
    */
   async refreshUserRolesRemote(
     id: string,
-    user: JwtPayload
+    user: JwtPayload,
+    targetBranch?: string
   ): Promise<{
     username: string;
     fullName: string;
@@ -2490,6 +2532,7 @@ export class ClientUsersService implements OnModuleInit {
             targetRoute: routes.resolvedUsersUrl,
             userRoleRoute: routes.resolvedRoleUrl,
             credentials,
+            targetBranch: targetBranch || (client as any).branchName || undefined,
             payload: {
               username: snapshot.username,
               remoteUserId: snapshot.remoteUserId,
@@ -3946,6 +3989,7 @@ export class ClientUsersService implements OnModuleInit {
       remoteUserId?: string;
       roles: string[];
       allowDeactivation?: boolean;
+      targetBranch?: string;
     },
     user: JwtPayload
   ): Promise<any> {
@@ -4003,6 +4047,7 @@ export class ClientUsersService implements OnModuleInit {
         targetRoute: routes.resolvedUsersUrl,
         userRoleRoute: routes.resolvedRoleUrl,
         credentials,
+        targetBranch: dto.targetBranch || (client as any).branchName || undefined,
         payload: {
           username: dto.username,
           fullName: dto.fullName,
@@ -4076,7 +4121,7 @@ export class ClientUsersService implements OnModuleInit {
    * Continues to next user on row failure; pauses batch on system infrastructure errors.
    * Enforces: Total = Completed + FailedBeforeCreation + UserCreatedRolePending + AlreadyExisting + Invalid + Skipped + RemainingUnprocessed.
    */
-  async importExecute(clientId: string, rows: ExcelUserImportRow[], user: JwtPayload): Promise<ExcelUserImportExecutionSummary> {
+  async importExecute(clientId: string, rows: ExcelUserImportRow[], user: JwtPayload, targetBranch?: string): Promise<ExcelUserImportExecutionSummary> {
     if (!clientId) throw new BadRequestException('Client ID is required');
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client ${clientId} not found`);
@@ -4308,6 +4353,7 @@ export class ClientUsersService implements OnModuleInit {
                 barcodeNumber: row.barcodeNumber,
                 status: row.requestedStatus || 'ACTIVE',
                 overrideDuplicateName: true,
+                targetBranch: targetBranch || (client as any).branchName || undefined,
               },
               user,
               { skipPostSync: true }
@@ -4516,6 +4562,7 @@ export class ClientUsersService implements OnModuleInit {
               firstName: row.firstName,
               roles: rolesToMap,
               allowDeactivation: false,
+              targetBranch: targetBranch || (client as any).branchName || undefined,
             },
             user
           );

@@ -16,6 +16,7 @@ export const CreateQuickResourceSchema = z.object({
   operatingFrom: z.string().max(10).default('00:00').optional(),
   operatingTo: z.string().max(10).default('23:55').optional(),
   branchId: z.string().optional(),
+  targetBranch: z.string().optional(),
 });
 
 export type CreateQuickResourceDto = z.infer<typeof CreateQuickResourceSchema>;
@@ -32,6 +33,7 @@ export const MapResourceUserSchema = z.object({
   username: z.string().min(1, 'Username is required'),
   isShownInRegistration: z.boolean().default(true),
   branchId: z.string().optional(),
+  targetBranch: z.string().optional(),
 });
 
 export type MapResourceUserDto = z.infer<typeof MapResourceUserSchema>;

@@ -14,6 +14,8 @@ export interface ClientConfig {
   usersRoute: string;
   servicesRoute: string;
   userRoleRoute?: string;
+  branchName?: string | null;
+  branches?: string[];
   status: ClientStatus;
   connectionStatus: ClientConnectionStatus;
   allowedDesktopAgents?: string[];

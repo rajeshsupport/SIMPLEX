@@ -11,13 +11,26 @@ import {
   Search,
   Loader2,
   AlertTriangle,
+  GitBranch,
   ExternalLink,
+  Layers,
+  Clock,
 } from 'lucide-react';
 import { ApiClient } from '../api/client.js';
 import { EnvironmentBadge } from '../components/EnvironmentBadge.js';
 import { Modal } from '../components/Modal.js';
-import { ClientWithCredentialInfo, ClientEnvironment, PERMISSIONS } from '@hmc/shared';
+import { ClientWithCredentialInfo, ClientEnvironment, PERMISSIONS, MultiTabTargetItem, TabItemStatus } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
+
+interface SelectedTabTarget {
+  clientId: string;
+  clientCode: string;
+  clientName: string;
+  baseUrl: string;
+  screenName: string;
+  targetRoute: string;
+  targetBranch?: string;
+}
 
 interface LaunchToast {
   id: string;
@@ -46,12 +59,14 @@ export const ClientsPage: React.FC = () => {
     clientCode: '',
     clientName: '',
     baseUrl: '',
-    applicationPath: '/hmc',
+    applicationPath: '',
     environment: 'Development' as ClientEnvironment,
     applicationVersion: 'v1.0',
     loginRoute: '/login',
-    usersRoute: '/hmc/users',
-    servicesRoute: '/hmc/services',
+    usersRoute: '/users',
+    servicesRoute: '/services',
+    branchName: '',
+    branchesInput: '',
   });
 
   const [credForm, setCredForm] = useState({
@@ -66,6 +81,18 @@ export const ClientsPage: React.FC = () => {
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [isBranchLaunchModalOpen, setIsBranchLaunchModalOpen] = useState(false);
+  const [clientForBranchLaunch, setClientForBranchLaunch] = useState<ClientWithCredentialInfo | null>(null);
+  const [selectedLaunchBranch, setSelectedLaunchBranch] = useState<string>('');
+  const [customLaunchBranch, setCustomLaunchBranch] = useState<string>('');
+
+  // Multiple tabs states
+  const [selectedTargets, setSelectedTargets] = useState<SelectedTabTarget[]>([]);
+  const [isLaunchingMultiTabs, setIsLaunchingMultiTabs] = useState(false);
+  const [multiTabModalOpen, setMultiTabModalOpen] = useState(false);
+  const [multiTabItems, setMultiTabItems] = useState<MultiTabTargetItem[]>([]);
+  const [multiTabSummary, setMultiTabSummary] = useState<string | null>(null);
+  const isLaunchingMultiTabsRef = useRef(false);
 
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const toastDismissTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -96,6 +123,12 @@ export const ClientsPage: React.FC = () => {
     setCreateError(null);
     try {
       const isSimplex = clientForm.baseUrl.toLowerCase().includes('simplex');
+      const parsedBranches = clientForm.branchesInput
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const chosenBranch = clientForm.branchName?.trim() || (parsedBranches.length > 0 ? parsedBranches[0] : null);
+
       const payload = {
         ...clientForm,
         applicationPath: isSimplex ? '' : (clientForm.applicationPath || ''),
@@ -103,7 +136,11 @@ export const ClientsPage: React.FC = () => {
         servicesRoute: isSimplex ? '/services' : (clientForm.servicesRoute || '/services'),
         loginRoute: clientForm.loginRoute || '/login',
         applicationVersion: isSimplex && clientForm.clientCode.includes('9.1') ? 'MasterV9.1' : (clientForm.applicationVersion || 'v1.0'),
+        branchName: chosenBranch,
+        branches: parsedBranches,
       };
+      delete (payload as any).branchesInput;
+
       await ApiClient.request('/clients', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -119,6 +156,8 @@ export const ClientsPage: React.FC = () => {
         loginRoute: '/login',
         usersRoute: '/users',
         servicesRoute: '/services',
+        branchName: '',
+        branchesInput: '',
       });
       await loadClients();
     } catch (err: any) {
@@ -132,9 +171,22 @@ export const ClientsPage: React.FC = () => {
     e.preventDefault();
     if (!selectedClient) return;
     try {
+      const parsedBranches = clientForm.branchesInput
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const chosenBranch = clientForm.branchName?.trim() || (parsedBranches.length > 0 ? parsedBranches[0] : null);
+
+      const payload: any = {
+        ...clientForm,
+        branchName: chosenBranch,
+        branches: parsedBranches,
+      };
+      delete payload.branchesInput;
+
       await ApiClient.request(`/clients/${selectedClient.id}`, {
         method: 'PUT',
-        body: JSON.stringify(clientForm),
+        body: JSON.stringify(payload),
       });
       setIsEditModalOpen(false);
       await loadClients();
@@ -183,10 +235,11 @@ export const ClientsPage: React.FC = () => {
     }
   };
 
-  const handleOpenAndLogin = async (client: ClientWithCredentialInfo) => {
+  const handleOpenAndLogin = async (client: ClientWithCredentialInfo, targetBranch?: string) => {
     if (launchingClientIds[client.id]) return; // Single-flight per client
 
     const displayName = client.clientName || client.clientCode;
+    const branchLabel = targetBranch ? ` [${targetBranch}]` : '';
 
     // Immediate button response (<30ms)
     setLaunchingClientIds((prev) => ({ ...prev, [client.id]: true }));
@@ -200,7 +253,7 @@ export const ClientsPage: React.FC = () => {
       clientCode: client.clientCode,
       clientName: client.clientName,
       status: 'LAUNCHING',
-      message: `Opening ${displayName}…`,
+      message: `Opening ${displayName}${branchLabel}…`,
       client,
     });
 
@@ -215,7 +268,10 @@ export const ClientsPage: React.FC = () => {
     try {
       const res = await ApiClient.request<{ id: string; status: string }>('/agents/dispatch-open-and-login', {
         method: 'POST',
-        body: JSON.stringify({ clientId: client.id }),
+        body: JSON.stringify({
+          clientId: client.id,
+          targetBranch: targetBranch || client.branchName || undefined,
+        }),
       });
 
       // Poll run status non-blockingly (250ms intervals) with 30s bounded timeout
@@ -246,9 +302,10 @@ export const ClientsPage: React.FC = () => {
               clientCode: client.clientCode,
               clientName: client.clientName,
               status: 'SUCCESS',
-              message: `${displayName} opened and ready.`,
+              message: `${displayName}${branchLabel} opened and ready.`,
               client,
             });
+            loadClients(); // Reload clients to immediately show newly auto-discovered branches
             toastDismissTimerRef.current = setTimeout(() => {
               setToast((curr) => (curr?.id === client.id && curr?.status === 'SUCCESS' ? null : curr));
             }, 3000);
@@ -302,6 +359,150 @@ export const ClientsPage: React.FC = () => {
     }
   };
 
+  const toggleScreenSelection = (client: ClientWithCredentialInfo, screenName: string, targetRoute: string) => {
+    setSelectedTargets((prev) => {
+      const exists = prev.some((t) => t.clientId === client.id && t.targetRoute === targetRoute);
+      if (exists) {
+        return prev.filter((t) => !(t.clientId === client.id && t.targetRoute === targetRoute));
+      } else {
+        return [
+          ...prev,
+          {
+            clientId: client.id,
+            clientCode: client.clientCode,
+            clientName: client.clientName || client.clientCode,
+            baseUrl: client.baseUrl,
+            screenName,
+            targetRoute,
+            targetBranch: client.branchName || (client.branches && client.branches[0]) || undefined,
+          },
+        ];
+      }
+    });
+  };
+
+  const toggleClientSelection = (client: ClientWithCredentialInfo) => {
+    setSelectedTargets((prev) => {
+      const hasAny = prev.some((t) => t.clientId === client.id);
+      if (hasAny) {
+        return prev.filter((t) => t.clientId !== client.id);
+      } else {
+        return [
+          ...prev,
+          {
+            clientId: client.id,
+            clientCode: client.clientCode,
+            clientName: client.clientName || client.clientCode,
+            baseUrl: client.baseUrl,
+            screenName: 'Dashboard',
+            targetRoute: '/hmc/dashboard',
+            targetBranch: client.branchName || (client.branches && client.branches[0]) || undefined,
+          },
+        ];
+      }
+    });
+  };
+
+  const handleOpenMultipleTabs = async () => {
+    // Guard against double clicks or insufficient selections (Requirements 11 & 15)
+    if (isLaunchingMultiTabsRef.current || selectedTargets.length < 2) return;
+    isLaunchingMultiTabsRef.current = true;
+    setIsLaunchingMultiTabs(true);
+
+    const initialItems: MultiTabTargetItem[] = selectedTargets.map((target, idx) => ({
+      id: `${target.clientId}_${target.screenName}_${idx}`,
+      clientId: target.clientId,
+      clientCode: target.clientCode,
+      clientName: target.clientName,
+      baseUrl: target.baseUrl,
+      targetRoute: target.targetRoute,
+      screenName: target.screenName,
+      targetBranch: target.targetBranch,
+      status: 'QUEUED',
+    }));
+
+    setMultiTabItems(initialItems);
+    setMultiTabModalOpen(true);
+    setMultiTabSummary('Dispatching single browser-agent task for multi-tab session…');
+
+    let pollTimer: NodeJS.Timeout | null = null;
+    const pollStartTime = Date.now();
+
+    const cleanup = () => {
+      if (pollTimer) clearInterval(pollTimer);
+      isLaunchingMultiTabsRef.current = false;
+      setIsLaunchingMultiTabs(false);
+    };
+
+    try {
+      const res = await ApiClient.request<{ id: string; status: string }>('/agents/dispatch-multiple-tabs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: selectedTargets.map((t) => ({
+            clientId: t.clientId,
+            targetBranch: t.targetBranch,
+            targetRoute: t.targetRoute,
+            screenName: t.screenName,
+          })),
+        }),
+      });
+
+      setMultiTabSummary('Google Chrome Guest session launched. Initializing tabs…');
+
+      pollTimer = setInterval(async () => {
+        try {
+          if (Date.now() - pollStartTime > 45000) {
+            cleanup();
+            setMultiTabSummary('Operation timed out waiting for tabs.');
+            setMultiTabItems((curr) =>
+              curr.map((item) =>
+                item.status === 'READY' || item.status === 'NAVIGATION_SUCCESS'
+                  ? item
+                  : { ...item, status: 'FAILED', errorMessage: 'CLIENT_PORTAL_TIMEOUT: Timed out waiting for tab' }
+              )
+            );
+            return;
+          }
+
+          const run = await ApiClient.request<any>(`/agents/runs/${res.id}`);
+          if (!run) return;
+
+          let updatedTabsList: MultiTabTargetItem[] | null = null;
+          if (run.resultSummaryJson) {
+            try {
+              const resData = JSON.parse(run.resultSummaryJson);
+              if (resData.tabs && Array.isArray(resData.tabs)) {
+                updatedTabsList = resData.tabs;
+              } else if (resData.currentTabUpdate) {
+                setMultiTabItems((curr) =>
+                  curr.map((item, idx) => (idx === resData.currentIndex ? { ...item, ...resData.currentTabUpdate } : item))
+                );
+              }
+            } catch {}
+          }
+
+          if (updatedTabsList) {
+            setMultiTabItems(updatedTabsList);
+          }
+
+          if (run.status === 'COMPLETED' || run.status === 'SUCCEEDED') {
+            cleanup();
+            setMultiTabSummary('All selected client screens opened successfully in separate tabs.');
+            loadClients();
+          } else if (run.status === 'FAILED') {
+            cleanup();
+            setMultiTabSummary(run.errorMessage || 'One or more tabs failed to open.');
+          }
+        } catch {}
+      }, 300);
+    } catch (err: any) {
+      cleanup();
+      const errMsg = err.message || 'Failed to dispatch multiple tabs session.';
+      setMultiTabSummary(`Launch failed: ${errMsg}`);
+      setMultiTabItems((curr) => curr.map((it) => ({ ...it, status: 'FAILED', errorMessage: errMsg })));
+    }
+  };
+
   const filteredClients = clients.filter((c) => {
     const term = search.trim().toLowerCase();
 
@@ -328,15 +529,50 @@ export const ClientsPage: React.FC = () => {
           </p>
         </div>
 
-        {hasPermission(PERMISSIONS.CLIENT_CREATE) && (
-          <button
-            onClick={() => setIsCreateModalOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-sm font-medium shadow-lg shadow-sky-950/50 transition-all self-start"
-          >
-            <Plus className="w-4 h-4" />
-            Register Client Instance
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {hasPermission(PERMISSIONS.CLIENT_OPEN) && (
+            <button
+              onClick={handleOpenMultipleTabs}
+              disabled={selectedTargets.length < 2 || isLaunchingMultiTabs}
+              title={
+                selectedTargets.length < 2
+                  ? 'Select at least 2 items to open multiple tabs'
+                  : 'Open selected clients and screens in separate browser tabs'
+              }
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold shadow-lg transition-all ${
+                selectedTargets.length >= 2 && !isLaunchingMultiTabs
+                  ? 'bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white shadow-sky-950/50 cursor-pointer'
+                  : 'bg-slate-800 text-slate-500 border border-slate-700/50 cursor-not-allowed'
+              }`}
+            >
+              {isLaunchingMultiTabs ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Layers className="w-4 h-4" />
+              )}
+              Open Multiple Tabs
+              {selectedTargets.length > 0 && (
+                <span
+                  className={`px-1.5 py-0.5 text-[11px] rounded-full font-bold ${
+                    selectedTargets.length >= 2 ? 'bg-sky-400 text-slate-950' : 'bg-slate-700 text-slate-400'
+                  }`}
+                >
+                  {selectedTargets.length}
+                </span>
+              )}
+            </button>
+          )}
+
+          {hasPermission(PERMISSIONS.CLIENT_CREATE) && (
+            <button
+              onClick={() => setIsCreateModalOpen(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-sm font-medium shadow-lg shadow-sky-950/50 transition-all self-start"
+            >
+              <Plus className="w-4 h-4" />
+              Register Client Instance
+            </button>
+          )}
+        </div>
       </div>
 
       {actionMessage && (
@@ -389,6 +625,36 @@ export const ClientsPage: React.FC = () => {
         <table className="w-full text-left text-sm text-slate-300">
           <thead className="bg-slate-950 text-slate-400 text-xs uppercase font-semibold border-b border-slate-800">
             <tr>
+              <th className="w-10 px-4 py-3.5 text-center">
+                <input
+                  type="checkbox"
+                  checked={
+                    filteredClients.length > 0 &&
+                    filteredClients.every((c) => selectedTargets.some((t) => t.clientId === c.id))
+                  }
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      const newTargets: SelectedTabTarget[] = [];
+                      filteredClients.forEach((c) => {
+                        newTargets.push({
+                          clientId: c.id,
+                          clientCode: c.clientCode,
+                          clientName: c.clientName || c.clientCode,
+                          baseUrl: c.baseUrl,
+                          screenName: 'Dashboard',
+                          targetRoute: '/hmc/dashboard',
+                          targetBranch: c.branchName || (c.branches && c.branches[0]) || undefined,
+                        });
+                      });
+                      setSelectedTargets(newTargets);
+                    } else {
+                      setSelectedTargets([]);
+                    }
+                  }}
+                  className="rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500 cursor-pointer"
+                  title="Select all clients"
+                />
+              </th>
               <th className="px-6 py-3.5">Client Code</th>
               <th className="px-6 py-3.5">Name / Endpoint</th>
               <th className="px-6 py-3.5">Environment</th>
@@ -399,14 +665,14 @@ export const ClientsPage: React.FC = () => {
           <tbody className="divide-y divide-slate-800">
             {loading ? (
               <tr>
-                <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
+                <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
                   <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-sky-500" />
                   Loading client endpoints...
                 </td>
               </tr>
             ) : filteredClients.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-6 py-12 text-center text-slate-500">
+                <td colSpan={6} className="px-6 py-12 text-center text-slate-500">
                   <div className="max-w-sm mx-auto space-y-2">
                     <p className="text-slate-400 font-medium">No matching clients found.</p>
                     <p className="text-xs text-slate-600">
@@ -430,10 +696,63 @@ export const ClientsPage: React.FC = () => {
 
                 return (
                   <tr key={client.id} className="hover:bg-slate-850/50 transition-colors">
-                    <td className="px-6 py-4 font-mono font-medium text-white">{client.clientCode}</td>
+                    <td className="w-10 px-4 py-4 text-center">
+                      <input
+                        type="checkbox"
+                        checked={selectedTargets.some((t) => t.clientId === client.id)}
+                        onChange={() => toggleClientSelection(client)}
+                        className="rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500 cursor-pointer"
+                        title={`Select ${client.clientCode}`}
+                      />
+                    </td>
+                    <td className="px-6 py-4 font-mono font-medium text-white">
+                      <div>{client.clientCode}</div>
+                      <div className="flex items-center gap-1 mt-1.5 flex-wrap font-sans">
+                        {[
+                          { name: 'Dashboard', route: '/hmc/dashboard' },
+                          { name: 'Users', route: client.usersRoute || '/users' },
+                          { name: 'Services', route: client.servicesRoute || '/services' },
+                        ].map((screen) => {
+                          const isScreenSelected = selectedTargets.some(
+                            (t) => t.clientId === client.id && t.targetRoute === screen.route
+                          );
+                          return (
+                            <button
+                              key={screen.name}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleScreenSelection(client, screen.name, screen.route);
+                              }}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                isScreenSelected
+                                  ? 'bg-sky-500/20 text-sky-300 border border-sky-500/60 shadow-sm shadow-sky-500/20'
+                                  : 'bg-slate-800/80 text-slate-400 border border-slate-700/60 hover:text-slate-200 hover:border-slate-600'
+                              }`}
+                              title={`Toggle ${screen.name} tab for ${client.clientCode}`}
+                            >
+                              {isScreenSelected ? '✓ ' : '+ '}{screen.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </td>
                     <td className="px-6 py-4">
                       <div className="font-medium text-slate-200">{client.clientName}</div>
                       <div className="text-xs text-slate-500 font-mono mt-0.5">{client.baseUrl}</div>
+                      {client.branchName && (
+                        <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-sky-500/10 text-sky-400 border border-sky-500/20 flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-sky-400"></span>
+                            Branch: {client.branchName}
+                          </span>
+                          {client.branches && client.branches.length > 1 && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] text-slate-400 bg-slate-800 border border-slate-700">
+                              {client.branches.length} branches
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="px-6 py-4">
                       <EnvironmentBadge environment={client.environment} />
@@ -492,6 +811,8 @@ export const ClientsPage: React.FC = () => {
                                 loginRoute: client.loginRoute,
                                 usersRoute: client.usersRoute,
                                 servicesRoute: client.servicesRoute,
+                                branchName: client.branchName || '',
+                                branchesInput: (client.branches || []).join(', '),
                               });
                               setIsEditModalOpen(true);
                             }}
@@ -502,25 +823,53 @@ export const ClientsPage: React.FC = () => {
                           </button>
                         )}
 
-                        {/* Open & Login Button */}
+                        {/* Open & Login Button Group */}
                         {hasPermission(PERMISSIONS.CLIENT_OPEN) && (
-                          <button
-                            onClick={() => handleOpenAndLogin(client)}
-                            disabled={isLaunchingThisClient}
-                            title="Launch auto-login browser session"
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold shadow transition-all disabled:opacity-50 ${
-                              isProd
-                                ? 'bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 shadow-red-950/50'
-                                : 'bg-sky-600 hover:bg-sky-500 text-white shadow-sky-950/50'
-                            }`}
-                          >
-                            {isLaunchingThisClient ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Play className="w-3.5 h-3.5 fill-current" />
-                            )}
-                            Open & Login
-                          </button>
+                          <div className="inline-flex items-center rounded-lg shadow">
+                            <button
+                              onClick={() => {
+                                if ((client.branches && client.branches.length > 0) || client.branchName) {
+                                  setClientForBranchLaunch(client);
+                                  setSelectedLaunchBranch(client.branchName || (client.branches && client.branches[0]) || '');
+                                  setCustomLaunchBranch('');
+                                  setIsBranchLaunchModalOpen(true);
+                                } else {
+                                  handleOpenAndLogin(client);
+                                }
+                              }}
+                              disabled={isLaunchingThisClient}
+                              title="Launch auto-login browser session"
+                              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-l-lg text-xs font-semibold shadow transition-all disabled:opacity-50 ${
+                                isProd
+                                  ? 'bg-red-900 hover:bg-red-800 text-red-100 border border-red-700 shadow-red-950/50'
+                                  : 'bg-sky-600 hover:bg-sky-500 text-white shadow-sky-950/50'
+                              }`}
+                            >
+                              {isLaunchingThisClient ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                              )}
+                              Open & Login
+                            </button>
+                            <button
+                              onClick={() => {
+                                setClientForBranchLaunch(client);
+                                setSelectedLaunchBranch(client.branchName || (client.branches && client.branches[0]) || '');
+                                setCustomLaunchBranch('');
+                                setIsBranchLaunchModalOpen(true);
+                              }}
+                              disabled={isLaunchingThisClient}
+                              title="Select branch to launch"
+                              className={`px-2 py-1.5 rounded-r-lg border-l border-white/20 text-xs font-semibold transition-all disabled:opacity-50 hover:bg-white/10 ${
+                                isProd
+                                  ? 'bg-red-900 text-red-100'
+                                  : 'bg-sky-600 text-white'
+                              }`}
+                            >
+                              <GitBranch className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         )}
                       </div>
                     </td>
@@ -648,6 +997,62 @@ export const ClientsPage: React.FC = () => {
             </select>
           </div>
 
+          {/* Multi-Branch Configuration */}
+          <div className="pt-3 border-t border-slate-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-slate-300">
+                Multi-Branch Configuration (Optional)
+              </label>
+              <span className="text-[10px] text-slate-500 font-mono">1 URL with multiple branches</span>
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                Available Branches (comma or newline separated)
+              </label>
+              <textarea
+                rows={2}
+                placeholder="e.g. TESTING GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC, Testing_GAELAN..."
+                value={clientForm.branchesInput}
+                onChange={(e) => setClientForm({ ...clientForm, branchesInput: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                Default Target Branch Dropdown
+              </label>
+              {clientForm.branchesInput.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).length > 0 ? (
+                <select
+                  value={clientForm.branchName}
+                  onChange={(e) => setClientForm({ ...clientForm, branchName: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-sky-500"
+                >
+                  <option value="">Auto-select 1st branch on login screen</option>
+                  {clientForm.branchesInput
+                    .split(/[\n,]+/)
+                    .map((s) => s.trim())
+                    .filter(Boolean)
+                    .map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  placeholder="e.g. TESTING GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC"
+                  value={clientForm.branchName}
+                  onChange={(e) => setClientForm({ ...clientForm, branchName: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-sky-500"
+                />
+              )}
+              <p className="text-[10px] text-slate-500 mt-1">
+                Leave empty for direct login (Option 1). Choose/enter branch name if portal prompts 'CHOOSE BRANCH' (Option 2).
+              </p>
+            </div>
+          </div>
+
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
             <button
               type="button"
@@ -714,6 +1119,62 @@ export const ClientsPage: React.FC = () => {
               <option value="Staging">Staging (Pre-production staging)</option>
               <option value="Production">Production (Live Clinical Systems - RESTRICTED)</option>
             </select>
+          </div>
+
+          {/* Multi-Branch Configuration */}
+          <div className="pt-3 border-t border-slate-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-slate-300">
+                Multi-Branch Configuration (Optional)
+              </label>
+              <span className="text-[10px] text-slate-500 font-mono">1 URL with multiple branches</span>
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                Available Branches (comma or newline separated)
+              </label>
+              <textarea
+                rows={2}
+                placeholder="e.g. TESTING GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC, Testing_GAELAN..."
+                value={clientForm.branchesInput}
+                onChange={(e) => setClientForm({ ...clientForm, branchesInput: e.target.value })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                Default Target Branch Dropdown
+              </label>
+              {clientForm.branchesInput.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).length > 0 ? (
+                <select
+                  value={clientForm.branchName}
+                  onChange={(e) => setClientForm({ ...clientForm, branchName: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-sky-500"
+                >
+                  <option value="">Auto-select 1st branch on login screen</option>
+                  {clientForm.branchesInput
+                    .split(/[\n,]+/)
+                    .map((s) => s.trim())
+                    .filter(Boolean)
+                    .map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  placeholder="e.g. TESTING GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC"
+                  value={clientForm.branchName}
+                  onChange={(e) => setClientForm({ ...clientForm, branchName: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-sky-500"
+                />
+              )}
+              <p className="text-[10px] text-slate-500 mt-1">
+                Leave empty for direct login (Option 1). Choose/enter branch name if portal prompts 'CHOOSE BRANCH' (Option 2).
+              </p>
+            </div>
           </div>
 
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
@@ -789,6 +1250,191 @@ export const ClientsPage: React.FC = () => {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Modal: Quick Branch Selection on Login */}
+      <Modal
+        isOpen={isBranchLaunchModalOpen}
+        onClose={() => setIsBranchLaunchModalOpen(false)}
+        title={`Select Branch — ${clientForBranchLaunch?.clientName || clientForBranchLaunch?.clientCode}`}
+      >
+        <div className="space-y-4">
+          <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+            <div className="text-xs text-slate-400 font-medium">Target Portal</div>
+            <div className="text-xs text-slate-500 font-mono mt-0.5">{clientForBranchLaunch?.baseUrl}</div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              Choose Target Branch to Log In:
+            </label>
+            {clientForBranchLaunch?.branches && clientForBranchLaunch.branches.length > 0 ? (
+              <select
+                value={selectedLaunchBranch}
+                onChange={(e) => setSelectedLaunchBranch(e.target.value)}
+                className="w-full px-3 py-2.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-sky-500 font-medium"
+              >
+                {clientForBranchLaunch.branches.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="p-3 bg-sky-500/10 border border-sky-500/20 rounded-lg text-xs text-sky-300">
+                ℹ No branches saved yet. The agent will automatically scan the portal on login and discover all branches!
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">
+              Or specify / type another branch name:
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. TESTING GAELAN MEDICAL CARE ONE DAY SURGERY HOSPITAL LLC"
+              value={customLaunchBranch}
+              onChange={(e) => setCustomLaunchBranch(e.target.value)}
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
+            />
+          </div>
+
+          <div className="flex items-center justify-between pt-4 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => {
+                if (clientForBranchLaunch) {
+                  setIsBranchLaunchModalOpen(false);
+                  handleOpenAndLogin(clientForBranchLaunch);
+                }
+              }}
+              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
+            >
+              Auto-Select 1st Branch
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (clientForBranchLaunch) {
+                  const branchToUse = customLaunchBranch.trim() || selectedLaunchBranch || clientForBranchLaunch.branchName || undefined;
+                  setIsBranchLaunchModalOpen(false);
+                  handleOpenAndLogin(clientForBranchLaunch, branchToUse);
+                }
+              }}
+              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-sky-950/50 flex items-center gap-1.5"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Launch & Login to Branch
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: Multiple Tabs Session Progress */}
+      <Modal
+        isOpen={multiTabModalOpen}
+        onClose={() => {
+          if (!isLaunchingMultiTabs) {
+            setMultiTabModalOpen(false);
+          }
+        }}
+        title={`Multiple Tab Browser Launch ${isLaunchingMultiTabs ? '(Running)' : '(Completed)'}`}
+      >
+        <div className="space-y-4">
+          <div className="flex items-center justify-between p-3 bg-slate-950 border border-slate-800 rounded-lg">
+            <div className="flex items-center gap-2 text-xs text-slate-300">
+              {isLaunchingMultiTabs ? (
+                <Loader2 className="w-4 h-4 text-sky-400 animate-spin shrink-0" />
+              ) : multiTabItems.every((t) => t.status === 'READY' || t.status === 'NAVIGATION_SUCCESS') ? (
+                <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : multiTabItems.some((t) => t.status === 'READY' || t.status === 'NAVIGATION_SUCCESS') ? (
+                <CheckCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              ) : (
+                <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+              )}
+              <span className="font-medium">{multiTabSummary}</span>
+            </div>
+            <span className="text-[11px] font-mono text-slate-400 shrink-0">
+              {multiTabItems.filter((t) => t.status === 'READY' || t.status === 'NAVIGATION_SUCCESS').length} / {multiTabItems.length} tabs ready
+            </span>
+          </div>
+
+          <div className="divide-y divide-slate-800/80 border border-slate-800 rounded-lg overflow-hidden max-h-96 overflow-y-auto">
+            {multiTabItems.map((item, idx) => (
+              <div key={item.id || idx} className="p-3 bg-slate-900 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-semibold text-white">{item.clientCode}</span>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-800 text-slate-300 border border-slate-700">
+                      {item.screenName || 'Screen'}
+                    </span>
+                    {item.targetBranch && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-950/60 text-sky-400 border border-sky-800/50">
+                        {item.targetBranch}
+                      </span>
+                    )}
+                  </div>
+
+                  <div>
+                    {item.status === 'QUEUED' && (
+                      <span className="flex items-center gap-1 text-[11px] text-slate-400">
+                        <Clock className="w-3.5 h-3.5" /> QUEUED
+                      </span>
+                    )}
+                    {item.status === 'OPENING' && (
+                      <span className="flex items-center gap-1 text-[11px] text-sky-400 font-medium">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> OPENING
+                      </span>
+                    )}
+                    {item.status === 'LOGIN_SUCCESS' && (
+                      <span className="flex items-center gap-1 text-[11px] text-emerald-400 font-medium">
+                        <CheckCircle className="w-3.5 h-3.5" /> LOGIN_SUCCESS
+                      </span>
+                    )}
+                    {item.status === 'BRANCH_SELECTED' && (
+                      <span className="flex items-center gap-1 text-[11px] text-sky-400 font-semibold">
+                        <CheckCircle className="w-3.5 h-3.5" /> BRANCH_SELECTED
+                      </span>
+                    )}
+                    {(item.status === 'READY' || item.status === 'NAVIGATION_SUCCESS') && (
+                      <span className="flex items-center gap-1 text-[11px] text-emerald-300 font-bold">
+                        <CheckCircle className="w-3.5 h-3.5" /> READY
+                      </span>
+                    )}
+                    {item.status === 'FAILED' && (
+                      <span className="flex items-center gap-1 text-[11px] text-rose-400 font-bold">
+                        <XCircle className="w-3.5 h-3.5" /> FAILED
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {item.status === 'FAILED' && item.errorMessage && (
+                  <div className="text-xs text-rose-400 bg-rose-950/40 p-2 rounded border border-rose-800/40 font-mono">
+                    ✕ {item.errorMessage}
+                  </div>
+                )}
+
+                {item.finalUrl && (
+                  <div className="text-[11px] text-slate-400 truncate font-mono">
+                    → {item.finalUrl}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+            <button
+              type="button"
+              onClick={() => setMultiTabModalOpen(false)}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
       </Modal>
     </div>
   );
