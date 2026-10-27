@@ -283,7 +283,17 @@ export class ResourceManagementExecutor {
           if (tds.length === 0) return false;
           const cls = (r.className || '').toLowerCase();
           const id = (r.id || '').toLowerCase();
-          if (cls.includes('filter') || cls.includes('search') || cls.includes('header') || id.includes('filter') || id.includes('search')) return false;
+          const clsClean = cls.replace(/\bhidesearch\b/g, '').trim();
+          if (
+            clsClean.includes('filter-row') ||
+            clsClean.includes('tablesorter-filter') ||
+            clsClean.includes('search-row') ||
+            (clsClean.includes('header') && !clsClean.includes('row')) ||
+            id.includes('filter') ||
+            id === 'search'
+          ) {
+            return false;
+          }
           const txt = (r.textContent || '').trim().toLowerCase();
           if (!txt || txt.includes('maximum characters') || txt.includes('no records found') || txt.includes('no data available')) return false;
           return true;
@@ -436,13 +446,31 @@ export class ResourceManagementExecutor {
 
     // Helper: Scrape all pagination pages for currently active table view
     const scrapeAllPagesForCurrentView = async (expectedHumanState?: boolean): Promise<{ resources: any[]; departments: string[]; resourceTypes: string[] }> => {
-      // Expand pagination length if available
+      // Expand pagination length to 500 and unhide all rows in DOM
+      await page.evaluate(() => {
+        try {
+          const sel = document.getElementById('tablePagination_rowsPerPage') as HTMLSelectElement | null;
+          if (sel) {
+            sel.value = '500';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          if ((window as any).jQuery) {
+            (window as any).jQuery('#tablePagination_rowsPerPage').val('500').trigger('change');
+            (window as any).jQuery('#tablaDatos tbody tr').show().removeClass('hideSearch');
+          } else {
+            document.querySelectorAll('#tablaDatos tbody tr').forEach((tr: any) => {
+              tr.classList.remove('hideSearch');
+              if (tr.style.display === 'none') tr.style.display = '';
+            });
+          }
+        } catch {}
+      });
       const lengthSelect = page.locator('#tablePagination_rowsPerPage, select[name*="length"], .dataTables_length select').first();
       if (await lengthSelect.isVisible().catch(() => false)) {
         await lengthSelect.selectOption({ value: '500' }).catch(() => lengthSelect.selectOption({ value: '200' })).catch(() => lengthSelect.selectOption({ value: '100' })).catch(() => lengthSelect.selectOption({ value: '-1' })).catch(() => {});
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(600);
       }
-      await page.waitForTimeout(1200);
+      await page.waitForTimeout(800);
 
       const allRows: any[] = [];
       const depts = new Set<string>();
@@ -462,19 +490,36 @@ export class ResourceManagementExecutor {
         result.departments.forEach((d: string) => depts.add(d));
         result.resourceTypes.forEach((t: string) => types.add(t));
 
-        // Next page
+        // Next page check: check if tablePagination has more pages
+        const hasMorePages = await page.evaluate(() => {
+          const currEl = document.getElementById('tablePagination_currPage') as HTMLInputElement | null;
+          const totalEl = document.getElementById('tablePagination_totalPages');
+          if (currEl && totalEl) {
+            const curr = parseInt(currEl.value || '1', 10);
+            const total = parseInt(totalEl.textContent || '1', 10);
+            return curr < total;
+          }
+          return false;
+        });
+
+        // Next page locator including jQuery tablePagination next page icon
         const nextButton = page.locator(
-          '#tablaDatos_next:not(.disabled) a, .paginate_button.next:not(.disabled), a:has-text("Next"):not(.disabled), button:has-text("Next"):not([disabled]), li.next:not(.disabled) a, #nextArrowJS'
+          '#tablePagination_nextPage, #tablePagination_nextPage i, .fa-forward, #tablaDatos_next:not(.disabled) a, .paginate_button.next:not(.disabled), a:has-text("Next"):not(.disabled), button:has-text("Next"):not([disabled]), li.next:not(.disabled) a, #nextArrowJS'
         ).first();
 
-        const canNext = (await nextButton.count().catch(() => 0)) > 0 && (await nextButton.isVisible().catch(() => false));
+        const canNext = hasMorePages || ((await nextButton.count().catch(() => 0)) > 0 && (await nextButton.isVisible().catch(() => false)));
         if (!canNext) break;
 
         const cls = (await nextButton.getAttribute('class').catch(() => '')) || '';
         const ariaDis = (await nextButton.getAttribute('aria-disabled').catch(() => '')) || '';
         if (cls.includes('disabled') || ariaDis === 'true') break;
 
-        await nextButton.click().catch(() => {});
+        await nextButton.click().catch(async () => {
+          await page.evaluate(() => {
+            const btn = document.getElementById('tablePagination_nextPage');
+            if (btn) btn.click();
+          });
+        });
         await page.waitForTimeout(1000);
         pageNum++;
       }
@@ -551,9 +596,30 @@ export class ResourceManagementExecutor {
       }
 
       if (clicked) {
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(2500);
         await page.waitForLoadState('domcontentloaded').catch(() => {});
-        await page.waitForSelector('#tablaDatos tbody tr, table tbody tr', { timeout: 10000 }).catch(() => {});
+        await page.waitForSelector('#tablaDatos tbody tr, #resource_body tr, table tbody tr', { timeout: 10000 }).catch(() => {});
+
+        // Unhide rows and expand rowsPerPage for phase 2
+        await page.evaluate(() => {
+          try {
+            const sel = document.getElementById('tablePagination_rowsPerPage') as HTMLSelectElement | null;
+            if (sel) {
+              sel.value = '500';
+              sel.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            if ((window as any).jQuery) {
+              (window as any).jQuery('#tablePagination_rowsPerPage').val('500').trigger('change');
+              (window as any).jQuery('#tablaDatos tbody tr').show().removeClass('hideSearch');
+            } else {
+              document.querySelectorAll('#tablaDatos tbody tr').forEach((tr: any) => {
+                tr.classList.remove('hideSearch');
+                if (tr.style.display === 'none') tr.style.display = '';
+              });
+            }
+          } catch {}
+        });
+        await page.waitForTimeout(1000);
 
         const oppositeState = initialToggleState !== undefined ? !initialToggleState : undefined;
         const phase2 = await scrapeAllPagesForCurrentView(oppositeState);

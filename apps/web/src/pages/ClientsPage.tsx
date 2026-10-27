@@ -19,7 +19,7 @@ import {
 import { ApiClient } from '../api/client.js';
 import { EnvironmentBadge } from '../components/EnvironmentBadge.js';
 import { Modal } from '../components/Modal.js';
-import { ClientWithCredentialInfo, ClientEnvironment, PERMISSIONS, MultiTabTargetItem, TabItemStatus } from '@hmc/shared';
+import { ClientWithCredentialInfo, ClientEnvironment, PERMISSIONS, MultiTabTargetItem, TabItemStatus, resolveClientRoute } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
 
 interface SelectedTabTarget {
@@ -232,6 +232,44 @@ export const ClientsPage: React.FC = () => {
     } finally {
       setTestingId(null);
       setTimeout(() => setActionMessage(null), 5000);
+    }
+  };
+
+  const getClientTargetUrl = (client: ClientWithCredentialInfo, route?: string) => {
+    try {
+      return resolveClientRoute({
+        baseUrl: client.baseUrl,
+        applicationPath: client.applicationPath,
+        route: route || '/',
+      });
+    } catch {
+      return client.baseUrl;
+    }
+  };
+
+  const handleOpenClientWindow = (client: ClientWithCredentialInfo, route?: string) => {
+    const url = getClientTargetUrl(client, route);
+    if (!url || !url.startsWith('http')) {
+      setActionMessage(`Invalid client URL for ${client.clientCode}: '${url}'`);
+      return;
+    }
+
+    // Centered window dimensions to ensure modern browsers open a dedicated NEW WINDOW instead of a tab
+    const screenW = typeof window !== 'undefined' && window.screen?.availWidth ? window.screen.availWidth : 1440;
+    const screenH = typeof window !== 'undefined' && window.screen?.availHeight ? window.screen.availHeight : 900;
+    const winW = Math.min(screenW - 60, 1400);
+    const winH = Math.min(screenH - 60, 880);
+    const left = Math.max(0, Math.round((screenW - winW) / 2));
+    const top = Math.max(0, Math.round((screenH - winH) / 2));
+
+    const windowFeatures = `popup=yes,width=${winW},height=${winH},left=${left},top=${top},resizable=yes,scrollbars=yes,status=yes,toolbar=yes,menubar=no,location=yes`;
+    const windowName = `simplex_client_win_${client.clientCode.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+
+    const newWin = window.open(url, windowName, windowFeatures);
+    if (newWin) {
+      newWin.focus();
+    } else {
+      setActionMessage(`Pop-up was blocked. Please allow pop-ups for ${window.location.origin} to open client portals in a new window.`);
     }
   };
 
@@ -706,7 +744,15 @@ export const ClientsPage: React.FC = () => {
                       />
                     </td>
                     <td className="px-6 py-4 font-mono font-medium text-white">
-                      <div>{client.clientCode}</div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenClientWindow(client)}
+                        className="group flex items-center gap-1.5 text-left font-semibold text-white hover:text-sky-400 transition-colors cursor-pointer"
+                        title={`Open ${client.clientCode} in a new window (${getClientTargetUrl(client)})`}
+                      >
+                        <span className="group-hover:underline underline-offset-2">{client.clientCode}</span>
+                        <ExternalLink className="w-3.5 h-3.5 text-slate-500 group-hover:text-sky-400 transition-colors shrink-0" />
+                      </button>
                       <div className="flex items-center gap-1 mt-1.5 flex-wrap font-sans">
                         {[
                           { name: 'Dashboard', route: '/hmc/dashboard' },
@@ -717,29 +763,57 @@ export const ClientsPage: React.FC = () => {
                             (t) => t.clientId === client.id && t.targetRoute === screen.route
                           );
                           return (
-                            <button
-                              key={screen.name}
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleScreenSelection(client, screen.name, screen.route);
-                              }}
-                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-all ${
-                                isScreenSelected
-                                  ? 'bg-sky-500/20 text-sky-300 border border-sky-500/60 shadow-sm shadow-sky-500/20'
-                                  : 'bg-slate-800/80 text-slate-400 border border-slate-700/60 hover:text-slate-200 hover:border-slate-600'
-                              }`}
-                              title={`Toggle ${screen.name} tab for ${client.clientCode}`}
-                            >
-                              {isScreenSelected ? '✓ ' : '+ '}{screen.name}
-                            </button>
+                            <div key={screen.name} className="inline-flex items-center">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenClientWindow(client, screen.route);
+                                }}
+                                className={`px-1.5 py-0.5 rounded-l text-[10px] font-medium transition-all border border-r-0 ${
+                                  isScreenSelected
+                                    ? 'bg-sky-500/20 text-sky-300 border-sky-500/60 shadow-sm shadow-sky-500/20'
+                                    : 'bg-slate-800/80 text-slate-400 border-slate-700/60 hover:text-sky-300 hover:border-sky-500/50'
+                                }`}
+                                title={`Open ${screen.name} for ${client.clientCode} in a new window (${getClientTargetUrl(client, screen.route)})`}
+                              >
+                                {screen.name}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleScreenSelection(client, screen.name, screen.route);
+                                }}
+                                className={`px-1 py-0.5 rounded-r text-[10px] font-medium transition-all border ${
+                                  isScreenSelected
+                                    ? 'bg-sky-500/30 text-sky-200 border-sky-500/60'
+                                    : 'bg-slate-800/80 text-slate-500 border-slate-700/60 hover:text-slate-200 hover:border-slate-600'
+                                }`}
+                                title={`Toggle ${screen.name} tab for multiple tabs batch launch`}
+                              >
+                                {isScreenSelected ? '✓' : '+'}
+                              </button>
+                            </div>
                           );
                         })}
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="font-medium text-slate-200">{client.clientName}</div>
-                      <div className="text-xs text-slate-500 font-mono mt-0.5">{client.baseUrl}</div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenClientWindow(client)}
+                        className="group text-left cursor-pointer w-full"
+                        title={`Open ${client.clientName} in a new window (${getClientTargetUrl(client)})`}
+                      >
+                        <div className="font-medium text-slate-200 group-hover:text-sky-400 transition-colors flex items-center gap-1.5">
+                          <span className="group-hover:underline underline-offset-2">{client.clientName}</span>
+                          <ExternalLink className="w-3 h-3 text-slate-500 group-hover:text-sky-400 transition-colors shrink-0" />
+                        </div>
+                        <div className="text-xs text-slate-500 font-mono mt-0.5 group-hover:text-slate-400 transition-colors flex items-center gap-1">
+                          <span>{client.baseUrl}</span>
+                        </div>
+                      </button>
                       {client.branchName && (
                         <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                           <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-sky-500/10 text-sky-400 border border-sky-500/20 flex items-center gap-1">
@@ -822,6 +896,16 @@ export const ClientsPage: React.FC = () => {
                             <Edit2 className="w-4 h-4" />
                           </button>
                         )}
+
+                        {/* Open in New Window Quick Action */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenClientWindow(client)}
+                          title={`Open ${client.clientCode} in a new window (${getClientTargetUrl(client)})`}
+                          className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </button>
 
                         {/* Open & Login Button Group */}
                         {hasPermission(PERMISSIONS.CLIENT_OPEN) && (
@@ -1313,20 +1397,36 @@ export const ClientsPage: React.FC = () => {
             >
               Auto-Select 1st Branch
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (clientForBranchLaunch) {
-                  const branchToUse = customLaunchBranch.trim() || selectedLaunchBranch || clientForBranchLaunch.branchName || undefined;
-                  setIsBranchLaunchModalOpen(false);
-                  handleOpenAndLogin(clientForBranchLaunch, branchToUse);
-                }
-              }}
-              className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-sky-950/50 flex items-center gap-1.5"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              Launch & Login to Branch
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (clientForBranchLaunch) {
+                    handleOpenClientWindow(clientForBranchLaunch);
+                    setIsBranchLaunchModalOpen(false);
+                  }
+                }}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 border border-sky-500/30 rounded-lg text-xs font-medium flex items-center gap-1.5"
+                title="Directly open the client portal in a new browser window"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                Open in Browser
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (clientForBranchLaunch) {
+                    const branchToUse = customLaunchBranch.trim() || selectedLaunchBranch || clientForBranchLaunch.branchName || undefined;
+                    setIsBranchLaunchModalOpen(false);
+                    handleOpenAndLogin(clientForBranchLaunch, branchToUse);
+                  }
+                }}
+                className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-sky-950/50 flex items-center gap-1.5"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                Launch & Login to Branch
+              </button>
+            </div>
           </div>
         </div>
       </Modal>

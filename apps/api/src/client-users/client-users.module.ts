@@ -3,6 +3,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   Client,
   ClientUserSnapshot,
+  ClientBillCounterMapping,
+  ClientStockLocationMapping,
+  ClientDocumentTypeMapping,
+  ClientFormAssemblyMapping,
   ClientCredential,
   AutomationRun,
   AuditLog,
@@ -16,6 +20,10 @@ import { AgentsModule } from '../agents/agents.module.js';
     TypeOrmModule.forFeature([
       Client,
       ClientUserSnapshot,
+      ClientBillCounterMapping,
+      ClientStockLocationMapping,
+      ClientDocumentTypeMapping,
+      ClientFormAssemblyMapping,
       ClientCredential,
       AutomationRun,
       AuditLog,

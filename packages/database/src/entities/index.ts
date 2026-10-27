@@ -22,3 +22,7 @@ export * from './client-resource-department.entity.js';
 export * from './client-resource-service.entity.js';
 export * from './resource-import-job.entity.js';
 export * from './resource-import-row.entity.js';
+export * from './client-bill-counter-mapping.entity.js';
+export * from './client-stock-location-mapping.entity.js';
+export * from './client-document-type-mapping.entity.js';
+export * from './client-form-assembly-mapping.entity.js';

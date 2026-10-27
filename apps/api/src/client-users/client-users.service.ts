@@ -19,6 +19,10 @@ import * as XLSX from 'xlsx';
 import {
   Client,
   ClientUserSnapshot,
+  ClientBillCounterMapping,
+  ClientStockLocationMapping,
+  ClientDocumentTypeMapping,
+  ClientFormAssemblyMapping,
   AutomationRun,
   AuditLog,
   ClientCredential,
@@ -38,6 +42,15 @@ import {
   JwtPayload,
   resolveClientRoute,
   resolveClientRoleUrl,
+  resolveClientBillCounterUserUrl,
+  resolveClientBillCounterListUrl,
+  resolveClientStockLocationUserUrl,
+  resolveClientStockLocationListUrl,
+  resolveClientDocumentTypeListUrl,
+  resolveClientDocumentTypeEditUrl,
+  resolveClientEmrPanelUrl,
+  ClientFormAssemblyItem,
+  ClientDocumentTypeItem,
   normalizeClientBaseUrl,
   ClientCreateFormMetadata,
   UserImportAction,
@@ -86,6 +99,14 @@ export class ClientUsersService implements OnModuleInit {
   constructor(
     @InjectRepository(ClientUserSnapshot)
     private snapshotRepo: Repository<ClientUserSnapshot>,
+    @InjectRepository(ClientBillCounterMapping)
+    private billCounterRepo: Repository<ClientBillCounterMapping>,
+    @InjectRepository(ClientStockLocationMapping)
+    private stockLocationRepo: Repository<ClientStockLocationMapping>,
+    @InjectRepository(ClientDocumentTypeMapping)
+    private docTypeMappingRepo: Repository<ClientDocumentTypeMapping>,
+    @InjectRepository(ClientFormAssemblyMapping)
+    private formAssemblyRepo: Repository<ClientFormAssemblyMapping>,
     @InjectRepository(Client)
     private clientRepo: Repository<Client>,
     @InjectRepository(ClientCredential)
@@ -118,6 +139,146 @@ export class ClientUsersService implements OnModuleInit {
         BEGIN
           ALTER TABLE [client_user_snapshots] ADD [isPresentRemotely] BIT NOT NULL DEFAULT 1;
         END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'isBillCounterMapped'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [isBillCounterMapped] BIT NOT NULL DEFAULT 0;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'billCounterName'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [billCounterName] NVARCHAR(150) NULL;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.objects 
+          WHERE object_id = OBJECT_ID(N'[client_bill_counter_mappings]') AND type in (N'U')
+        )
+        BEGIN
+          CREATE TABLE [client_bill_counter_mappings] (
+            [id] UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+            [clientId] UNIQUEIDENTIFIER NOT NULL,
+            [billCounterName] NVARCHAR(150) NOT NULL,
+            [userName] NVARCHAR(250) NOT NULL,
+            [normalizedUserName] NVARCHAR(250) NULL,
+            [role] NVARCHAR(150) NULL,
+            [status] NVARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+            [lastSyncedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+            [createdAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+            [updatedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+          );
+          CREATE INDEX [IX_client_bill_counter_mappings_client_user] ON [client_bill_counter_mappings] ([clientId], [userName]);
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'isStockLocationMapped'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [isStockLocationMapped] BIT NOT NULL DEFAULT 0;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'stockLocationNames'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [stockLocationNames] NVARCHAR(MAX) NULL;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'stockLocationCount'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [stockLocationCount] INT NOT NULL DEFAULT 0;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.objects 
+          WHERE object_id = OBJECT_ID(N'[client_stock_location_mappings]') AND type in (N'U')
+        )
+        BEGIN
+          CREATE TABLE [client_stock_location_mappings] (
+            [id] UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+            [clientId] UNIQUEIDENTIFIER NOT NULL,
+            [stockLocationName] NVARCHAR(250) NOT NULL,
+            [stockLocationId] NVARCHAR(50) NULL,
+            [userName] NVARCHAR(250) NOT NULL,
+            [loginUsername] NVARCHAR(100) NULL,
+            [normalizedUserName] NVARCHAR(250) NULL,
+            [status] NVARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+            [lastSyncedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+            [createdAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+            [updatedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+          );
+          CREATE INDEX [IX_client_stock_location_mappings_client_user] ON [client_stock_location_mappings] ([clientId], [userName]);
+          CREATE INDEX [IX_client_stock_location_mappings_client_username] ON [client_stock_location_mappings] ([clientId], [loginUsername]);
+          CREATE INDEX [IX_client_stock_location_mappings_client_loc] ON [client_stock_location_mappings] ([clientId], [stockLocationName]);
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'isFormAssemblyMapped'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [isFormAssemblyMapped] BIT NOT NULL DEFAULT 0;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'formAssemblyNames'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [formAssemblyNames] NVARCHAR(MAX) NULL;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.columns 
+          WHERE object_id = OBJECT_ID(N'[client_user_snapshots]') 
+          AND name = 'formAssemblyCount'
+        )
+        BEGIN
+          ALTER TABLE [client_user_snapshots] ADD [formAssemblyCount] INT NOT NULL DEFAULT 0;
+        END
+
+        IF NOT EXISTS (
+          SELECT * FROM sys.objects 
+          WHERE object_id = OBJECT_ID(N'[client_form_assembly_mappings]') AND type in (N'U')
+        )
+        BEGIN
+          CREATE TABLE [client_form_assembly_mappings] (
+            [id] UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+            [clientId] UNIQUEIDENTIFIER NOT NULL,
+            [formId] NVARCHAR(50) NOT NULL,
+            [formName] NVARCHAR(250) NOT NULL,
+            [groupName] NVARCHAR(100) NULL,
+            [userName] NVARCHAR(250) NOT NULL,
+            [loginUsername] NVARCHAR(100) NULL,
+            [normalizedUserName] NVARCHAR(250) NULL,
+            [isDefault] BIT NOT NULL DEFAULT 0,
+            [status] NVARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+            [lastSyncedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+            [createdAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+            [updatedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+          );
+          CREATE INDEX [IX_client_form_assembly_mappings_client_form] ON [client_form_assembly_mappings] ([clientId], [formId]);
+          CREATE INDEX [IX_client_form_assembly_mappings_client_user] ON [client_form_assembly_mappings] ([clientId], [userName]);
+          CREATE INDEX [IX_client_form_assembly_mappings_client_username] ON [client_form_assembly_mappings] ([clientId], [loginUsername]);
+        END
       `);
       this.logger.log('ClientUserSnapshot database schema columns verified.');
     } catch (err: any) {
@@ -134,6 +295,8 @@ export class ClientUsersService implements OnModuleInit {
     resolvedUsersUrl: string;
     resolvedAddUsersUrl: string;
     resolvedRoleUrl: string;
+    resolvedStockLocationListUrl?: string;
+    resolvedAddStockLocationUrl?: string;
   } {
     let origin = client.baseUrl;
     try {
@@ -169,12 +332,29 @@ export class ClientUsersService implements OnModuleInit {
       userRoleRoute: client.userRoleRoute,
     });
 
+    let resolvedStockLocationListUrl = '';
+    let resolvedAddStockLocationUrl = '';
+    try {
+      if (client.baseUrl && client.baseUrl.trim()) {
+        resolvedStockLocationListUrl = resolveClientStockLocationListUrl({
+          baseUrl: client.baseUrl,
+          applicationPath: client.applicationPath,
+        });
+        resolvedAddStockLocationUrl = resolveClientStockLocationUserUrl({
+          baseUrl: client.baseUrl,
+          applicationPath: client.applicationPath,
+        });
+      }
+    } catch {}
+
     return {
       origin,
       resolvedLoginUrl,
       resolvedUsersUrl,
       resolvedAddUsersUrl,
       resolvedRoleUrl,
+      resolvedStockLocationListUrl,
+      resolvedAddStockLocationUrl,
     };
   }
 
@@ -378,21 +558,21 @@ export class ClientUsersService implements OnModuleInit {
     const now = Date.now();
     for (const run of staleRuns) {
       const elapsedMs = this.getRunElapsedMs(run);
-      const isClaimTimeout = run.status === 'QUEUED' && elapsedMs >= 3000;
-      const isTotalTimeout = elapsedMs >= 30000;
+      const isClaimTimeout = run.status === 'QUEUED' && elapsedMs >= 15000;
+      const isTotalTimeout = elapsedMs >= 180000;
       const isAgentOffline =
         run.desktopAgent &&
         (!run.desktopAgent.lastHeartbeatAt ||
-          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 5000);
+          now - new Date(run.desktopAgent.lastHeartbeatAt).getTime() > 45000);
 
       if (isTotalTimeout) {
         run.status = 'TIMED_OUT';
-        run.errorMessage = 'Sync timed out after 30 seconds. Previous cached data is still available.';
+        run.errorMessage = 'Sync timed out after 180 seconds. Previous cached data is still available.';
         run.completedAt = new Date();
         await this.runRepo.save(run);
       } else if (isClaimTimeout) {
         run.status = 'TIMED_OUT';
-        run.errorMessage = 'Sync job was not claimed by automation agent within 3 seconds.';
+        run.errorMessage = 'Sync job was not claimed by automation agent within 15 seconds.';
         run.completedAt = new Date();
         await this.runRepo.save(run);
       } else if (isAgentOffline) {
@@ -485,7 +665,7 @@ export class ClientUsersService implements OnModuleInit {
       const correlationId = crypto.randomUUID();
       const now = new Date();
 
-      const run = this.runRepo.create({
+      const run: AutomationRun = this.runRepo.create({
         clientId: client.id,
         desktopAgentId: onlineAgents[0].id,
         triggeredByUserId: user.sub,
@@ -556,9 +736,9 @@ export class ClientUsersService implements OnModuleInit {
 
     // Enforce bounded execution timeouts
     if (!isTerminal) {
-      if (elapsedMs >= 90000) {
+      if (elapsedMs >= 180000) {
         run.status = 'TIMED_OUT';
-        run.errorMessage = 'Sync timed out after 90 seconds. Previous cached data is still available.';
+        run.errorMessage = 'Sync timed out after 180 seconds. Previous cached data is still available.';
         run.completedAt = new Date();
         await this.runRepo.save(run);
       } else if (run.status === 'QUEUED' && elapsedMs >= 15000) {
@@ -788,6 +968,28 @@ export class ClientUsersService implements OnModuleInit {
         code: 'CLIENT_USER_COUNT_MISMATCH',
         message: `Synchronization count mismatch: remoteUniqueUsers (${remoteUniqueUsers}), centralRowsPersisted (${centralRowsPersisted}), centralRowsDisplayed (${centralRowsDisplayed}) do not match.`,
       });
+    }
+
+    
+
+    // Authoritatively synchronize bill counter status for newly synced/updated snapshots
+    try {
+      await this.syncBillCounterStatusForClient(clientId);
+    } catch (syncBcErr: any) {
+      this.logger.warn(`Failed to auto-sync bill counter status after user sync: ${syncBcErr.message}`);
+    }
+
+    // Authoritatively synchronize stock location status for newly synced/updated snapshots
+    try {
+      await this.syncStockLocationStatusForClient(clientId);
+    } catch (syncSlErr: any) {
+      this.logger.warn(`Failed to auto-sync stock location status after user sync: ${syncSlErr.message}`);
+    }
+
+    try {
+      await this.syncFormAssemblyStatusForClient(clientId);
+    } catch (syncFaErr: any) {
+      this.logger.warn(`Failed to auto-sync form assembly status after user sync: ${syncFaErr.message}`);
     }
 
     return {
@@ -2119,6 +2321,936 @@ export class ClientUsersService implements OnModuleInit {
    * strict additive semantics (existing roles remain checked and protected),
    * exact role matching, and snapshot updates upon verification.
    */
+
+  /**
+   * Retrieves cached Bill Counter mappings for a client from client_bill_counter_mappings.
+   */
+  async getBillCounterMappings(clientId: string): Promise<{
+    mappings: ClientBillCounterMapping[];
+    count: number;
+    lastSyncedAt: string | null;
+  }> {
+    const mappings = await this.billCounterRepo.find({
+      where: { clientId },
+      order: { userName: 'ASC' },
+    });
+    const lastSyncedAt = mappings.length > 0 && mappings[0].lastSyncedAt ? mappings[0].lastSyncedAt.toISOString() : null;
+    return { mappings, count: mappings.length, lastSyncedAt };
+  }
+
+  /**
+   * Retrieves cached Stock Location mappings for a client from client_stock_location_mappings.
+   */
+  async getStockLocationMappings(clientId: string): Promise<{
+    mappings: ClientStockLocationMapping[];
+    count: number;
+    lastSyncedAt: string | null;
+  }> {
+    const mappings = await this.stockLocationRepo.find({
+      where: { clientId },
+      order: { userName: 'ASC' },
+    });
+    const lastSyncedAt = mappings.length > 0 && mappings[0].lastSyncedAt ? mappings[0].lastSyncedAt.toISOString() : null;
+    return { mappings, count: mappings.length, lastSyncedAt };
+  }
+
+  /**
+   * Authoritatively matches all ClientUserSnapshots for a given client against
+   * the client's Stock Location mappings and updates isStockLocationMapped / stockLocationNames / stockLocationCount.
+   */
+  async syncStockLocationStatusForClient(clientId: string): Promise<{ matchedCount: number; totalCount: number }> {
+    const mappings = await this.stockLocationRepo.find({ where: { clientId } });
+    const snapshots = await this.snapshotRepo.find({ where: { clientId } });
+
+    const normalize = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const stripHonorifics = (s: string) => s.replace(/^(dr|mr|mrs|ms|prof)\.?\s+/i, '').trim();
+
+    // Map of normalized user identifier -> Set of active stock location names
+    const userLocations = new Map<string, Set<string>>();
+
+    for (const m of mappings) {
+      if (m.status !== 'ACTIVE') continue;
+      const raw = normalize(m.userName);
+      const stripped = stripHonorifics(raw);
+      const un = normalize(m.username);
+
+      const keys = [raw, stripped, un].filter(Boolean);
+      for (const k of keys) {
+        if (!userLocations.has(k)) {
+          userLocations.set(k, new Set<string>());
+        }
+        userLocations.get(k)!.add(m.stockLocationName);
+      }
+    }
+
+    let matchedCount = 0;
+    for (const snap of snapshots) {
+      const fn = normalize(snap.fullName);
+      const fnStripped = stripHonorifics(fn);
+      const un = normalize(snap.username);
+
+      let foundLocations: string[] = [];
+      if (un && userLocations.has(un)) {
+        foundLocations = Array.from(userLocations.get(un)!);
+      } else if (fn && userLocations.has(fn)) {
+        foundLocations = Array.from(userLocations.get(fn)!);
+      } else if (fnStripped && userLocations.has(fnStripped)) {
+        foundLocations = Array.from(userLocations.get(fnStripped)!);
+      } else {
+        // Token and substring matching
+        for (const [key, locSet] of userLocations.entries()) {
+          if (fnStripped && fnStripped.length >= 4 && (key.includes(fnStripped) || fnStripped.includes(key))) {
+            foundLocations = Array.from(locSet);
+            break;
+          }
+          if (un && un.length >= 4 && (key.includes(un) || un.includes(key))) {
+            foundLocations = Array.from(locSet);
+            break;
+          }
+        }
+      }
+
+      if (foundLocations.length > 0) {
+        snap.isStockLocationMapped = true;
+        snap.stockLocationNames = foundLocations.join(', ');
+        snap.stockLocationCount = foundLocations.length;
+        matchedCount++;
+      } else {
+        snap.isStockLocationMapped = false;
+        snap.stockLocationNames = null;
+        snap.stockLocationCount = 0;
+      }
+      await this.snapshotRepo.save(snap);
+    }
+
+    return { matchedCount, totalCount: snapshots.length };
+  }
+
+  /**
+   * Dispatches remote inspection of /StocklocationUsers via Desktop Agent,
+   * parses table rows, stores mappings in client_stock_location_mappings, and updates snapshot status.
+   */
+  async fetchStockLocationMappingsRemote(
+    clientId: string,
+    user: JwtPayload,
+    targetBranch?: string
+  ): Promise<{ success: boolean; count: number; matchedUsersCount: number; message: string }> {
+    const client = await this.clientRepo.findOne({
+      where: { id: clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const stockLocationListUrl = resolveClientStockLocationListUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'FETCH_STOCK_LOCATION_MAPPINGS' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'FETCH_STOCK_LOCATION_MAPPINGS',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: stockLocationListUrl,
+        stockLocationListUrl,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        payload: {
+          stockLocationListUrl,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    // Wait for agent completion (up to 75s)
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 75000) {
+      await new Promise((r) => setTimeout(r, 400));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status as string)) {
+      const err = completedRun?.errorMessage || 'Agent sync timed out after 75 seconds.';
+      throw new BadRequestException(`Stock Location sync failed: ${err}`);
+    }
+
+    // Parse mappings from result
+    let mappings: Array<{ userName: string; stockLocationName: string; status: string; isActive: boolean }> = [];
+    try {
+      const parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
+      mappings = parsed.mappings || [];
+    } catch {}
+
+    // Persist into client_stock_location_mappings
+    await this.stockLocationRepo.delete({ clientId: client.id });
+
+    const entities: ClientStockLocationMapping[] = mappings.map((m) =>
+      this.stockLocationRepo.create({
+        clientId: client.id,
+        stockLocationName: m.stockLocationName,
+        userName: m.userName,
+        username: (m as any).username || undefined,
+        normalizedUserName: m.userName.toLowerCase().trim(),
+        status: m.isActive ? 'ACTIVE' : 'INACTIVE',
+        lastSyncedAt: new Date(),
+      })
+    );
+
+    if (entities.length > 0) {
+      await this.stockLocationRepo.save(entities, { chunk: 100 });
+    }
+
+    // Reconcile status on all client user snapshots
+    const { matchedCount } = await this.syncStockLocationStatusForClient(client.id);
+
+    return {
+      success: true,
+      count: mappings.length,
+      matchedUsersCount: matchedCount,
+      message: `Successfully synchronized ${mappings.length} remote Stock Location mappings (${matchedCount} users mapped).`,
+    };
+  }
+
+  /**
+   * Automates mapping one or multiple stock locations to a specific user via Desktop Agent.
+   */
+  async mapStockLocationUserRemote(
+    userId: string,
+    user: JwtPayload,
+    payload?: { targetBranch?: string; stockLocationNames?: string[]; stockLocationIds?: string[] }
+  ): Promise<{
+    success: boolean;
+    alreadyExists?: boolean;
+    username?: string;
+    mappedLocations?: string[];
+    message: string;
+  }> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id: userId } });
+    if (!snapshot) throw new NotFoundException('User snapshot not found');
+
+    const client = await this.clientRepo.findOne({
+      where: { id: snapshot.clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const addStockLocationUrl = resolveClientStockLocationUserUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+    const stockLocationListUrl = resolveClientStockLocationListUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const targetBranch = payload?.targetBranch || (client as any).branchName || undefined;
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'MAP_STOCK_LOCATION_USER' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'MAP_STOCK_LOCATION_USER',
+        userId: user.sub,
+        username: snapshot.username,
+        remoteUserId: snapshot.remoteUserId,
+        fullName: snapshot.fullName,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: addStockLocationUrl,
+        addStockLocationUrl,
+        stockLocationListUrl,
+        stockLocationNames: payload?.stockLocationNames,
+        stockLocationIds: payload?.stockLocationIds,
+        credentials,
+        targetBranch,
+        payload: {
+          username: snapshot.username,
+          remoteUserId: snapshot.remoteUserId,
+          fullName: snapshot.fullName,
+          addStockLocationUrl,
+          stockLocationListUrl,
+          stockLocationNames: payload?.stockLocationNames,
+          stockLocationIds: payload?.stockLocationIds,
+          targetRoute: addStockLocationUrl,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    // Wait for completion (up to 75s)
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 75000) {
+      await new Promise((r) => setTimeout(r, 400));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status as string)) {
+      const err = completedRun?.errorMessage || 'Agent Stock Location mapping timed out after 75s.';
+      throw new BadRequestException(`Stock Location mapping failed: ${err}`);
+    }
+
+    let resultData: any = {};
+    try {
+      resultData = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    // Update user snapshot in database
+    const mappedLocations = resultData.mappedLocations || payload?.stockLocationNames || ['Default Location'];
+    snapshot.isStockLocationMapped = true;
+    snapshot.stockLocationNames = mappedLocations.join(', ');
+    snapshot.stockLocationCount = mappedLocations.length;
+    await this.snapshotRepo.save(snapshot);
+
+    // Upsert into client_stock_location_mappings
+    for (const loc of mappedLocations) {
+      const existing = await this.stockLocationRepo.findOne({
+        where: { clientId: client.id, userName: snapshot.fullName, stockLocationName: loc },
+      });
+      if (!existing) {
+        await this.stockLocationRepo.save(
+          this.stockLocationRepo.create({
+            clientId: client.id,
+            userName: snapshot.fullName,
+            username: snapshot.username,
+            normalizedUserName: snapshot.fullName.toLowerCase().trim(),
+            stockLocationName: loc,
+            status: 'ACTIVE',
+            lastSyncedAt: new Date(),
+          })
+        );
+      }
+    }
+
+    return {
+      success: true,
+      username: snapshot.username,
+      mappedLocations,
+      message: resultData.message || `Successfully mapped user '${snapshot.username}' to stock location(s): ${mappedLocations.join(', ')}.`,
+    };
+  }
+
+  /**
+   * Launches an authenticated visible browser session to AddStocklocationUser with the target user pre-selected.
+   */
+  async openStockLocationSessionRemote(
+    userId: string,
+    user: JwtPayload,
+    targetBranch?: string
+  ): Promise<AutomationRun> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id: userId } });
+    if (!snapshot) throw new NotFoundException('User snapshot not found');
+
+    const client = await this.clientRepo.findOne({
+      where: { id: snapshot.clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const addStockLocationUrl = resolveClientStockLocationUserUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'OPEN_STOCK_LOCATION_SESSION' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        isHeaded: true,
+        leaveBrowserOpen: true,
+        taskType: 'OPEN_STOCK_LOCATION_SESSION',
+        userId: user.sub,
+        username: snapshot.username,
+        remoteUserId: snapshot.remoteUserId,
+        fullName: snapshot.fullName,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: addStockLocationUrl,
+        addStockLocationUrl,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        payload: {
+          username: snapshot.username,
+          fullName: snapshot.fullName,
+          addStockLocationUrl,
+          targetRoute: addStockLocationUrl,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    return await this.runRepo.save(run);
+  }
+
+  /**
+   * Dynamically resolves Stock Location URLs for the given client based on its configured base URL and application path.
+   * Never hardcodes any specific client version or staging host.
+   */
+  async getStockLocationUrls(clientId: string): Promise<{
+    clientId: string;
+    clientCode: string;
+    clientName: string;
+    baseUrl: string;
+    applicationPath?: string;
+    stockLocationListUrl: string;
+    addStockLocationUrl: string;
+  }> {
+    if (!clientId || clientId.trim() === '') {
+      throw new BadRequestException({
+        code: 'CLIENT_ID_REQUIRED',
+        message: 'Client ID is required to resolve Stock Location URLs.',
+      });
+    }
+
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    if (!client) {
+      throw new NotFoundException({
+        code: 'CLIENT_NOT_FOUND',
+        message: `Client with ID '${clientId}' was not found.`,
+      });
+    }
+
+    if (!client.baseUrl || !client.baseUrl.trim()) {
+      throw new BadRequestException({
+        code: 'MISSING_CLIENT_URL',
+        message: `Client '${client.clientCode || client.clientName || clientId}' does not have a configured Application Base URL.`,
+      });
+    }
+
+    try {
+      const stockLocationListUrl = resolveClientStockLocationListUrl({
+        baseUrl: client.baseUrl,
+        applicationPath: client.applicationPath,
+      });
+
+      const addStockLocationUrl = resolveClientStockLocationUserUrl({
+        baseUrl: client.baseUrl,
+        applicationPath: client.applicationPath,
+      });
+
+      return {
+        clientId: client.id,
+        clientCode: client.clientCode,
+        clientName: client.clientName,
+        baseUrl: client.baseUrl,
+        applicationPath: client.applicationPath,
+        stockLocationListUrl,
+        addStockLocationUrl,
+      };
+    } catch (err: any) {
+      throw new BadRequestException({
+        code: 'INVALID_CLIENT_URL',
+        message: err.message || 'Failed to resolve Stock Location URLs for client.',
+      });
+    }
+  }
+
+  /**
+   * Authoritatively matches all ClientUserSnapshots for a given client against
+   * the client's Bill Counter mappings and updates isBillCounterMapped / billCounterName.
+   */
+  async syncBillCounterStatusForClient(clientId: string): Promise<{ matchedCount: number; totalCount: number }> {
+    const mappings = await this.billCounterRepo.find({ where: { clientId } });
+    const snapshots = await this.snapshotRepo.find({ where: { clientId } });
+
+    const normalize = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const stripHonorifics = (s: string) => s.replace(/^(dr|mr|mrs|ms|prof)\.?\s+/i, '').trim();
+
+    const normMap = mappings.map((m) => {
+      const raw = normalize(m.userName);
+      const stripped = stripHonorifics(raw);
+      const parenMatch = (m.userName || '').match(/\(([^)]+)\)/);
+      const parenUser = parenMatch ? normalize(parenMatch[1]) : '';
+      return {
+        mapping: m,
+        normUser: raw,
+        strippedUser: stripped,
+        parenUser,
+        counter: m.billCounterName,
+      };
+    });
+
+    let matchedCount = 0;
+    for (const snap of snapshots) {
+      const fn = normalize(snap.fullName);
+      const fnStripped = stripHonorifics(fn);
+      const un = normalize(snap.username);
+
+      const match = normMap.find((item) => {
+        // 1. Exact matches
+        if (fn && (item.normUser === fn || item.strippedUser === fnStripped)) return true;
+        if (un && (item.normUser === un || item.strippedUser === un || item.parenUser === un)) return true;
+
+        // 2. Substring matches with safe length
+        if (fn && fn.length >= 4 && (item.normUser.includes(fn) || fn.includes(item.normUser))) return true;
+        if (fnStripped && fnStripped.length >= 4 && (item.strippedUser.includes(fnStripped) || fnStripped.includes(item.strippedUser))) return true;
+        if (un && un.length >= 3 && (item.normUser.includes(un) || item.strippedUser.includes(un))) return true;
+
+        // 3. First + Last name token matching
+        if (fnStripped && item.strippedUser) {
+          const fnTokens = fnStripped.split(/\s+/).filter((t) => t.length >= 3);
+          const itemTokens = item.strippedUser.split(/\s+/).filter((t) => t.length >= 3);
+          if (fnTokens.length >= 2 && itemTokens.length >= 2) {
+            const common = fnTokens.filter((t) => itemTokens.includes(t));
+            if (common.length >= 2 && common.length / Math.min(fnTokens.length, itemTokens.length) >= 0.6) {
+              return true;
+            }
+          }
+        }
+
+        return false;
+      });
+
+      const isMapped = !!match;
+      const counterName = match ? match.counter : null;
+
+      if (snap.isBillCounterMapped !== isMapped || snap.billCounterName !== counterName) {
+        snap.isBillCounterMapped = isMapped;
+        snap.billCounterName = counterName;
+        await this.snapshotRepo.save(snap);
+      }
+      if (isMapped) matchedCount++;
+    }
+
+    this.logger.log(`Bill Counter mappings synced for client ${clientId}: ${matchedCount} / ${snapshots.length} users mapped.`);
+    return { matchedCount, totalCount: snapshots.length };
+  }
+
+  /**
+   * Remote live refresh: dispatches FETCH_BILL_COUNTER_MAPPINGS to the desktop agent,
+   * reads /billcounteruser on the remote portal, synchronizes client_bill_counter_mappings,
+   * and updates all ClientUserSnapshots.
+   */
+  async fetchBillCounterMappingsRemote(
+    clientId: string,
+    user: JwtPayload,
+    targetBranch?: string
+  ): Promise<{
+    success: boolean;
+    count: number;
+    matchedUsersCount: number;
+    message: string;
+  }> {
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException({
+        code: 'DESKTOP_AGENT_OFFLINE',
+        message: 'Cannot check Bill Counter status: Desktop automation agent is offline.',
+      });
+    }
+
+    let credentials: { username: string; password: string } | undefined = undefined;
+    const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+    if (cred) {
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const billCounterListUrl = resolveClientBillCounterListUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'FETCH_BILL_COUNTER_MAPPINGS' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'FETCH_BILL_COUNTER_MAPPINGS',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: billCounterListUrl,
+        billCounterListUrl,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        payload: {
+          billCounterListUrl,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
+        },
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    // Wait for agent completion (up to 45s)
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 45000) {
+      await new Promise((r) => setTimeout(r, 400));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+      throw new BadRequestException({
+        code: 'FETCH_BILL_COUNTER_FAILED',
+        message: completedRun?.errorMessage || 'Failed to fetch Bill Counter mappings from remote client portal.',
+      });
+    }
+
+    let parsedResult: any = {};
+    try {
+      parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    const mappings: Array<{ billCounterName: string; userName: string; role?: string; isActive?: boolean }> =
+      parsedResult.mappings || [];
+
+    // Replace records in client_bill_counter_mappings
+    await this.billCounterRepo.delete({ clientId: client.id });
+
+    const normalize = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const entitiesToSave = mappings.map((item) =>
+      this.billCounterRepo.create({
+        clientId: client.id,
+        billCounterName: item.billCounterName,
+        userName: item.userName,
+        normalizedUserName: normalize(item.userName),
+        role: item.role || undefined,
+        status: item.isActive === false ? 'INACTIVE' : 'ACTIVE',
+        lastSyncedAt: new Date(),
+      })
+    );
+
+    if (entitiesToSave.length > 0) {
+      await this.billCounterRepo.save(entitiesToSave);
+    }
+
+    // Synchronize snapshots
+    const syncRes = await this.syncBillCounterStatusForClient(client.id);
+
+    return {
+      success: true,
+      count: mappings.length,
+      matchedUsersCount: syncRes.matchedCount,
+      message: `Successfully retrieved ${mappings.length} Bill Counter mappings from remote portal (${syncRes.matchedCount} users mapped).`,
+    };
+  }
+
+  /**
+   * Maps an existing client user to a Bill Counter on remote Simplex client.
+   * Dynamically constructs target URL from client configuration.
+   * Verified authoritatively on /billcounteruser.
+   */
+  async mapBillCounterUser(
+    id: string,
+    user: JwtPayload,
+    targetBranch?: string,
+    roleName?: string
+  ): Promise<{
+    success: boolean;
+    alreadyExists?: boolean;
+    username?: string;
+    billCounterName?: string;
+    roleName?: string;
+    message: string;
+  }> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id } });
+    if (!snapshot) throw new NotFoundException(`User ${id} not found`);
+
+    const client = await this.clientRepo.findOne({ where: { id: snapshot.clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    if ((client.environment as string).toUpperCase() === 'PRODUCTION') {
+      throw new ForbiddenException({
+        code: 'PRODUCTION_MUTATION_BLOCKED',
+        message: `Client mutations are strictly blocked for PRODUCTION client '${client.clientCode}'. Only TEST and STAGING clients permit mutations.`,
+      });
+    }
+
+    const releaseLock = this.acquireMutationLock(client.id, snapshot.username);
+
+    try {
+      const allAgents = await this.agentsService.getAllAgents();
+      const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+      if (onlineAgents.length === 0) {
+        throw new BadRequestException({
+          code: 'DESKTOP_AGENT_OFFLINE',
+          message: 'Bill Counter mapping failed: Automation agent is offline. Please ensure desktop browser agent is running.',
+        });
+      }
+
+      let credentials: { username: string; password: string } | undefined = undefined;
+      const cred = await this.credRepo.findOne({ where: { clientId: client.id, isActive: true } });
+      if (cred) {
+        const username = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedUsername,
+          iv: cred.usernameIv,
+          tag: cred.usernameTag,
+          keyVersion: cred.keyVersion,
+        });
+        const password = EnvelopeEncryption.decrypt({
+          cipherText: cred.encryptedPassword,
+          iv: cred.passwordIv,
+          tag: cred.passwordTag,
+          keyVersion: cred.keyVersion,
+        });
+        credentials = { username, password };
+      }
+
+      const routes = this.resolveClientUserRoutes(client);
+      const addBillCounterUrl = resolveClientBillCounterUserUrl({
+        baseUrl: client.baseUrl,
+        applicationPath: client.applicationPath,
+      });
+      const billCounterListUrl = resolveClientBillCounterListUrl({
+        baseUrl: client.baseUrl,
+        applicationPath: client.applicationPath,
+      });
+
+      const correlationId = crypto.randomUUID();
+
+      const run = this.runRepo.create({
+        clientId: client.id,
+        desktopAgentId: onlineAgents[0].id,
+        triggeredByUserId: user.sub,
+        runType: 'MAP_BILL_COUNTER_USER',
+        status: 'PENDING',
+        parametersJson: JSON.stringify({
+          taskType: 'MAP_BILL_COUNTER_USER',
+          userId: user.sub,
+          username: snapshot.username,
+          remoteUserId: snapshot.remoteUserId,
+          clientBaseUrl: client.baseUrl,
+          clientAppPath: client.applicationPath,
+          loginRoute: routes.resolvedLoginUrl,
+          targetRoute: addBillCounterUrl,
+          addBillCounterUrl,
+          billCounterListUrl,
+          roleName: roleName || snapshot.role,
+          credentials,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
+          payload: {
+            username: snapshot.username,
+            remoteUserId: snapshot.remoteUserId,
+            addBillCounterUrl,
+            billCounterListUrl,
+            roleName: roleName || snapshot.role,
+            targetRoute: addBillCounterUrl,
+          },
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      });
+
+      const savedRun = await this.runRepo.save(run);
+
+      // Wait for agent completion and remote verification (up to 75s)
+      const startTime = Date.now();
+      let completedRun: AutomationRun | null = null;
+      while (Date.now() - startTime < 75000) {
+        await new Promise((r) => setTimeout(r, 400));
+        const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+        if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+          completedRun = r;
+          break;
+        }
+      }
+
+      if (!completedRun) {
+        savedRun.status = 'TIMED_OUT';
+        savedRun.errorMessage = 'Bill Counter mapping timed out: Automation agent did not respond within 75 seconds.';
+        await this.runRepo.save(savedRun).catch(() => {});
+        throw new ConflictException({
+          code: 'BILL_COUNTER_MAPPING_TIMEOUT',
+          message: 'Bill Counter mapping timed out: Automation agent did not respond within 75 seconds.',
+        });
+      }
+
+      let parsedResult: any = {};
+      try {
+        parsedResult = JSON.parse(completedRun.resultSummaryJson || '{}');
+      } catch {}
+
+      if (completedRun.status === 'FAILED' || completedRun.status === 'TIMED_OUT') {
+        let errorCode = 'BILL_COUNTER_MAPPING_FAILED';
+        let errorMsg = completedRun?.errorMessage || 'Bill Counter mapping failed on remote client portal.';
+        if (parsedResult.errorCode) errorCode = parsedResult.errorCode;
+        if (parsedResult.errorMessage) errorMsg = parsedResult.errorMessage;
+        throw new BadRequestException({
+          code: errorCode,
+          message: errorMsg,
+        });
+      }
+
+      // Update client_bill_counter_mappings & snapshot
+      const normalizeUser = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const mappedDisplay = snapshot.fullName || snapshot.username;
+      await this.billCounterRepo.save(
+        this.billCounterRepo.create({
+          clientId: client.id,
+          billCounterName: parsedResult.billCounterName || 'Mapped Counter',
+          userName: mappedDisplay,
+          normalizedUserName: normalizeUser(mappedDisplay),
+          role: parsedResult.roleName || snapshot.role || undefined,
+          status: 'ACTIVE',
+          lastSyncedAt: new Date(),
+        })
+      );
+      snapshot.isBillCounterMapped = true;
+      snapshot.billCounterName = parsedResult.billCounterName || 'Mapped Counter';
+      await this.snapshotRepo.save(snapshot);
+
+      // Record Audit
+      await this.auditRepo.save(
+        this.auditRepo.create({
+          action: 'MAP_BILL_COUNTER_USER',
+          actorUserId: user.sub,
+          actorUsername: user.username,
+          entityType: 'CLIENT_USER',
+          entityId: id,
+          result: 'SUCCESS',
+          correlationId,
+          detailsJson: JSON.stringify({
+            clientCode: client.clientCode,
+            username: snapshot.username,
+            runId: savedRun.id,
+            billCounterName: parsedResult.billCounterName,
+            roleName: parsedResult.roleName,
+            alreadyExists: parsedResult.alreadyExists || false,
+          }),
+        })
+      );
+
+      return {
+        success: true,
+        alreadyExists: parsedResult.alreadyExists || false,
+        username: snapshot.username,
+        billCounterName: parsedResult.billCounterName,
+        roleName: parsedResult.roleName,
+        message: parsedResult.message || `User '${snapshot.username}' mapped to Bill Counter successfully.`,
+      };
+    } finally {
+      releaseLock();
+    }
+  }
+
   async mapExistingUserRoles(
     id: string,
     dto: MapExistingUserRolesDto,
@@ -4924,6 +6056,17 @@ export class ClientUsersService implements OnModuleInit {
       role: u.role,
       profileRole: u.profileRole,
       status: u.status,
+      isBillCounterMapped: !!u.isBillCounterMapped,
+      billCounterName: u.billCounterName || undefined,
+      isStockLocationMapped: !!u.isStockLocationMapped,
+      stockLocationNames: u.stockLocationNames || undefined,
+      stockLocationCount: u.stockLocationCount ?? (u.isStockLocationMapped ? 1 : 0),
+      isDocumentTypeMapped: !!u.isDocumentTypeMapped,
+      documentTypeNames: u.documentTypeNames || undefined,
+      documentTypeCount: u.documentTypeCount ?? (u.isDocumentTypeMapped ? 1 : 0),
+      isFormAssemblyMapped: !!u.isFormAssemblyMapped,
+      formAssemblyNames: u.formAssemblyNames || undefined,
+      formAssemblyCount: u.formAssemblyCount ?? (u.isFormAssemblyMapped ? 1 : 0),
       barcodeNumber: u.barcodeNumber,
       hasSignature: u.hasSignature,
       signatureUrl: u.signatureDataUrl,
@@ -4938,4 +6081,1107 @@ export class ClientUsersService implements OnModuleInit {
       updatedAt: u.updatedAt.toISOString(),
     };
   }
+
+  /**
+   * Reconciles all client user snapshots with the records in client_document_type_mappings.
+   * Matches by username (exact/normalized) and fallback to fullName.
+   */
+  async syncDocumentTypeStatusForClient(clientId: string): Promise<{ matchedCount: number; totalCount: number }> {
+    const mappings = await this.docTypeMappingRepo.find({ where: { clientId } });
+    const snapshots = await this.snapshotRepo.find({ where: { clientId } });
+
+    const normalize = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const stripHonorifics = (s: string) => s.replace(/^(dr|mr|mrs|ms|prof)\.?\s+/i, '').trim();
+
+    // Map of user key -> Set of document type names
+    const userDocTypes = new Map<string, Set<string>>();
+
+    for (const m of mappings) {
+      if (m.status !== 'ACTIVE') continue;
+      const raw = normalize(m.userName);
+      const stripped = stripHonorifics(raw);
+      const un = normalize(m.username);
+
+      const keys = [un, raw, stripped].filter(Boolean);
+      for (const k of keys) {
+        if (!userDocTypes.has(k)) {
+          userDocTypes.set(k, new Set<string>());
+        }
+        userDocTypes.get(k)!.add(m.documentTypeName);
+      }
+    }
+
+    let matchedCount = 0;
+    for (const snap of snapshots) {
+      const fn = normalize(snap.fullName);
+      const fnStripped = stripHonorifics(fn);
+      const un = normalize(snap.username);
+
+      let foundDocs: string[] = [];
+      if (un && userDocTypes.has(un)) {
+        foundDocs = Array.from(userDocTypes.get(un)!);
+      } else if (fn && userDocTypes.has(fn)) {
+        foundDocs = Array.from(userDocTypes.get(fn)!);
+      } else if (fnStripped && userDocTypes.has(fnStripped)) {
+        foundDocs = Array.from(userDocTypes.get(fnStripped)!);
+      } else {
+        // Fallback substring matching
+        for (const [key, docSet] of userDocTypes.entries()) {
+          if (fnStripped && fnStripped.length >= 4 && (key.includes(fnStripped) || fnStripped.includes(key))) {
+            foundDocs = Array.from(docSet);
+            break;
+          }
+          if (un && un.length >= 4 && (key.includes(un) || un.includes(key))) {
+            foundDocs = Array.from(docSet);
+            break;
+          }
+        }
+      }
+
+      if (foundDocs.length > 0) {
+        snap.isDocumentTypeMapped = true;
+        snap.documentTypeNames = foundDocs.join(', ');
+        snap.documentTypeCount = foundDocs.length;
+        matchedCount++;
+      } else {
+        snap.isDocumentTypeMapped = false;
+        snap.documentTypeNames = null;
+        snap.documentTypeCount = 0;
+      }
+      await this.snapshotRepo.save(snap);
+    }
+
+    return { matchedCount, totalCount: snapshots.length };
+  }
+
+  /**
+   * Fetches document type mappings remotely via desktop agent,
+   * persists to client_document_type_mappings, and updates snapshots.
+   */
+  async fetchDocumentTypeMappingsRemote(
+    clientId: string,
+    user: JwtPayload,
+    targetBranch?: string
+  ): Promise<{ success: boolean; count: number; matchedUsersCount: number; documentTypesCount: number; message: string }> {
+    const client = await this.clientRepo.findOne({
+      where: { id: clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const documentTypeListUrl = resolveClientDocumentTypeListUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'FETCH_DOCUMENT_TYPE_MAPPINGS' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'FETCH_DOCUMENT_TYPE_MAPPINGS',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: documentTypeListUrl,
+        documentTypeListUrl,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        payload: {
+          documentTypeListUrl,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    // Wait for agent completion (up to 90s)
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 90000) {
+      await new Promise((r) => setTimeout(r, 500));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status as string)) {
+      const err = completedRun?.errorMessage || 'Agent sync timed out after 90 seconds.';
+      throw new BadRequestException(`Document Types sync failed: ${err}`);
+    }
+
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    const userMappings: Array<{
+      docTypeId: string;
+      docTypeName: string;
+      userDocGroup?: string;
+      userName: string;
+      username: string;
+    }> = parsed.userMappings || [];
+
+    // Persist into client_document_type_mappings
+    await this.docTypeMappingRepo.delete({ clientId: client.id });
+
+    const entities: ClientDocumentTypeMapping[] = userMappings.map((m) =>
+      this.docTypeMappingRepo.create({
+        clientId: client.id,
+        documentTypeId: String(m.docTypeId),
+        documentTypeName: m.docTypeName,
+        userDocGroup: m.userDocGroup,
+        userName: m.userName,
+        username: m.username,
+        normalizedUserName: (m.userName || '').toLowerCase().trim(),
+        status: 'ACTIVE',
+        lastSyncedAt: new Date(),
+      })
+    );
+
+    if (entities.length > 0) {
+      await this.docTypeMappingRepo.save(entities, { chunk: 100 });
+    }
+
+    const { matchedCount } = await this.syncDocumentTypeStatusForClient(client.id);
+    const docTypesCount = parsed.totalDocumentTypes || parsed.documentTypes?.length || 0;
+
+    return {
+      success: true,
+      count: entities.length,
+      matchedUsersCount: matchedCount,
+      documentTypesCount: docTypesCount,
+      message: `Successfully synchronized ${docTypesCount} document types (${entities.length} mappings, ${matchedCount} users mapped).`,
+    };
+  }
+
+  /**
+   * Updates user mappings for a specific Patient Visit Document Type via desktop agent.
+   */
+  async updateDocumentTypeMappingsRemote(
+    clientId: string,
+    docTypeId: string,
+    selectedUsernames: string[],
+    user: JwtPayload,
+    targetBranch?: string,
+    userDocGroup?: string
+  ): Promise<{ success: boolean; docTypeId: string; docTypeName?: string; selectedUsernames: string[]; message: string }> {
+    const client = await this.clientRepo.findOne({
+      where: { id: clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const documentTypeListUrl = resolveClientDocumentTypeListUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+    const editUrl = resolveClientDocumentTypeEditUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+      docTypeId,
+      groupCode: userDocGroup || 'DOC',
+    });
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'UPDATE_DOCUMENT_TYPE_MAPPINGS' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'UPDATE_DOCUMENT_TYPE_MAPPINGS',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: editUrl,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        payload: {
+          docTypeId,
+          selectedUsernames,
+          userDocGroup: userDocGroup || 'DOC',
+          documentTypeListUrl,
+          editUrl,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 60000) {
+      await new Promise((r) => setTimeout(r, 400));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status as string)) {
+      const err = completedRun?.errorMessage || 'Document type mapping update timed out after 60s.';
+      throw new BadRequestException(`Update failed: ${err}`);
+    }
+
+    let resultData: any = {};
+    try {
+      resultData = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    // Delete previous mappings for this docTypeId in client
+    await this.docTypeMappingRepo.delete({ clientId: client.id, documentTypeId: docTypeId });
+
+    // Look up snapshots for selected usernames to get full names
+    const selectedSnapshots = await this.snapshotRepo.find({
+      where: { clientId: client.id, username: In(selectedUsernames.length > 0 ? selectedUsernames : ['__NON_EXISTENT__']) },
+    });
+    const snapMap = new Map(selectedSnapshots.map((s) => [s.username, s.fullName]));
+
+    const docTypeName = resultData.docTypeName || `DocType-${docTypeId}`;
+    const newEntities: ClientDocumentTypeMapping[] = selectedUsernames.map((uname) =>
+      this.docTypeMappingRepo.create({
+        clientId: client.id,
+        documentTypeId: docTypeId,
+        documentTypeName: docTypeName,
+        userDocGroup: userDocGroup || 'DOC',
+        userName: snapMap.get(uname) || uname,
+        username: uname,
+        normalizedUserName: (snapMap.get(uname) || uname).toLowerCase().trim(),
+        status: 'ACTIVE',
+        lastSyncedAt: new Date(),
+      })
+    );
+
+    if (newEntities.length > 0) {
+      await this.docTypeMappingRepo.save(newEntities, { chunk: 100 });
+    }
+
+    // Reconcile snapshot flags
+    await this.syncDocumentTypeStatusForClient(client.id);
+
+    return {
+      success: true,
+      docTypeId,
+      docTypeName,
+      selectedUsernames,
+      message: resultData.message || `Successfully updated document type mappings for ${docTypeName}.`,
+    };
+  }
+
+  /**
+   * Opens live authenticated browser session to view/edit Document Types.
+   */
+  async openDocumentTypeSessionRemote(
+    clientId: string,
+    user: JwtPayload,
+    docTypeId?: string,
+    username?: string,
+    targetBranch?: string
+  ): Promise<AutomationRun> {
+    const client = await this.clientRepo.findOne({
+      where: { id: clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const decUsername = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const decPassword = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username: decUsername, password: decPassword };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const documentTypeListUrl = resolveClientDocumentTypeListUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    let editUrl: string | undefined = undefined;
+    if (docTypeId) {
+      editUrl = resolveClientDocumentTypeEditUrl({
+        baseUrl: client.baseUrl,
+        applicationPath: client.applicationPath,
+        docTypeId,
+        groupCode: 'DOC',
+      });
+    }
+
+    let fullName: string | undefined = undefined;
+    if (username) {
+      const snap = await this.snapshotRepo.findOne({ where: { clientId: client.id, username } });
+      fullName = snap?.fullName;
+    }
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'OPEN_DOCUMENT_TYPE_SESSION' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        isHeaded: true,
+        leaveBrowserOpen: true,
+        taskType: 'OPEN_DOCUMENT_TYPE_SESSION',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: editUrl || documentTypeListUrl,
+        documentTypeListUrl,
+        editUrl,
+        docTypeId,
+        username,
+        fullName,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    return this.runRepo.save(run);
+  }
+
+  /**
+   * Returns all document types and their mapped users for a given client.
+   */
+  async getDocumentTypes(clientId: string): Promise<{
+    documentTypes: ClientDocumentTypeItem[];
+    totalDocumentTypes: number;
+    totalMappings: number;
+    allUsers: Array<{ username: string; fullName: string; isDocumentTypeMapped: boolean; documentTypeNames?: string | null }>;
+  }> {
+    const mappings = await this.docTypeMappingRepo.find({
+      where: { clientId, status: 'ACTIVE' },
+      order: { documentTypeName: 'ASC' },
+    });
+
+    const snapshots = await this.snapshotRepo.find({
+      where: { clientId },
+      order: { fullName: 'ASC' },
+    });
+
+    // Group mappings by documentTypeId
+    const docMap = new Map<string, {
+      docTypeId: string;
+      docTypeName: string;
+      userDocGroup?: string;
+      mappedUsernames: Set<string>;
+      mappedUserFullNames: Set<string>;
+      lastSyncedAt?: Date;
+    }>();
+
+    for (const m of mappings) {
+      if (!docMap.has(m.documentTypeId)) {
+        docMap.set(m.documentTypeId, {
+          docTypeId: m.documentTypeId,
+          docTypeName: m.documentTypeName,
+          userDocGroup: m.userDocGroup,
+          mappedUsernames: new Set<string>(),
+          mappedUserFullNames: new Set<string>(),
+          lastSyncedAt: m.lastSyncedAt,
+        });
+      }
+      const entry = docMap.get(m.documentTypeId)!;
+      if (m.username) entry.mappedUsernames.add(m.username);
+      if (m.userName) entry.mappedUserFullNames.add(m.userName);
+      if (m.lastSyncedAt && (!entry.lastSyncedAt || m.lastSyncedAt > entry.lastSyncedAt)) {
+        entry.lastSyncedAt = m.lastSyncedAt;
+      }
+    }
+
+    const documentTypes: ClientDocumentTypeItem[] = Array.from(docMap.values()).map((d) => ({
+      docTypeId: d.docTypeId,
+      docTypeName: d.docTypeName,
+      userDocGroup: d.userDocGroup,
+      groupCode: d.userDocGroup,
+      mappedUsersCount: d.mappedUsernames.size,
+      totalUsersCount: snapshots.length,
+      mappedUsernames: Array.from(d.mappedUsernames),
+      mappedUserFullNames: Array.from(d.mappedUserFullNames),
+      lastSyncedAt: d.lastSyncedAt ? d.lastSyncedAt.toISOString() : undefined,
+    }));
+
+    const allUsers = snapshots.map((s) => ({
+      username: s.username,
+      fullName: s.fullName,
+      isDocumentTypeMapped: !!s.isDocumentTypeMapped,
+      documentTypeNames: s.documentTypeNames,
+    }));
+
+    return {
+      documentTypes,
+      totalDocumentTypes: documentTypes.length,
+      totalMappings: mappings.length,
+      allUsers,
+    };
+  }
+
+
+  /**
+   * Reconciles all client user snapshots with records in client_form_assembly_mappings.
+   */
+  async syncFormAssemblyStatusForClient(clientId: string): Promise<{ matchedCount: number; totalCount: number }> {
+    const mappings = await this.formAssemblyRepo.find({ where: { clientId } });
+    const snapshots = await this.snapshotRepo.find({ where: { clientId } });
+
+    const normalize = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const stripHonorifics = (s: string) => s.replace(/^(dr|mr|mrs|ms|prof)\.?\s+/i, '').trim();
+
+    // Map of user key -> Set of form names
+    const userForms = new Map<string, Set<string>>();
+
+    for (const m of mappings) {
+      if (m.status !== 'ACTIVE') continue;
+      const raw = normalize(m.userName);
+      const stripped = stripHonorifics(raw);
+      const un = normalize(m.username);
+
+      const keys = [un, raw, stripped].filter(Boolean);
+      for (const k of keys) {
+        if (!userForms.has(k)) {
+          userForms.set(k, new Set<string>());
+        }
+        userForms.get(k)!.add(m.formName);
+      }
+    }
+
+    let matchedCount = 0;
+    for (const snap of snapshots) {
+      const fn = normalize(snap.fullName);
+      const fnStripped = stripHonorifics(fn);
+      const un = normalize(snap.username);
+
+      let foundForms: string[] = [];
+      if (un && userForms.has(un)) {
+        foundForms = Array.from(userForms.get(un)!);
+      } else if (fn && userForms.has(fn)) {
+        foundForms = Array.from(userForms.get(fn)!);
+      } else if (fnStripped && userForms.has(fnStripped)) {
+        foundForms = Array.from(userForms.get(fnStripped)!);
+      } else {
+        // Fallback substring matching
+        for (const [key, formSet] of userForms.entries()) {
+          if (fnStripped && fnStripped.length >= 4 && (key.includes(fnStripped) || fnStripped.includes(key))) {
+            foundForms = Array.from(formSet);
+            break;
+          }
+          if (un && un.length >= 4 && (key.includes(un) || un.includes(key))) {
+            foundForms = Array.from(formSet);
+            break;
+          }
+        }
+      }
+
+      if (foundForms.length > 0) {
+        snap.isFormAssemblyMapped = true;
+        snap.formAssemblyNames = foundForms.join(', ');
+        snap.formAssemblyCount = foundForms.length;
+        matchedCount++;
+      } else {
+        snap.isFormAssemblyMapped = false;
+        snap.formAssemblyNames = null;
+        snap.formAssemblyCount = 0;
+      }
+      await this.snapshotRepo.save(snap);
+    }
+
+    return { matchedCount, totalCount: snapshots.length };
+  }
+
+  /**
+   * Retrieves available Form Assembly forms and mapped status for a specific user.
+   */
+  async getFormAssemblyForms(clientId: string, userId?: string): Promise<{
+    forms: ClientFormAssemblyItem[];
+    totalForms: number;
+    userMappedCount: number;
+    userMappedForms: string[];
+    user?: { id: string; username: string; fullName: string; isFormAssemblyMapped: boolean; formAssemblyNames?: string | null };
+  }> {
+    const client = await this.clientRepo.findOne({ where: { id: clientId } });
+    if (!client) throw new NotFoundException('Client not found');
+
+    let targetSnapshot: ClientUserSnapshot | null = null;
+    if (userId) {
+      targetSnapshot = await this.snapshotRepo.findOne({
+        where: [
+          { id: userId, clientId },
+          { username: userId, clientId },
+        ],
+      });
+    }
+
+    // Default catalog of standard Simplex EMR Panel forms
+    const defaultCatalog: Array<{ formId: string; formName: string; groupName: string; isDefault: boolean }> = [
+      { formId: '1', formName: 'OP - CLINICIANS', groupName: 'CLINICIANS', isDefault: true },
+      { formId: '2', formName: 'OP - NURSING', groupName: 'NURSING', isDefault: false },
+      { formId: '3', formName: 'MRD', groupName: 'MRD AND CLAIMS', isDefault: false },
+      { formId: '4', formName: 'THERAPY', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '5', formName: 'PHYSICAL REHABILITATION', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '6', formName: 'DIETETICS AND NUTRITION', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '7', formName: 'DENTAL', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '8', formName: 'AUDIOLOGY', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '9', formName: 'SPEECH THERAPY', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '10', formName: 'CLINICAL PSYCHOLOGY', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '11', formName: 'PODIATRY', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '12', formName: 'OPTOMETRY', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '13', formName: 'OCCUPATIONAL THERAPY', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '14', formName: 'ANAESTHESIA', groupName: 'CLINICIANS', isDefault: false },
+      { formId: '15', formName: 'TEST', groupName: 'TEST', isDefault: false },
+    ];
+
+    const mappings = await this.formAssemblyRepo.find({ where: { clientId } });
+
+    const formsMap = new Map<string, ClientFormAssemblyItem>();
+    for (const d of defaultCatalog) {
+      formsMap.set(d.formId, {
+        formId: d.formId,
+        formName: d.formName,
+        groupName: d.groupName,
+        isDefault: d.isDefault,
+        isMapped: false,
+        assignedUsersCount: 0,
+        assignedUsernames: [],
+      });
+    }
+
+    for (const m of mappings) {
+      if (!formsMap.has(m.formId)) {
+        formsMap.set(m.formId, {
+          formId: m.formId,
+          formName: m.formName,
+          groupName: m.groupName,
+          isDefault: m.isDefault,
+          isMapped: false,
+          assignedUsersCount: 0,
+          assignedUsernames: [],
+        });
+      }
+      const item = formsMap.get(m.formId)!;
+      const uname = m.username || m.userName;
+      if (uname && !item.assignedUsernames?.includes(uname)) {
+        item.assignedUsernames = item.assignedUsernames || [];
+        item.assignedUsernames.push(uname);
+        item.assignedUsersCount = item.assignedUsernames.length;
+      }
+    }
+
+    const userMappedFormIds: string[] = [];
+    const userMappedFormNames: string[] = [];
+    if (targetSnapshot) {
+      const normalize = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const stripHonorifics = (s: string) => s.replace(/^(dr|mr|mrs|ms|prof)\.?\s+/i, '').trim();
+      const fn = normalize(targetSnapshot.fullName);
+      const fnStripped = stripHonorifics(fn);
+      const un = normalize(targetSnapshot.username);
+
+      for (const m of mappings) {
+        const mUser = normalize(m.userName);
+        const mUserStripped = stripHonorifics(mUser);
+        const mLogin = normalize(m.username);
+
+        const isMatch =
+          (un && (mLogin === un || mUser === un || mUserStripped === un)) ||
+          (fn && (mUser === fn || mLogin === fn || mUserStripped === fn)) ||
+          (fnStripped && (mUserStripped === fnStripped || mUser === fnStripped));
+
+        if (isMatch && m.status === 'ACTIVE') {
+          userMappedFormIds.push(m.formId);
+          userMappedFormNames.push(m.formName);
+        }
+      }
+
+      for (const [fId, item] of formsMap.entries()) {
+        if (userMappedFormIds.includes(fId) || userMappedFormNames.includes(item.formName)) {
+          item.isMapped = true;
+        }
+      }
+    }
+
+    const formList = Array.from(formsMap.values());
+    return {
+      forms: formList,
+      totalForms: formList.length,
+      userMappedCount: userMappedFormIds.length,
+      userMappedForms: userMappedFormNames,
+      user: targetSnapshot ? {
+        id: targetSnapshot.id,
+        username: targetSnapshot.username,
+        fullName: targetSnapshot.fullName,
+        isFormAssemblyMapped: userMappedFormIds.length > 0,
+        formAssemblyNames: userMappedFormNames.join(', ') || null,
+      } : undefined,
+    };
+  }
+
+  /**
+   * Fetches Form Assembly forms and mappings remotely via desktop agent.
+   */
+  async fetchFormAssemblyMappingsRemote(
+    clientId: string,
+    user: JwtPayload,
+    targetBranch?: string
+  ): Promise<{ success: boolean; count: number; matchedUsersCount: number; formsCount: number; message: string }> {
+    const client = await this.clientRepo.findOne({
+      where: { id: clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const emrPanelUrl = resolveClientEmrPanelUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'FETCH_FORM_ASSEMBLY_MAPPINGS' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'FETCH_FORM_ASSEMBLY_MAPPINGS',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: emrPanelUrl,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        payload: {
+          targetBranch: targetBranch || (client as any).branchName || undefined,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 90000) {
+      await new Promise((r) => setTimeout(r, 500));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status as string)) {
+      const err = completedRun?.errorMessage || 'Agent sync timed out after 90 seconds.';
+      throw new BadRequestException(`Form Assembly sync failed: ${err}`);
+    }
+
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    const userMappings: Array<{
+      formId: string;
+      formName: string;
+      groupName?: string;
+      userName: string;
+      username: string;
+      isDefault: boolean;
+    }> = parsed.userMappings || [];
+
+    if (userMappings.length > 0) {
+      await this.formAssemblyRepo.delete({ clientId: client.id });
+      const entities: ClientFormAssemblyMapping[] = userMappings.map((m) =>
+        this.formAssemblyRepo.create({
+          clientId: client.id,
+          formId: String(m.formId),
+          formName: m.formName,
+          groupName: m.groupName,
+          userName: m.userName,
+          username: m.username,
+          normalizedUserName: (m.userName || '').toLowerCase().trim(),
+          isDefault: m.isDefault || false,
+          status: 'ACTIVE',
+          lastSyncedAt: new Date(),
+        })
+      );
+      await this.formAssemblyRepo.save(entities, { chunk: 100 });
+    }
+
+    const { matchedCount } = await this.syncFormAssemblyStatusForClient(client.id);
+    const formsCount = parsed.totalForms || parsed.forms?.length || 0;
+
+    return {
+      success: true,
+      count: userMappings.length,
+      matchedUsersCount: matchedCount,
+      formsCount,
+      message: `Form Assembly sync completed: ${formsCount} forms discovered, ${matchedCount} users mapped.`,
+    };
+  }
+
+  /**
+   * Updates Form Assembly mappings for a single user via desktop agent.
+   */
+  async updateFormAssemblyMappingsRemote(
+    userId: string,
+    user: JwtPayload,
+    dto: { clientId: string; formIds: string[]; targetBranch?: string }
+  ): Promise<{
+    success: boolean;
+    assignedFormIds: string[];
+    assignedFormNames: string[];
+    user: ClientUser;
+    message: string;
+  }> {
+    const client = await this.clientRepo.findOne({
+      where: { id: dto.clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const snapshot = await this.snapshotRepo.findOne({
+      where: [
+        { id: userId, clientId: client.id },
+        { username: userId, clientId: client.id },
+      ],
+    });
+    if (!snapshot) throw new NotFoundException('User snapshot not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const emrPanelUrl = resolveClientEmrPanelUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const targetBranch = dto.targetBranch || (client as any).branchName || undefined;
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'UPDATE_FORM_ASSEMBLY_MAPPINGS' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'UPDATE_FORM_ASSEMBLY_MAPPINGS',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: emrPanelUrl,
+        credentials,
+        targetBranch,
+        payload: {
+          userId: snapshot.id,
+          username: snapshot.username,
+          fullName: snapshot.fullName,
+          formIds: dto.formIds,
+          targetBranch,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 90000) {
+      await new Promise((r) => setTimeout(r, 500));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status as string)) {
+      const err = completedRun?.errorMessage || 'Form Assembly mapping update timed out after 90 seconds.';
+      throw new BadRequestException(`Form Assembly update failed: ${err}`);
+    }
+
+    let parsed: any = {};
+    try {
+      parsed = JSON.parse(completedRun.resultSummaryJson || '{}');
+    } catch {}
+
+    const assignedFormIds: string[] = parsed.assignedFormIds || dto.formIds || [];
+
+    // Delete existing mappings for this user
+    await this.formAssemblyRepo
+      .createQueryBuilder()
+      .delete()
+      .from(ClientFormAssemblyMapping)
+      .where('clientId = :clientId', { clientId: client.id })
+      .andWhere('(loginUsername = :username OR userName = :fullName OR userName = :username)', {
+        username: snapshot.username,
+        fullName: snapshot.fullName,
+      })
+      .execute();
+
+    // Catalog lookup for form names
+    const catalogData = await this.getFormAssemblyForms(client.id);
+    const catalogMap = new Map(catalogData.forms.map((f: any) => [f.formId, f]));
+
+    // Save newly assigned mappings
+    const newEntities: ClientFormAssemblyMapping[] = assignedFormIds.map((fId) => {
+      const cat = catalogMap.get(fId);
+      return this.formAssemblyRepo.create({
+        clientId: client.id,
+        formId: fId,
+        formName: cat?.formName || fId,
+        groupName: cat?.groupName || 'GENERAL',
+        userName: snapshot.fullName,
+        username: snapshot.username,
+        normalizedUserName: snapshot.fullName.toLowerCase().trim(),
+        isDefault: cat?.isDefault || false,
+        status: 'ACTIVE',
+        lastSyncedAt: new Date(),
+      });
+    });
+
+    if (newEntities.length > 0) {
+      await this.formAssemblyRepo.save(newEntities);
+    }
+
+    // Synchronize snapshot status immediately
+    await this.syncFormAssemblyStatusForClient(client.id);
+
+    // Reload snapshot to get latest values
+    const updatedSnapshot = await this.snapshotRepo.findOne({ where: { id: snapshot.id } });
+    const userDto = this.mapToDto(updatedSnapshot!, client);
+
+    return {
+      success: true,
+      assignedFormIds,
+      assignedFormNames: newEntities.map(e => e.formName),
+      user: userDto,
+      message: `Form Assembly mappings updated successfully for user ${snapshot.username}. (${assignedFormIds.length} forms mapped)`,
+    };
+  }
+
+  /**
+   * Opens an interactive browser session on /emrPanelSelection for a specific user.
+   */
+  async openFormAssemblySessionRemote(
+    userId: string,
+    user: JwtPayload,
+    targetBranch?: string
+  ): Promise<{ success: boolean; message: string; targetUrl?: string }> {
+    const snapshot = await this.snapshotRepo.findOne({ where: { id: userId } });
+    if (!snapshot) throw new NotFoundException('User snapshot not found');
+
+    const client = await this.clientRepo.findOne({
+      where: { id: snapshot.clientId },
+      relations: ['credential'],
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const allAgents = await this.agentsService.getAllAgents();
+    const onlineAgents = allAgents.filter((a) => a.status === 'ONLINE' || a.status === 'BUSY');
+    if (onlineAgents.length === 0) {
+      throw new BadRequestException('DESKTOP_AGENT_OFFLINE: Desktop browser agent is not running. Please start the agent.');
+    }
+
+    let credentials: { username: string; password?: string } | undefined = undefined;
+    if (client.credential && client.credential.isActive) {
+      const cred = client.credential;
+      const username = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedUsername,
+        iv: cred.usernameIv,
+        tag: cred.usernameTag,
+        keyVersion: cred.keyVersion,
+      });
+      const password = EnvelopeEncryption.decrypt({
+        cipherText: cred.encryptedPassword,
+        iv: cred.passwordIv,
+        tag: cred.passwordTag,
+        keyVersion: cred.keyVersion,
+      });
+      credentials = { username, password };
+    }
+
+    const routes = this.resolveClientUserRoutes(client);
+    const emrPanelUrl = resolveClientEmrPanelUrl({
+      baseUrl: client.baseUrl,
+      applicationPath: client.applicationPath,
+    });
+
+    const run = this.runRepo.create({
+      clientId: client.id,
+      desktopAgentId: onlineAgents[0].id,
+      triggeredByUserId: user.sub,
+      runType: 'OPEN_FORM_ASSEMBLY_SESSION' as any,
+      status: 'PENDING',
+      parametersJson: JSON.stringify({
+        taskType: 'OPEN_FORM_ASSEMBLY_SESSION',
+        userId: user.sub,
+        clientBaseUrl: client.baseUrl,
+        clientAppPath: client.applicationPath,
+        loginRoute: routes.resolvedLoginUrl,
+        targetRoute: emrPanelUrl,
+        credentials,
+        targetBranch: targetBranch || (client as any).branchName || undefined,
+        payload: {
+          userId: snapshot.id,
+          username: snapshot.username,
+          fullName: snapshot.fullName,
+          targetBranch: targetBranch || (client as any).branchName || undefined,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+
+    const savedRun = await this.runRepo.save(run);
+
+    const startTime = Date.now();
+    let completedRun: AutomationRun | null = null;
+    while (Date.now() - startTime < 30000) {
+      await new Promise((r) => setTimeout(r, 500));
+      const r = await this.runRepo.findOne({ where: { id: savedRun.id } });
+      if (r && (['COMPLETED', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED'] as any).includes(r.status)) {
+        completedRun = r;
+        break;
+      }
+    }
+
+    if (!completedRun || !['COMPLETED', 'SUCCEEDED'].includes(completedRun.status as string)) {
+      const err = completedRun?.errorMessage || 'Timed out waiting for browser session to launch.';
+      throw new BadRequestException(`Failed to launch browser: ${err}`);
+    }
+
+    return {
+      success: true,
+      message: 'Form Assembly screen opened in client browser.',
+      targetUrl: emrPanelUrl,
+    };
+  }
+
 }

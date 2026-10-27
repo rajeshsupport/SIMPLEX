@@ -35,6 +35,10 @@ import {
   ClientResourceService,
   ResourceImportJob,
   ResourceImportRow,
+  ClientBillCounterMapping,
+  ClientStockLocationMapping,
+  ClientDocumentTypeMapping,
+  ClientFormAssemblyMapping,
 } from './entities/index.js';
 
 export const allEntities = [
@@ -62,6 +66,10 @@ export const allEntities = [
   ClientResourceService,
   ResourceImportJob,
   ResourceImportRow,
+  ClientBillCounterMapping,
+  ClientStockLocationMapping,
+  ClientDocumentTypeMapping,
+  ClientFormAssemblyMapping,
 ];
 
 export const getDataSourceOptions = (): DataSourceOptions => {

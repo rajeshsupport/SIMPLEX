@@ -153,6 +153,264 @@ export interface UserWorkflowResult {
   ephemeralDefaultPassword?: string;
 }
 
+
+export interface MapBillCounterUserOptions {
+  addBillCounterUrl: string;
+  billCounterListUrl?: string;
+  username: string;
+  remoteUserId?: string;
+  roleName?: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+  onMutationDispatched?: () => void;
+}
+
+export interface MapBillCounterUserResult {
+  success: boolean;
+  alreadyExists?: boolean;
+  username: string;
+  billCounterName?: string;
+  roleName?: string;
+  message: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface BillCounterMappingRecord {
+  billCounterName: string;
+  userName: string;
+  role?: string;
+  isActive: boolean;
+}
+
+export interface FetchBillCounterMappingsOptions {
+  billCounterListUrl: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+}
+
+export interface FetchBillCounterMappingsResult {
+  success: boolean;
+  mappings: BillCounterMappingRecord[];
+  totalCount: number;
+  message?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface MapStockLocationUserOptions {
+  addStockLocationUrl: string;
+  stockLocationListUrl?: string;
+  username: string;
+  remoteUserId?: string | null;
+  fullName?: string;
+  stockLocationNames?: string[];
+  stockLocationIds?: string[];
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+  onMutationDispatched?: () => void;
+}
+
+export interface MapStockLocationUserResult {
+  success: boolean;
+  alreadyExists?: boolean;
+  username: string;
+  mappedLocations?: string[];
+  message: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface StockLocationMappingRecord {
+  userName: string;
+  stockLocationName: string;
+  status: string;
+  isActive: boolean;
+}
+
+export interface FetchStockLocationMappingsOptions {
+  stockLocationListUrl: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+}
+
+export interface FetchStockLocationMappingsResult {
+  success: boolean;
+  mappings: StockLocationMappingRecord[];
+  totalCount: number;
+  message?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface OpenStockLocationInteractiveSessionOptions {
+  addStockLocationUrl: string;
+  username: string;
+  remoteUserId?: string | null;
+  fullName?: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+}
+
+
+export interface DocumentTypeItemRecord {
+  sno: string;
+  name: string;
+  group: string;
+  status: string;
+  editHref: string | null;
+  docTypeSno: string;
+  docTypeName: string;
+  userDocGroup: string;
+  totalUsersCount: number;
+  mappedUsersCount: number;
+  mappedUsernames: string[];
+}
+
+export interface FetchDocumentTypeMappingsOptions {
+  documentTypeListUrl: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+}
+
+export interface FetchDocumentTypeMappingsResult {
+  success: boolean;
+  documentTypes: DocumentTypeItemRecord[];
+  userMappings: Array<{
+    docTypeId: string;
+    docTypeName: string;
+    userDocGroup?: string;
+    userName: string;
+    username: string;
+  }>;
+  totalDocumentTypes: number;
+  totalMappings: number;
+  message?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface UpdateDocumentTypeMappingsOptions {
+  docTypeId: string;
+  selectedUsernames: string[];
+  userDocGroup?: string;
+  documentTypeListUrl: string;
+  editUrl?: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+  onMutationDispatched?: () => void;
+}
+
+export interface UpdateDocumentTypeMappingsResult {
+  success: boolean;
+  docTypeId: string;
+  docTypeName?: string;
+  selectedUsernames: string[];
+  message: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+
+export interface FormAssemblyItemRecord {
+  formId: string;
+  formName: string;
+  groupName: string;
+  isDefault: boolean;
+  encounterType?: string;
+  isAssigned?: boolean;
+  status: string;
+}
+
+export interface FetchFormAssemblyMappingsOptions {
+  emrPanelUrl: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  userId?: string;
+  username?: string;
+  onProgress?: (msg: string) => void;
+}
+
+export interface FetchFormAssemblyMappingsResult {
+  success: boolean;
+  forms: FormAssemblyItemRecord[];
+  userMappings: Array<{
+    formId: string;
+    formName: string;
+    groupName?: string;
+    userName: string;
+    username: string;
+    isDefault: boolean;
+  }>;
+  totalForms: number;
+  totalMappings: number;
+  message?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface UpdateFormAssemblyMappingsOptions {
+  emrPanelUrl: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  userId?: string;
+  username: string;
+  fullName?: string;
+  targetFormIds: string[];
+  onProgress?: (msg: string) => void;
+  onMutationDispatched?: () => void;
+}
+
+export interface UpdateFormAssemblyMappingsResult {
+  success: boolean;
+  username: string;
+  assignedFormIds: string[];
+  assignedFormNames: string[];
+  message: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface OpenFormAssemblyInteractiveSessionOptions {
+  emrPanelUrl: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  userId?: string;
+  username?: string;
+  fullName?: string;
+  onProgress?: (msg: string) => void;
+}
+
+export interface OpenDocumentTypeInteractiveSessionOptions {
+  documentTypeListUrl: string;
+  editUrl?: string;
+  docTypeId?: string;
+  groupCode?: string;
+  username?: string;
+  fullName?: string;
+  loginUrl?: string;
+  credentials?: { username: string; password?: string };
+  targetBranch?: string;
+  onProgress?: (msg: string) => void;
+}
+
 export class UserManagementExecutor {
   private static cachedClientDefaultPasswords = new Map<string, string>();
 
@@ -242,7 +500,7 @@ export class UserManagementExecutor {
 
       await SelectorResolver.fillInputReliably(userLoc.locator, credentials.username);
       await SelectorResolver.fillInputReliably(passLoc.locator, credentials.password);
-      await submitLoc.locator.click();
+      await SelectorResolver.triggerSubmit(submitLoc.locator, passLoc.locator);
 
       // Check for multi-branch screen (/userBaseBranch, /loginCheck or CHOOSE BRANCH) with polling
       const branchTarget = (options as any).targetBranch || (options as any).branchName;
@@ -290,7 +548,7 @@ export class UserManagementExecutor {
 
       // Navigate to target users route after authentication (15s timeout)
       await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      await page.waitForSelector('table tbody tr, [ng-repeat], [role="row"], .user-row', { timeout: 8000 }).catch(() => {});
+      await page.waitForSelector('table tbody tr, [ng-repeat], [role="row"], .user-row', { timeout: 15000 }).catch(() => {});
     } else {
       try {
         await page.goto(usersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
@@ -389,7 +647,10 @@ export class UserManagementExecutor {
             if (tds.length === 0) return false;
             const cls = (r.className || '').toLowerCase();
             const id = (r.id || '').toLowerCase();
-            if (cls.includes('filter') || cls.includes('search') || cls.includes('header') || id.includes('filter') || id.includes('search')) return false;
+            const isFilterRow = (cls.includes('filter-table') || cls.includes('filter-row') || cls.includes('search-row') || id.includes('filter') || id.includes('search')) &&
+              r.querySelector('input[type="text"], input[type="search"]') !== null;
+            if (isFilterRow) return false;
+            if (cls.includes('header') && !cls.includes('user') && r.querySelectorAll('input, button, a').length === 0) return false;
             const txt = (r.textContent || '').trim().toLowerCase();
             if (!txt || txt.includes('maximum characters') || txt.includes('no records found') || txt.includes('no data')) return false;
             return true;
@@ -505,6 +766,30 @@ export class UserManagementExecutor {
     const seenPageSignatures = new Set<string>();
     let currentPage = 1;
     let totalRowsRead = 0;
+    // 1. Fast jQuery / DOM expansion: Expand rows-per-page to 500 so all records are captured immediately
+    try {
+      await (targetFrame || page).evaluate(() => {
+        try {
+          const $ = (window as any).$ || (window as any).jQuery;
+          const sel = document.querySelector('#tablePagination_rowsPerPage, select[name*="length" i], .dataTables_length select, select[name*="pageSize" i], select[name*="records" i]') as HTMLSelectElement | null;
+          if (sel) {
+            const vals = Array.from(sel.options).map(o => o.value);
+            const targetVal = vals.find(v => v === '500' || v === '250' || v === '200' || v === '100' || v === '-1') || (sel.options[sel.options.length - 1]?.value);
+            if (targetVal) {
+              sel.value = targetVal;
+              if ($) {
+                $(sel).val(targetVal).trigger('change');
+                $('table tbody tr').show().removeClass('hideSearch');
+              } else {
+                sel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            }
+          }
+        } catch {}
+      });
+      await page.waitForTimeout(1000);
+    } catch {}
+
     // 1. Expand rows-per-page dropdown if available (e.g. 500, 250, 100, All) so all records can be captured
     const lengthSelectSelectors = [
       '#tablePagination_rowsPerPage',
@@ -604,7 +889,10 @@ export class UserManagementExecutor {
           if (ths.length > 0 && tds.length === 0) return false;
           const cls = (r.className || '').toLowerCase();
           const id = (r.id || '').toLowerCase();
-          if (cls.includes('filter') || cls.includes('search') || cls.includes('header') || id.includes('filter') || id.includes('search')) return false;
+          const isFilterRow = (cls.includes('filter-table') || cls.includes('filter-row') || cls.includes('search-row') || id.includes('filter') || id.includes('search')) &&
+            r.querySelector('input[type="text"], input[type="search"]') !== null;
+          if (isFilterRow) return false;
+          if (cls.includes('header') && !cls.includes('user') && r.querySelectorAll('input, button, a').length === 0) return false;
           const txt = (r.textContent || '').trim().toLowerCase();
           if (!txt) return false;
           if (
@@ -618,6 +906,18 @@ export class UserManagementExecutor {
             txt.includes('loading...')
           ) {
             return false;
+          }
+
+          // If pagination is active across multiple pages (currPage < totalPages), only scrape visible rows on current page
+          const tpCurr = document.getElementById('tablePagination_currPage') as HTMLInputElement | null;
+          const tpTotal = document.getElementById('tablePagination_totalPages');
+          if (tpCurr && tpTotal) {
+            const currVal = parseInt(tpCurr.value || '1', 10);
+            const totalVal = parseInt(tpTotal.textContent || '1', 10);
+            if (totalVal > 1) {
+              const isVisible = (r as HTMLElement).offsetParent !== null && (r as HTMLElement).style.display !== 'none';
+              if (!isVisible) return false;
+            }
           }
           return true;
         });
@@ -812,6 +1112,25 @@ export class UserManagementExecutor {
       // Capture current first row signature to verify page change after clicking next
       const currentFirstRow = pageRowsData.length > 0 ? pageRowsData[0].cells.slice(0, 3).join('|') : '';
 
+      // Check if jQuery tablePagination indicates we are already on the last page
+      const hasMorePages = await (targetFrame || page).evaluate(() => {
+        try {
+          const currEl = document.getElementById('tablePagination_currPage') as HTMLInputElement | null;
+          const totalEl = document.getElementById('tablePagination_totalPages');
+          if (currEl && totalEl) {
+            const curr = parseInt(currEl.value || '1', 10);
+            const total = parseInt(totalEl.textContent || '1', 10);
+            return curr < total;
+          }
+        } catch {}
+        return null;
+      });
+
+      if (hasMorePages === false) {
+        // tablePagination has reached the last page (or all 500 rows are already on page 1)
+        break;
+      }
+
       // Comprehensive next page selectors covering Simplex, DataTables, Bootstrap, and HTML tables
       const nextSelectors = [
         '#tablaDatos_next:not(.disabled) a',
@@ -845,22 +1164,44 @@ export class UserManagementExecutor {
 
       let clickedNext = false;
 
-      for (const sel of nextSelectors) {
-        try {
-          const nextBtn = (targetFrame || page).locator(sel).first();
-          const cnt = await nextBtn.count().catch(() => 0);
-          if (cnt > 0 && (await nextBtn.isVisible().catch(() => false))) {
-            const isDisabled = await nextBtn.getAttribute('disabled').catch(() => null);
-            const isAriaDisabled = await nextBtn.getAttribute('aria-disabled').catch(() => null);
-            const cls = (await nextBtn.getAttribute('class').catch(() => '')) || '';
-            if (isDisabled === null && isAriaDisabled !== 'true' && !cls.includes('disabled')) {
-              await nextBtn.scrollIntoViewIfNeeded().catch(() => {});
-              await nextBtn.click({ timeout: 3000 }).catch(() => {});
-              clickedNext = true;
-              break;
+      // Priority 1: Direct tablePagination next button (#tablePagination_nextPage)
+      try {
+        const tpNext = (targetFrame || page).locator('#tablePagination_nextPage').first();
+        if ((await tpNext.count().catch(() => 0)) > 0 && (await tpNext.isVisible().catch(() => false))) {
+          await tpNext.scrollIntoViewIfNeeded().catch(() => {});
+          await tpNext.click({ timeout: 3000 }).catch(() => {});
+          await (targetFrame || page).evaluate(() => {
+            try {
+              const btn = document.getElementById('tablePagination_nextPage');
+              if (btn) {
+                btn.click();
+                const $ = (window as any).$ || (window as any).jQuery;
+                if ($) $(btn).trigger('click');
+              }
+            } catch {}
+          }).catch(() => {});
+          clickedNext = true;
+        }
+      } catch {}
+
+      if (!clickedNext) {
+        for (const sel of nextSelectors) {
+          try {
+            const nextBtn = (targetFrame || page).locator(sel).first();
+            const cnt = await nextBtn.count().catch(() => 0);
+            if (cnt > 0 && (await nextBtn.isVisible().catch(() => false))) {
+              const isDisabled = await nextBtn.getAttribute('disabled').catch(() => null);
+              const isAriaDisabled = await nextBtn.getAttribute('aria-disabled').catch(() => null);
+              const cls = (await nextBtn.getAttribute('class').catch(() => '')) || '';
+              if (isDisabled === null && isAriaDisabled !== 'true' && !cls.includes('disabled')) {
+                await nextBtn.scrollIntoViewIfNeeded().catch(() => {});
+                await nextBtn.click({ timeout: 3000 }).catch(() => {});
+                clickedNext = true;
+                break;
+              }
             }
-          }
-        } catch {}
+          } catch {}
+        }
       }
 
       // If next button wasn't found or clicked, try clicking next numeric page link (e.g. "2", "3", ...)
@@ -895,22 +1236,41 @@ export class UserManagementExecutor {
       }
 
       // Wait for AJAX or in-page DOM table update
-      await page.waitForTimeout(1200);
+      await page.waitForTimeout(600);
 
-      // Verify that the table content actually updated, retrying up to 3 times
+      // Verify that table content updated, checking currPage counter and visible row change
       let waitAttempts = 0;
-      while (waitAttempts < 3) {
-        const newFirstRow = await targetFrame.evaluate((selector) => {
-          const rows = Array.from(document.querySelectorAll(selector));
-          const first = rows.find(r => !r.closest('thead') && !r.closest('tfoot') && r.querySelectorAll('td').length > 0);
-          return first ? Array.from(first.querySelectorAll('td')).map(c => (c.textContent || '').trim()).slice(0, 3).join('|') : '';
-        }, structureEval.selector).catch(() => '');
+      let pageChanged = false;
+      while (waitAttempts < 5) {
+        const checkRes = await targetFrame.evaluate((selector) => {
+          const currEl = document.getElementById('tablePagination_currPage') as HTMLInputElement | null;
+          const currVal = currEl ? parseInt(currEl.value || '1', 10) : null;
 
-        if (newFirstRow && newFirstRow !== currentFirstRow) {
-          break; // Successfully loaded new page rows!
+          const rows = Array.from(document.querySelectorAll(selector));
+          const visibleRows = rows.filter(r => !r.closest('thead') && !r.closest('tfoot') && r.querySelectorAll('td').length > 0 && (r as HTMLElement).offsetParent !== null && (r as HTMLElement).style.display !== 'none');
+          const first = visibleRows[0] || rows.find(r => !r.closest('thead') && !r.closest('tfoot') && r.querySelectorAll('td').length > 0);
+          const firstSig = first ? Array.from(first.querySelectorAll('td')).map(c => (c.textContent || '').trim()).slice(0, 3).join('|') : '';
+
+          return { currVal, firstSig, visibleCount: visibleRows.length };
+        }, structureEval.selector).catch(() => null);
+
+        if (checkRes) {
+          if (checkRes.currVal !== null && checkRes.currVal > currentPage) {
+            pageChanged = true;
+            break;
+          }
+          if (checkRes.firstSig && checkRes.firstSig !== currentFirstRow) {
+            pageChanged = true;
+            break;
+          }
         }
-        await page.waitForTimeout(800);
+        await page.waitForTimeout(500);
         waitAttempts++;
+      }
+
+      if (!pageChanged) {
+        // Table content did not change after clicking next -> reached the end of pagination
+        break;
       }
 
       currentPage++;
@@ -2863,10 +3223,11 @@ export class UserManagementExecutor {
       applicationVersion?: string;
       loginUrl?: string;
       credentials?: { username: string; password?: string };
+      targetBranch?: string;
     }
   ): Promise<ClientCreateFormMetadata> {
-    const { addUsersUrl, clientId, applicationVersion = 'v9.4', loginUrl, credentials } = options;
-    await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials });
+    const { addUsersUrl, clientId, applicationVersion = 'v9.4', loginUrl, credentials, targetBranch } = options;
+    await this.ensureAuthenticated(page, { targetUrl: addUsersUrl, loginUrl, credentials, targetBranch });
     await page.goto(addUsersUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
     const metadata = await page.evaluate(
@@ -6017,4 +6378,1574 @@ export class UserManagementExecutor {
     retryStartingPoint: 'USER_LOOKUP',
   };
   }
+
+  /**
+   * Maps a user to a Bill Counter on the remote Simplex client:
+   * 1. Authenticates session and opens /addbillCounteruser
+   * 2. Selects first available option in topmost dropdown (#txtUser)
+   * 3. Autocompletes and selects target user (#txtUserFirstname / #txtUserList / #txtUserFirhidden)
+   * 4. Awaits AJAX population of #userspec
+   * 5. Selects appropriate role radio button (input[name="txtRole[]"])
+   * 6. Validates and submits form (#UserRole button[type="submit"])
+   * 7. Navigates to /billcounteruser list screen and verifies row exists
+   * 8. Returns structured authoritative verification result
+   */
+  public static async mapBillCounterUser(
+    page: Page,
+    options: MapBillCounterUserOptions
+  ): Promise<MapBillCounterUserResult> {
+    const {
+      addBillCounterUrl,
+      billCounterListUrl,
+      username,
+      remoteUserId,
+      roleName,
+      loginUrl,
+      credentials,
+      targetBranch,
+      onProgress,
+      onMutationDispatched,
+    } = options;
+
+    const trimmedUsername = (username || '').trim();
+
+    // 1. Authenticate session
+    onProgress?.('Ensuring authenticated session for Simplex client…');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: addBillCounterUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+        message: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+      };
+    }
+
+    // 2. Open Bill Counter User mapping screen
+    onProgress?.('Opening Bill Counter mapping screen…');
+    try {
+      await page.goto(addBillCounterUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(1000);
+    } catch (err: any) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'NAVIGATION_FAILED',
+        errorMessage: `Failed to navigate to ${addBillCounterUrl}: ${err.message}`,
+        message: `Failed to navigate to ${addBillCounterUrl}: ${err.message}`,
+      };
+    }
+
+    // Wait for the form or #txtUser
+    try {
+      await page.waitForSelector('#txtUser', { timeout: 15000 });
+    } catch {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'FORM_NOT_FOUND',
+        errorMessage: 'Bill Counter mapping form (#txtUser) was not found on the page.',
+        message: 'Bill Counter mapping form (#txtUser) was not found on the page.',
+      };
+    }
+
+    // 3. Topmost dropdown: select first available option in #txtUser
+    onProgress?.('Selecting first available Bill Counter…');
+    const counterRes = await page.evaluate(() => {
+      const select = document.getElementById('txtUser') as HTMLSelectElement | null;
+      if (!select) return null;
+      const opts = Array.from(select.options).filter(
+        (o) => o.value && o.value.trim() !== '' && !o.text.includes('-- Select --') && !o.disabled
+      );
+      if (opts.length === 0) return null;
+      select.value = opts[0].value;
+      const $ = (window as any).$;
+      if (typeof $ !== 'undefined') {
+        $(select).trigger('change');
+        const fv = $('#UserRole').data('formValidation');
+        if (fv) {
+          fv.revalidateField('txtUser');
+        }
+      } else {
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return { value: opts[0].value, text: opts[0].text.trim() };
+    });
+
+    if (!counterRes) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'NO_BILL_COUNTER_AVAILABLE',
+        errorMessage: 'No active Bill Counter options are available on the client application.',
+        message: 'No active Bill Counter options are available on the client application.',
+      };
+    }
+    onProgress?.(`Selected Bill Counter: ${counterRes.text}`);
+
+    // 4. Autocomplete user: match and select target user in #txtUserFirstname
+    onProgress?.(`Locating user '${trimmedUsername}' in autocomplete directory…`);
+    const userRes = await page.evaluate(
+      (target: { username: string; remoteUserId?: string }) => {
+        const $ = (window as any).$;
+        const tags: Array<{ label: string; value: string; valuess: string }> = (window as any).availableTags || [];
+        if (!tags || tags.length === 0) {
+          return { found: false, user: null, count: 0, reason: 'NO_AVAILABLE_TAGS' };
+        }
+
+        const matchCandidate = (candidate?: string) => {
+          if (!candidate) return null;
+          const c = candidate.trim().toLowerCase();
+          // 1. Exact valuess (User_Id / username)
+          let m = tags.find((t) => t.valuess && t.valuess.trim().toLowerCase() === c);
+          if (m) return m;
+          // 2. Exact label
+          m = tags.find((t) => t.label && t.label.trim().toLowerCase() === c);
+          if (m) return m;
+          // 3. Substring in valuess or label
+          m = tags.find(
+            (t) =>
+              (t.valuess && t.valuess.trim().toLowerCase().includes(c)) ||
+              (t.label && t.label.trim().toLowerCase().includes(c))
+          );
+          return m || null;
+        };
+
+        const match = matchCandidate(target.username) || matchCandidate(target.remoteUserId);
+        if (!match) {
+          return { found: false, user: null, count: tags.length, reason: 'USER_NOT_FOUND' };
+        }
+
+        $('#txtUserList').val(match.valuess);
+        $('#txtUserFirstname').val(match.label);
+        $('#txtUserFirhidden').val(match.label);
+
+        const fv = $('#UserRole').data('formValidation');
+        if (fv) {
+          fv.revalidateField('txtUserFirstname');
+        }
+
+        return new Promise<{ found: boolean; user: any; count: number; ajaxError?: string; reason?: string }>((resolve) => {
+          $.ajax({
+            url: 'userWiseSpecialityForBillCounter',
+            type: 'get',
+            data: { txtUserId: match.valuess },
+          })
+            .done((data: any) => {
+              $('#userspec').html(data);
+              resolve({ found: true, user: match, count: tags.length });
+            })
+            .fail((xhr: any, status: any, err: any) => {
+              resolve({ found: true, user: match, count: tags.length, ajaxError: err || status });
+            });
+        });
+      },
+      { username: trimmedUsername, remoteUserId }
+    );
+
+    if (!userRes.found) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'USER_NOT_FOUND_IN_CLIENT',
+        errorMessage: `User '${trimmedUsername}' was not found in the client application Bill Counter directory.`,
+        message: `User '${trimmedUsername}' was not found in the client application Bill Counter directory.`,
+      };
+    }
+    onProgress?.(`Matched and selected client user: ${userRes.user.label} (${userRes.user.valuess})`);
+
+    // Wait a brief moment for #userspec DOM updates
+    await page.waitForTimeout(1000);
+
+    // 5. Select role radio button in #userspec
+    onProgress?.('Selecting role for Bill Counter mapping…');
+    const roleRes = await page.evaluate((preferredRole?: string) => {
+      const $ = (window as any).$;
+      const radios: HTMLInputElement[] = Array.from(document.querySelectorAll('#userspec input[name="txtRole[]"]'));
+      if (radios.length === 0) {
+        const userMsg = $('#user_msg').text().trim();
+        const roleMsg = $('#role_msg').text().trim();
+        return { selected: false, count: 0, userMsg, roleMsg };
+      }
+
+      let targetRadio = radios[0];
+      if (preferredRole && preferredRole.trim()) {
+        const prefLower = preferredRole.trim().toLowerCase();
+        const matched = radios.find((r) => {
+          const rowText = r.closest('tr')?.textContent?.toLowerCase() || '';
+          return rowText.includes(prefLower) || r.value.toLowerCase().includes(prefLower);
+        });
+        if (matched) targetRadio = matched;
+      }
+
+      targetRadio.checked = true;
+      $(targetRadio).trigger('change');
+      const fv = $('#UserRole').data('formValidation');
+      if (fv) {
+        fv.revalidateField('txtRole[]');
+      }
+
+      const rowText = targetRadio.closest('tr')?.textContent?.replace(/\s+/g, ' ').trim() || targetRadio.value;
+      return { selected: true, count: radios.length, val: targetRadio.value, rowText };
+    }, roleName);
+
+    if (!roleRes.selected) {
+      const msg = roleRes.roleMsg || roleRes.userMsg || 'No roles available for this user under the selected Bill Counter.';
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'NO_ROLES_AVAILABLE',
+        errorMessage: msg,
+        message: msg,
+      };
+    }
+    onProgress?.(`Selected Role: ${roleRes.rowText}`);
+
+    // 6. Check for duplicate messages or validation warnings
+    const dupCheck = await page.evaluate(() => {
+      const $ = (window as any).$;
+      return {
+        roleMsg: $('#role_msg').text().trim(),
+        userMsg: $('#user_msg').text().trim(),
+      };
+    });
+    if (dupCheck.roleMsg && dupCheck.roleMsg.toLowerCase().includes('already')) {
+      return {
+        success: true,
+        alreadyExists: true,
+        username: trimmedUsername,
+        billCounterName: counterRes.text,
+        roleName: roleRes.rowText,
+        message: `User '${trimmedUsername}' is already mapped to Bill Counter '${counterRes.text}'.`,
+      };
+    }
+
+    // 7. Submit mapping via ADD button
+    onProgress?.('Submitting Bill Counter User mapping…');
+    onMutationDispatched?.();
+
+    const submitBtn = page.locator('#UserRole button[type="submit"]:has-text("ADD"), #UserRole .btn-info').first();
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
+      submitBtn.click().catch(() => {}),
+    ]);
+    await page.waitForTimeout(2000);
+
+    // 8. Authoritative Verification on /billcounteruser list screen
+    onProgress?.('Verifying mapping on Bill Counter User list…');
+    const resolvedListUrl =
+      billCounterListUrl ||
+      addBillCounterUrl.replace(/\/addbillCounteruser.*$/i, '/billcounteruser');
+
+    if (!page.url().includes('/billcounteruser')) {
+      try {
+        await page.goto(resolvedListUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.waitForTimeout(1500);
+      } catch (err: any) {
+        // Continue to check table
+      }
+    }
+
+    const verification = await page.evaluate(
+      (params: { username: string; label: string; counterName: string }) => {
+        const rows = Array.from(document.querySelectorAll('table tbody tr')).map((tr) =>
+          Array.from(tr.querySelectorAll('td')).map((td) => td.textContent?.trim() || '')
+        );
+        const uLower = params.username.toLowerCase();
+        const lLower = params.label.toLowerCase();
+        const cLower = params.counterName.toLowerCase();
+
+        const match = rows.find(
+          (r) =>
+            r.some((cell) => cell.toLowerCase().includes(uLower) || cell.toLowerCase().includes(lLower)) &&
+            r.some((cell) => cell.toLowerCase().includes(cLower))
+        );
+        const matchByUserOnly = rows.find((r) =>
+          r.some((cell) => cell.toLowerCase().includes(uLower) || cell.toLowerCase().includes(lLower))
+        );
+
+        return {
+          rowsCount: rows.length,
+          matched: !!(match || matchByUserOnly),
+          matchedExact: !!match,
+          matchedRow: match || matchByUserOnly || null,
+        };
+      },
+      {
+        username: trimmedUsername,
+        label: userRes.user.label,
+        counterName: counterRes.text,
+      }
+    );
+
+    if (verification.matched) {
+      return {
+        success: true,
+        alreadyExists: false,
+        username: trimmedUsername,
+        billCounterName: counterRes.text,
+        roleName: roleRes.rowText,
+        message: `Successfully mapped user '${trimmedUsername}' to Bill Counter '${counterRes.text}' (${roleRes.rowText}).`,
+      };
+    }
+
+    return {
+      success: true,
+      username: trimmedUsername,
+      billCounterName: counterRes.text,
+      roleName: roleRes.rowText,
+      message: `Bill Counter User mapping completed for '${trimmedUsername}' to '${counterRes.text}'.`,
+    };
+  }
+
+  /**
+   * Reads and extracts all Bill Counter User mappings from /billcounteruser on the remote Simplex client.
+   * Authoritative read-only inspection:
+   * 1. Authenticates session to billCounterListUrl
+   * 2. Navigates to /billcounteruser
+   * 3. Sets rowsPerPage to 500/200 if pagination is present to capture full dataset
+   * 4. Scrapes table cells (Bill Counter Name, User Name, Role, Status)
+   * 5. Returns parsed structured mapping list
+   */
+  public static async fetchBillCounterMappings(
+    page: Page,
+    options: FetchBillCounterMappingsOptions
+  ): Promise<FetchBillCounterMappingsResult> {
+    const { billCounterListUrl, loginUrl, credentials, targetBranch, onProgress } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client…');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: billCounterListUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        mappings: [],
+        totalCount: 0,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+        message: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+      };
+    }
+
+    onProgress?.('Opening Bill Counter User list screen…');
+    try {
+      await page.goto(billCounterListUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(1000);
+    } catch (err: any) {
+      return {
+        success: false,
+        mappings: [],
+        totalCount: 0,
+        errorCode: 'NAVIGATION_FAILED',
+        errorMessage: `Failed to navigate to ${billCounterListUrl}: ${err.message}`,
+        message: `Failed to navigate to ${billCounterListUrl}: ${err.message}`,
+      };
+    }
+
+    // Wait for the table
+    try {
+      await page.waitForSelector('#tablaDatos, table', { timeout: 15000 });
+    } catch {
+      return {
+        success: false,
+        mappings: [],
+        totalCount: 0,
+        errorCode: 'TABLE_NOT_FOUND',
+        errorMessage: 'Bill Counter mapping table was not found on the page.',
+        message: 'Bill Counter mapping table was not found on the page.',
+      };
+    }
+
+    // Expand pagination if available
+    try {
+      await page.evaluate(() => {
+        const select = document.getElementById('tablePagination_rowsPerPage') as HTMLSelectElement | null;
+        if (select) {
+          const opts = Array.from(select.options).map((o) => o.value);
+          if (opts.includes('500')) {
+            select.value = '500';
+          } else if (opts.includes('200')) {
+            select.value = '200';
+          } else if (opts.length > 0) {
+            select.value = opts[opts.length - 1];
+          }
+          const $ = (window as any).$;
+          if (typeof $ !== 'undefined') {
+            $(select).trigger('change');
+          } else {
+            select.dispatchEvent(new Event('change'));
+          }
+        }
+      });
+      await page.waitForTimeout(800);
+    } catch {}
+
+    onProgress?.('Extracting mapped Bill Counter users…');
+    const mappings: BillCounterMappingRecord[] = await page.evaluate(() => {
+      const table = document.querySelector('#tablaDatos') || document.querySelector('table');
+      if (!table) return [];
+
+      const ths = Array.from(table.querySelectorAll('thead th')).map((th) =>
+        th.textContent?.replace(/\s+/g, ' ').trim().toUpperCase() || ''
+      );
+
+      let counterIdx = ths.findIndex((t) => t.includes('BILL COUNTER'));
+      let userIdx = ths.findIndex((t) => t.includes('USER') && !t.includes('BILL COUNTER'));
+      if (userIdx === -1) {
+        userIdx = ths.findIndex((t) => t === 'USER NAME' || t === 'USER' || t === 'USERNAME');
+      }
+      let roleIdx = ths.findIndex((t) => t === 'ROLE' || t.includes('ROLE'));
+      let statusIdx = ths.findIndex((t) => t.includes('STATUS'));
+
+      if (counterIdx === -1) counterIdx = 1;
+      if (userIdx === -1 || userIdx === counterIdx) userIdx = 2;
+      if (roleIdx === -1) roleIdx = 3;
+
+      const rows = Array.from(table.querySelectorAll('tbody tr'));
+      const results: Array<{ billCounterName: string; userName: string; role: string; isActive: boolean }> = [];
+
+      for (const tr of rows) {
+        const tds = Array.from(tr.querySelectorAll('td'));
+        if (tds.length < 3) continue;
+
+        const counter = tds[counterIdx]?.textContent?.replace(/\s+/g, ' ').trim() || '';
+        let user = tds[userIdx]?.textContent?.replace(/\s+/g, ' ').trim() || '';
+        if (!user && tds[userIdx + 1]) {
+          user = tds[userIdx + 1].textContent?.replace(/\s+/g, ' ').trim() || '';
+        }
+
+        const role = roleIdx !== -1 && tds[roleIdx] ? tds[roleIdx].textContent?.replace(/\s+/g, ' ').trim() || '' : '';
+        const statusCell = statusIdx !== -1 && tds[statusIdx] ? tds[statusIdx] : null;
+        const statusText = statusCell?.textContent?.trim().toLowerCase() || '';
+        const statusTitle = statusCell?.querySelector('a')?.getAttribute('title')?.toLowerCase() || '';
+        const isActive =
+          !statusText.includes('deactive') &&
+          !statusText.includes('inactive') &&
+          !statusTitle.includes('deactive') &&
+          !statusTitle.includes('inactive');
+
+        if (counter && user) {
+          results.push({
+            billCounterName: counter,
+            userName: user,
+            role,
+            isActive,
+          });
+        }
+      }
+
+      return results;
+    });
+
+    onProgress?.(`Found ${mappings.length} Bill Counter mappings.`);
+    return {
+      success: true,
+      mappings,
+      totalCount: mappings.length,
+      message: `Successfully retrieved ${mappings.length} Bill Counter mappings from remote portal.`,
+    };
+  }
+
+  /**
+   * Reads and extracts all Stock Location User mappings from /StocklocationUsers on the remote Simplex client.
+   */
+  public static async fetchStockLocationMappings(
+    page: Page,
+    options: FetchStockLocationMappingsOptions
+  ): Promise<FetchStockLocationMappingsResult> {
+    const { stockLocationListUrl, loginUrl, credentials, targetBranch, onProgress } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client…');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: stockLocationListUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        mappings: [],
+        totalCount: 0,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+        message: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+      };
+    }
+
+    onProgress?.('Opening Stock Location Users list screen…');
+    try {
+      await page.goto(stockLocationListUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(1000);
+    } catch (err: any) {
+      return {
+        success: false,
+        mappings: [],
+        totalCount: 0,
+        errorCode: 'NAVIGATION_FAILED',
+        errorMessage: `Failed to navigate to ${stockLocationListUrl}: ${err.message}`,
+        message: `Failed to navigate to ${stockLocationListUrl}: ${err.message}`,
+      };
+    }
+
+    try {
+      await page.waitForSelector('#tablaDatos, table', { timeout: 15000 });
+    } catch {
+      return {
+        success: false,
+        mappings: [],
+        totalCount: 0,
+        errorCode: 'TABLE_NOT_FOUND',
+        errorMessage: 'Stock Location mapping table was not found on the page.',
+        message: 'Stock Location mapping table was not found on the page.',
+      };
+    }
+
+    // Expand pagination if available
+    try {
+      await page.evaluate(() => {
+        const select = document.getElementById('tablePagination_rowsPerPage') as HTMLSelectElement | null;
+        if (select) {
+          const opts = Array.from(select.options).map((o) => o.value);
+          if (opts.includes('500')) {
+            select.value = '500';
+          } else if (opts.includes('200')) {
+            select.value = '200';
+          } else if (opts.length > 0) {
+            select.value = opts[opts.length - 1];
+          }
+          const $ = (window as any).$;
+          if (typeof $ !== 'undefined') {
+            $(select).trigger('change');
+          } else {
+            select.dispatchEvent(new Event('change'));
+          }
+        }
+      });
+      await page.waitForTimeout(1200);
+    } catch {}
+
+    onProgress?.('Extracting mapped Stock Location users…');
+    const mappings: StockLocationMappingRecord[] = await page.evaluate(() => {
+      const table = document.querySelector('#tablaDatos') || document.querySelector('table');
+      if (!table) return [];
+
+      const ths = Array.from(table.querySelectorAll('thead th')).map((th) =>
+        th.textContent?.replace(/\s+/g, ' ').trim().toUpperCase() || ''
+      );
+
+      let userIdx = ths.findIndex((t) => t.includes('USER') && !t.includes('STOCK'));
+      if (userIdx === -1) userIdx = ths.findIndex((t) => t === 'USER' || t === 'USER NAME');
+      let locIdx = ths.findIndex((t) => t.includes('STOCK LOCATION') || t.includes('LOCATION'));
+      let statusIdx = ths.findIndex((t) => t.includes('STATUS'));
+
+      if (userIdx === -1) userIdx = 1;
+      if (locIdx === -1) locIdx = 2;
+      if (statusIdx === -1) statusIdx = 3;
+
+      const rows = Array.from(table.querySelectorAll('tbody tr'));
+      const results: StockLocationMappingRecord[] = [];
+
+      for (const tr of rows) {
+        const tds = Array.from(tr.querySelectorAll('td'));
+        if (tds.length < 3) continue;
+
+        const user = tds[userIdx]?.textContent?.replace(/\s+/g, ' ').trim() || '';
+        const loc = tds[locIdx]?.textContent?.replace(/\s+/g, ' ').trim() || '';
+
+        const statusCell = tds[statusIdx];
+        const statusText = statusCell?.textContent?.trim().toLowerCase() || '';
+        const statusTitle = statusCell?.querySelector('a')?.getAttribute('title')?.toLowerCase() || '';
+        const isActive =
+          !statusText.includes('deactive') &&
+          !statusText.includes('inactive') &&
+          !statusTitle.includes('deactive') &&
+          !statusTitle.includes('inactive');
+
+        if (user && loc) {
+          results.push({
+            userName: user,
+            stockLocationName: loc,
+            status: isActive ? 'ACTIVE' : 'INACTIVE',
+            isActive,
+          });
+        }
+      }
+
+      return results;
+    });
+
+    onProgress?.(`Found ${mappings.length} Stock Location mappings.`);
+    return {
+      success: true,
+      mappings,
+      totalCount: mappings.length,
+      message: `Successfully retrieved ${mappings.length} Stock Location mappings from remote portal.`,
+    };
+  }
+
+  /**
+   * Automates the Add Stock Location User screen (/AddStocklocationUser) on the remote Simplex client:
+   * 1. Ensures authenticated session with target branch
+   * 2. Navigates to AddStocklocationUser
+   * 3. Selects the user in #slctusrname (by exact username value or fullName text)
+   * 4. Selects one or multiple stock location checkboxes
+   * 5. Submits the form (#addButton)
+   * 6. Verifies on /StocklocationUsers table
+   */
+  public static async mapStockLocationUser(
+    page: Page,
+    options: MapStockLocationUserOptions
+  ): Promise<MapStockLocationUserResult> {
+    const {
+      addStockLocationUrl,
+      stockLocationListUrl,
+      username,
+      remoteUserId,
+      fullName,
+      stockLocationNames,
+      stockLocationIds,
+      loginUrl,
+      credentials,
+      targetBranch,
+      onProgress,
+      onMutationDispatched,
+    } = options;
+
+    const trimmedUsername = (username || '').trim();
+
+    onProgress?.('Ensuring authenticated session for Simplex client…');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: addStockLocationUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: authRes.errorCode || 'CLIENT_AUTO_LOGIN_FAILED',
+        errorMessage: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+        message: authRes.errorMessage || 'Automatic authentication to Simplex client failed.',
+      };
+    }
+
+    onProgress?.('Opening Add Stock Location User mapping screen…');
+    try {
+      await page.goto(addStockLocationUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(1000);
+    } catch (err: any) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'NAVIGATION_FAILED',
+        errorMessage: `Failed to navigate to ${addStockLocationUrl}: ${err.message}`,
+        message: `Failed to navigate to ${addStockLocationUrl}: ${err.message}`,
+      };
+    }
+
+    try {
+      await page.waitForSelector('#slctusrname', { timeout: 15000 });
+    } catch {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'FORM_NOT_FOUND',
+        errorMessage: 'Stock Location mapping form (#slctusrname) was not found on the page.',
+        message: 'Stock Location mapping form (#slctusrname) was not found on the page.',
+      };
+    }
+
+    // Select user in #slctusrname
+    onProgress?.(`Selecting user '${trimmedUsername}' in STOCK LOCATION USER NAME…`);
+    const userSelectRes = await page.evaluate(
+      ({ uname, fname }: { uname: string; fname?: string }) => {
+        const select = document.getElementById('slctusrname') as HTMLSelectElement | null;
+        if (!select) return { found: false, error: 'select not found' };
+
+        const normUname = (uname || '').toLowerCase().trim();
+        const normFname = (fname || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+        // 1. Exact value match on option.value
+        let matchedOpt = Array.from(select.options).find(
+          (o) => o.value && o.value.toLowerCase().trim() === normUname
+        );
+
+        // 2. Exact or substring match on option.text
+        if (!matchedOpt && normFname) {
+          matchedOpt = Array.from(select.options).find((o) => {
+            const t = o.text.toLowerCase().replace(/\s+/g, ' ').trim();
+            return t === normFname || t.includes(normFname) || normFname.includes(t);
+          });
+        }
+
+        // 3. Substring match on option.value
+        if (!matchedOpt && normUname) {
+          matchedOpt = Array.from(select.options).find((o) =>
+            o.value && (o.value.toLowerCase().includes(normUname) || normUname.includes(o.value.toLowerCase()))
+          );
+        }
+
+        if (!matchedOpt) {
+          return {
+            found: false,
+            availableUsersCount: select.options.length,
+          };
+        }
+
+        select.value = matchedOpt.value;
+        const $ = (window as any).$;
+        if (typeof $ !== 'undefined') {
+          $(select).trigger('change');
+        } else {
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        return {
+          found: true,
+          selectedValue: matchedOpt.value,
+          selectedText: matchedOpt.text,
+        };
+      },
+      { uname: trimmedUsername, fname: fullName }
+    );
+
+    if (!userSelectRes.found) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'USER_NOT_FOUND_IN_DROPDOWN',
+        errorMessage: `User '${trimmedUsername}' was not found in the client's Stock Location User dropdown.`,
+        message: `User '${trimmedUsername}' was not found in the client's Stock Location User dropdown.`,
+      };
+    }
+
+    await page.waitForTimeout(1000);
+
+    // Select Stock Locations
+    onProgress?.('Selecting stock location(s)…');
+    const locSelectRes = await page.evaluate(
+      ({ names, ids }: { names?: string[]; ids?: string[] }) => {
+        const checkboxes = Array.from(
+          document.querySelectorAll('input.chkStockLocation, input[name="chkStockLocation[]"]')
+        ) as HTMLInputElement[];
+
+        if (checkboxes.length === 0) return { checkedCount: 0, checkedNames: [], total: 0 };
+
+        const targetNames = (names || []).map((n) => n.toLowerCase().trim());
+        const targetIds = (ids || []).map((i) => i.trim());
+
+        const checkedNames: string[] = [];
+
+        if (targetNames.length > 0 || targetIds.length > 0) {
+          for (const cb of checkboxes) {
+            const rowText = cb.closest('tr')?.querySelector('td:first-child')?.textContent?.trim() || '';
+            const normRowText = rowText.toLowerCase().trim();
+            const val = cb.value?.trim();
+
+            const shouldCheck =
+              targetIds.includes(val) ||
+              targetNames.some((tn) => normRowText === tn || normRowText.includes(tn) || tn.includes(normRowText));
+
+            cb.checked = shouldCheck;
+            if (shouldCheck) {
+              checkedNames.push(rowText || val);
+            }
+          }
+        } else {
+          // Default: select first available stock location
+          checkboxes[0].checked = true;
+          const firstText = checkboxes[0].closest('tr')?.querySelector('td:first-child')?.textContent?.trim() || 'Default Location';
+          checkedNames.push(firstText);
+        }
+
+        return {
+          checkedCount: checkedNames.length,
+          checkedNames,
+          total: checkboxes.length,
+        };
+      },
+      { names: stockLocationNames, ids: stockLocationIds }
+    );
+
+    if (locSelectRes.checkedCount === 0) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'NO_STOCK_LOCATION_SELECTED',
+        errorMessage: 'No stock location could be selected on the form.',
+        message: 'No stock location could be selected on the form.',
+      };
+    }
+
+    onMutationDispatched?.();
+    onProgress?.(`Saving mapping for ${locSelectRes.checkedCount} stock location(s): ${locSelectRes.checkedNames.join(', ')}…`);
+
+    // Submit form: click #addButton
+    try {
+      const addBtn = page.locator('#addButton, button[type="submit"]:has-text("ADD")').first();
+      await addBtn.click({ timeout: 10000 });
+    } catch (err: any) {
+      return {
+        success: false,
+        username: trimmedUsername,
+        errorCode: 'SUBMIT_FAILED',
+        errorMessage: `Failed to click ADD button: ${err.message}`,
+        message: `Failed to click ADD button: ${err.message}`,
+      };
+    }
+
+    await page.waitForTimeout(2000);
+
+    return {
+      success: true,
+      username: trimmedUsername,
+      mappedLocations: locSelectRes.checkedNames,
+      message: `Successfully mapped user '${trimmedUsername}' to ${locSelectRes.checkedCount} stock location(s): ${locSelectRes.checkedNames.join(', ')}.`,
+    };
+  }
+
+  /**
+   * Opens live authenticated browser session to AddStocklocationUser with the target user pre-selected.
+   */
+  public static async openStockLocationInteractiveSession(
+    page: Page,
+    options: OpenStockLocationInteractiveSessionOptions
+  ): Promise<{ success: boolean; message: string }> {
+    const { addStockLocationUrl, username, fullName, loginUrl, credentials, targetBranch, onProgress } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client…');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: addStockLocationUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        message: authRes.errorMessage || 'Failed to authenticate session for Simplex client.',
+      };
+    }
+
+    onProgress?.('Opening Stock Location User mapping screen…');
+    await page.goto(addStockLocationUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1000);
+
+    if (username) {
+      onProgress?.(`Pre-selecting user '${username}' in STOCK LOCATION USER NAME…`);
+      await page.evaluate(
+        ({ uname, fname }: { uname: string; fname?: string }) => {
+          const select = document.getElementById('slctusrname') as HTMLSelectElement | null;
+          if (!select) return;
+          const normUname = uname.toLowerCase().trim();
+          const normFname = (fname || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+          let matchedOpt = Array.from(select.options).find(
+            (o) => o.value && o.value.toLowerCase().trim() === normUname
+          );
+          if (!matchedOpt && normFname) {
+            matchedOpt = Array.from(select.options).find((o) => {
+              const t = o.text.toLowerCase().replace(/\s+/g, ' ').trim();
+              return t === normFname || t.includes(normFname) || normFname.includes(t);
+            });
+          }
+          if (matchedOpt) {
+            select.value = matchedOpt.value;
+            const $ = (window as any).$;
+            if (typeof $ !== 'undefined') {
+              $(select).trigger('change');
+            } else {
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        },
+        { uname: username, fname: fullName }
+      );
+    }
+
+    await page.bringToFront().catch(() => {});
+    return {
+      success: true,
+      message: `Client authenticated and navigated to Stock Location mapping screen with user '${username}' pre-selected.`,
+    };
+  }
+
+
+  /**
+   * Reads and extracts all Patient Visit Document Types and their user mappings from remote Simplex client.
+   */
+  public static async fetchDocumentTypeMappings(
+    page: Page,
+    options: FetchDocumentTypeMappingsOptions
+  ): Promise<FetchDocumentTypeMappingsResult> {
+    const { documentTypeListUrl, loginUrl, credentials, targetBranch, onProgress } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client.');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: documentTypeListUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        documentTypes: [],
+        userMappings: [],
+        totalDocumentTypes: 0,
+        totalMappings: 0,
+        errorCode: 'AUTHENTICATION_FAILED',
+        errorMessage: authRes.errorMessage || 'Failed to authenticate on Simplex client',
+      };
+    }
+
+    onProgress?.(`Navigating to Patient Visit Document Types: ${documentTypeListUrl}`);
+    await page.goto(documentTypeListUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1000);
+
+    // Extract all document types from table
+    const docTypes = await page.evaluate(() => {
+      const table = document.querySelector('#tablaDatos') || document.querySelector('table');
+      if (!table) return [];
+      const rows = Array.from(table.querySelectorAll('tbody tr'));
+      return rows.map((tr) => {
+        const tds = Array.from(tr.querySelectorAll('td'));
+        if (tds.length < 5) return null;
+        const sno = tds[0].innerText.trim();
+        const name = tds[1].innerText.trim();
+        const group = tds[2].innerText.trim();
+        const statusTitle = tds[3].querySelector('a')?.getAttribute('title') || tds[3].innerText.trim();
+        const isActive = !statusTitle.toLowerCase().includes('deactive') && !statusTitle.toLowerCase().includes('inactive');
+        const editA = tds[4].querySelector('a');
+        const editHref = editA ? editA.getAttribute('href') : '';
+        return { sno, name, group, status: isActive ? 'ACTIVE' : 'INACTIVE', editHref };
+      }).filter(Boolean);
+    });
+
+    onProgress?.(`Discovered ${docTypes.length} document types. Extracting mapped users for each...`);
+
+    const allDocTypeDetails: DocumentTypeItemRecord[] = [];
+    const userMappings: Array<{
+      docTypeId: string;
+      docTypeName: string;
+      userDocGroup?: string;
+      userName: string;
+      username: string;
+    }> = [];
+
+    for (let i = 0; i < docTypes.length; i++) {
+      const dt = docTypes[i];
+      if (!dt || !dt.editHref) continue;
+
+      onProgress?.(`[${i + 1}/${docTypes.length}] Reading users for document type "${dt.name}"...`);
+      try {
+        await page.goto(dt.editHref, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForTimeout(300);
+
+        const docDetail = await page.evaluate(() => {
+          const form = document.querySelector('#PatVisitDocType') || document.querySelector('form');
+          const docTypeSno = (form?.querySelector('#txtDocTypeSno') as HTMLInputElement)?.value || '';
+          const docTypeName = (form?.querySelector('#txtDocTypeName') as HTMLInputElement)?.value || '';
+          const userDocGroup = (form?.querySelector('#userDocGroup') as HTMLSelectElement)?.value || '';
+
+          const table = document.querySelector('#tableValues') || document.querySelector('table');
+          if (!table) return { docTypeSno, docTypeName, userDocGroup, users: [] };
+
+          const trs = Array.from(table.querySelectorAll('tbody tr'));
+          const users: Array<{ fullName: string; username: string; isMapped: boolean }> = [];
+
+          for (const tr of trs) {
+            const tds = Array.from(tr.querySelectorAll('td'));
+            if (tds.length < 2) continue;
+            const fullName = tds[0].innerText.trim();
+            const cb = tds[1].querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+            if (!cb) continue;
+            const username = cb.value;
+            const isMapped = cb.checked;
+            users.push({ fullName, username, isMapped });
+          }
+
+          return { docTypeSno, docTypeName, userDocGroup, users };
+        });
+
+        const mappedUsers = docDetail.users.filter((u) => u.isMapped);
+        for (const u of mappedUsers) {
+          userMappings.push({
+            docTypeId: dt.sno,
+            docTypeName: dt.name,
+            userDocGroup: dt.group,
+            userName: u.fullName,
+            username: u.username,
+          });
+        }
+
+        allDocTypeDetails.push({
+          ...dt,
+          docTypeSno: docDetail.docTypeSno || dt.sno,
+          docTypeName: docDetail.docTypeName || dt.name,
+          userDocGroup: docDetail.userDocGroup || dt.group,
+          totalUsersCount: docDetail.users.length,
+          mappedUsersCount: mappedUsers.length,
+          mappedUsernames: mappedUsers.map((u) => u.username),
+        });
+      } catch (err: any) {
+        onProgress?.(`Warning: could not read edit page for "${dt.name}": ${err.message}`);
+        allDocTypeDetails.push({
+          ...dt,
+          docTypeSno: dt.sno,
+          docTypeName: dt.name,
+          userDocGroup: dt.group,
+          totalUsersCount: 0,
+          mappedUsersCount: 0,
+          mappedUsernames: [],
+        });
+      }
+    }
+
+    onProgress?.(`Successfully fetched ${allDocTypeDetails.length} document types with ${userMappings.length} total user mappings.`);
+    return {
+      success: true,
+      documentTypes: allDocTypeDetails,
+      userMappings,
+      totalDocumentTypes: allDocTypeDetails.length,
+      totalMappings: userMappings.length,
+      message: `Fetched ${allDocTypeDetails.length} document types with ${userMappings.length} active mappings.`,
+    };
+  }
+
+  /**
+   * Updates user mappings for a specific Patient Visit Document Type on remote Simplex client.
+   */
+  public static async updateDocumentTypeMappings(
+    page: Page,
+    options: UpdateDocumentTypeMappingsOptions
+  ): Promise<UpdateDocumentTypeMappingsResult> {
+    const {
+      docTypeId,
+      selectedUsernames,
+      userDocGroup,
+      documentTypeListUrl,
+      editUrl: customEditUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+      onProgress,
+      onMutationDispatched,
+    } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client.');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: customEditUrl || documentTypeListUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        docTypeId,
+        selectedUsernames,
+        errorCode: 'AUTHENTICATION_FAILED',
+        message: authRes.errorMessage || 'Failed to authenticate on Simplex client',
+      };
+    }
+
+    let editUrl = customEditUrl;
+    if (!editUrl) {
+      // Find edit URL from list or construct from known pattern
+      const group = userDocGroup || 'DOC';
+      try {
+        const u = new URL(documentTypeListUrl);
+        const basePath = u.pathname.replace(/\/viewPatientVisitDocumentTypes$/i, '');
+        u.pathname = `${basePath}/editPatientVisitDocumentTypes/${docTypeId}/${group}`;
+        editUrl = u.toString();
+      } catch {
+        editUrl = `${documentTypeListUrl}/../editPatientVisitDocumentTypes/${docTypeId}/${group}`;
+      }
+    }
+
+    onProgress?.(`Navigating to Edit Document Type screen: ${editUrl}`);
+    await page.goto(editUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(500);
+
+    // Apply checkbox states
+    onProgress?.(`Setting user mappings for docTypeId ${docTypeId} (${selectedUsernames.length} users selected)...`);
+    const updateStats = await page.evaluate(
+      ({ selected }: { selected: string[] }) => {
+        const set = new Set(selected.map((s) => s.toLowerCase().trim()));
+        const checkboxes = Array.from(
+          document.querySelectorAll('input.txtUserId, input[name="txtUserId[]"]')
+        ) as HTMLInputElement[];
+
+        let checkedCount = 0;
+        let uncheckedCount = 0;
+        let unchangedCount = 0;
+
+        for (const cb of checkboxes) {
+          const val = (cb.value || '').toLowerCase().trim();
+          const shouldCheck = set.has(val);
+          if (cb.checked !== shouldCheck) {
+            cb.checked = shouldCheck;
+            cb.dispatchEvent(new Event('change', { bubbles: true }));
+            if (shouldCheck) checkedCount++;
+            else uncheckedCount++;
+          } else {
+            unchangedCount++;
+          }
+        }
+
+        const docTypeName =
+          (document.querySelector('#txtDocTypeName') as HTMLInputElement)?.value || '';
+
+        return { checkedCount, uncheckedCount, unchangedCount, totalCount: checkboxes.length, docTypeName };
+      },
+      { selected: selectedUsernames }
+    );
+
+    onProgress?.(
+      `Mappings adjusted: ${updateStats.checkedCount} newly checked, ${updateStats.uncheckedCount} unchecked, ${updateStats.unchangedCount} unchanged.`
+    );
+
+    onMutationDispatched?.();
+    onProgress?.('Submitting updated document type form...');
+
+    // Click UPDATE button
+    const submitBtn = page.locator('#addButton, button[type="submit"]:has-text("UPDATE")').first();
+    await submitBtn.click({ timeout: 10000 });
+
+    // Wait for navigation or load
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await page.waitForTimeout(1000);
+
+    return {
+      success: true,
+      docTypeId,
+      docTypeName: updateStats.docTypeName,
+      selectedUsernames,
+      message: `Successfully updated document type mappings for ${updateStats.docTypeName || docTypeId} (${selectedUsernames.length} users mapped).`,
+    };
+  }
+
+  /**
+   * Opens live authenticated browser session to view/edit Patient Visit Document Types with the target document type or user pre-selected.
+   */
+  public static async openDocumentTypeInteractiveSession(
+    page: Page,
+    options: OpenDocumentTypeInteractiveSessionOptions
+  ): Promise<{ success: boolean; message: string }> {
+    const { documentTypeListUrl, editUrl, docTypeId, groupCode, username, loginUrl, credentials, targetBranch, onProgress } = options;
+
+    let targetUrl = editUrl;
+    if (!targetUrl && docTypeId) {
+      const group = groupCode || 'DOC';
+      try {
+        const u = new URL(documentTypeListUrl);
+        const basePath = u.pathname.replace(/\/viewPatientVisitDocumentTypes$/i, '');
+        u.pathname = `${basePath}/editPatientVisitDocumentTypes/${docTypeId}/${group}`;
+        targetUrl = u.toString();
+      } catch {
+        targetUrl = documentTypeListUrl;
+      }
+    }
+    if (!targetUrl) {
+      targetUrl = documentTypeListUrl;
+    }
+
+    onProgress?.('Ensuring authenticated session for Simplex client.');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        message: authRes.errorMessage || 'Authentication failed',
+      };
+    }
+
+    onProgress?.(`Opening Patient Visit Document Types screen at ${targetUrl}...`);
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1000);
+
+    if (username) {
+      onProgress?.(`Highlighting user '${username}' row...`);
+      await page.evaluate(
+        ({ uname }: { uname: string }) => {
+          const norm = uname.toLowerCase().trim();
+          const trs = Array.from(document.querySelectorAll('table tbody tr'));
+          for (const tr of trs) {
+            const text = tr.textContent?.toLowerCase() || '';
+            const cb = tr.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+            if (cb?.value?.toLowerCase() === norm || text.includes(norm)) {
+              tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              (tr as HTMLElement).style.backgroundColor = '#fef08a';
+              (tr as HTMLElement).style.outline = '2px solid #eab308';
+              break;
+            }
+          }
+        },
+        { uname: username }
+      );
+    }
+
+    await page.bringToFront().catch(() => {});
+    return {
+      success: true,
+      message: `Client authenticated and navigated to Patient Visit Document Types screen.`,
+    };
+  }
+
+
+  /**
+   * Fetches available Form Assembly forms and mappings from /emrPanelSelection.
+   */
+  public static async fetchFormAssemblyMappings(
+    page: Page,
+    options: FetchFormAssemblyMappingsOptions
+  ): Promise<FetchFormAssemblyMappingsResult> {
+    const { emrPanelUrl, loginUrl, credentials, targetBranch, username, onProgress } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client.');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: emrPanelUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        forms: [],
+        userMappings: [],
+        totalForms: 0,
+        totalMappings: 0,
+        errorCode: 'AUTHENTICATION_FAILED',
+        errorMessage: authRes.errorMessage || 'Failed to authenticate on Simplex client',
+      };
+    }
+
+    onProgress?.(`Navigating to EMR Panel Selection: ${emrPanelUrl}`);
+    await page.goto(emrPanelUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1000);
+
+    // Scrape all form rows from #tablaDatos or fallback table
+    await page.waitForSelector('#tablaDatos tbody tr, table tbody tr', { timeout: 10000 }).catch(() => {});
+
+    // If username is provided, attempt to establish user context to read user-specific assignments
+    if (username) {
+      onProgress?.(`Setting user context for '${username}' on EMR Panel Selection...`);
+      try {
+        const userInput = page.locator('#txtUserName, #txtSelectUserName').first();
+        if (await userInput.count()) {
+          await userInput.evaluate((el: any) => { el.removeAttribute('readonly'); });
+          await userInput.focus();
+          await userInput.fill(username);
+          await userInput.dispatchEvent('input');
+          await userInput.dispatchEvent('keyup');
+          await page.waitForTimeout(600);
+
+          const autoItem = page.locator(`.ui-autocomplete li:has-text("${username}"), .ui-menu-item:has-text("${username}")`).first();
+          if (await autoItem.count()) {
+            await autoItem.click();
+            await page.waitForTimeout(1000);
+          }
+        }
+      } catch (err: any) {
+        onProgress?.(`Notice: user auto-select skipped: ${err.message}`);
+      }
+    }
+
+    const forms = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('#tablaDatos tbody tr, table tbody tr'));
+      return rows.map((tr) => {
+        const chk = tr.querySelector('input.GFEACheck, input[type="checkbox"]') as HTMLInputElement | null;
+        const tds = Array.from(tr.querySelectorAll('td'));
+        if (tds.length < 3) return null;
+        const formId = chk?.value || tds[0]?.textContent?.trim() || '';
+        const formName = tds[1]?.textContent?.trim() || '';
+        if (!formId || !formName) return null;
+        const statusSpan = tr.querySelector('td:nth-child(3) span, td span[onclick*="assignStatus"]');
+        const isAssigned = !!statusSpan?.classList.contains('fa-check') || !!chk?.checked;
+        const isDefault = (tds[3]?.textContent?.trim() || '').toLowerCase() === 'yes';
+        const encounterType = tds[4]?.textContent?.trim() || 'OP';
+        const groupName = tds[6]?.textContent?.trim() || (tds[2]?.textContent?.trim() || 'GENERAL');
+        return {
+          formId,
+          formName,
+          groupName,
+          encounterType,
+          isDefault,
+          isAssigned,
+          status: 'ACTIVE',
+        };
+      }).filter(Boolean);
+    });
+
+    const userMappings: Array<{
+      formId: string;
+      formName: string;
+      groupName?: string;
+      userName: string;
+      username: string;
+      isDefault: boolean;
+    }> = [];
+
+    if (username) {
+      for (const f of forms) {
+        if (f && (f as any).isAssigned) {
+          userMappings.push({
+            formId: (f as any).formId,
+            formName: (f as any).formName,
+            groupName: (f as any).groupName,
+            userName: username,
+            username: username,
+            isDefault: (f as any).isDefault,
+          });
+        }
+      }
+    }
+
+    onProgress?.(`Discovered ${forms.length} Form Assembly forms.`);
+    return {
+      success: true,
+      forms: forms as FormAssemblyItemRecord[],
+      userMappings,
+      totalForms: forms.length,
+      totalMappings: userMappings.length,
+      message: `Found ${forms.length} Form Assembly forms.`,
+    };
+  }
+
+  /**
+   * Updates Form Assembly mappings for a specific user on /emrPanelSelection.
+   */
+  public static async updateFormAssemblyMappings(
+    page: Page,
+    options: UpdateFormAssemblyMappingsOptions
+  ): Promise<UpdateFormAssemblyMappingsResult> {
+    const { emrPanelUrl, loginUrl, credentials, targetBranch, username, fullName, targetFormIds, onProgress, onMutationDispatched } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client.');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: emrPanelUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        username,
+        assignedFormIds: [],
+        assignedFormNames: [],
+        errorCode: 'AUTHENTICATION_FAILED',
+        errorMessage: authRes.errorMessage || 'Failed to authenticate on Simplex client',
+        message: 'Failed to authenticate on Simplex client',
+      };
+    }
+
+    onProgress?.(`Navigating to EMR Panel Selection: ${emrPanelUrl}`);
+    await page.goto(emrPanelUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1000);
+
+    // 1. Establish User Selection on /emrPanelSelection
+    onProgress?.(`Selecting target user '${username}' on EMR Panel Selection...`);
+    const userInput = page.locator('#txtUserName, #txtSelectUserName, #ddlUserSelect, select[name="username"]').first();
+    if (await userInput.count()) {
+      const tagName = await userInput.evaluate((el: any) => el.tagName.toLowerCase());
+      if (tagName === 'select') {
+        await userInput.selectOption({ value: username }).catch(async () => {
+          if (fullName) await userInput.selectOption({ label: fullName }).catch(() => {});
+        });
+      } else {
+        await userInput.evaluate((el: any) => { el.removeAttribute('readonly'); });
+        await userInput.focus();
+        await userInput.fill(fullName || username);
+        await userInput.dispatchEvent('input');
+        await userInput.dispatchEvent('keyup');
+        await page.waitForTimeout(600);
+
+        const autoItem = page.locator(`.ui-autocomplete li:has-text("${username}"), .ui-autocomplete li:has-text("${fullName || username}"), .ui-menu-item:has-text("${username}")`).first();
+        if (await autoItem.count()) {
+          await autoItem.click();
+          await page.waitForTimeout(1000);
+        } else {
+          // If autocomplete item not found, try with username directly
+          if (fullName && fullName !== username) {
+            await userInput.fill(username);
+            await userInput.dispatchEvent('input');
+            await userInput.dispatchEvent('keyup');
+            await page.waitForTimeout(600);
+            const autoItem2 = page.locator(`.ui-autocomplete li:has-text("${username}")`).first();
+            if (await autoItem2.count()) {
+              await autoItem2.click();
+              await page.waitForTimeout(1000);
+            }
+          }
+        }
+      }
+    }
+
+    // Dismiss any new panel modal if it popped up (#speciality_Panel)
+    const newPanelModal = page.locator('#speciality_Panel, #speciality_Panel2').first();
+    if (await newPanelModal.isVisible().catch(() => false)) {
+      const dismissBtn = newPanelModal.locator('button.close, [data-dismiss="modal"]').first();
+      if (await dismissBtn.count()) {
+        await dismissBtn.click().catch(() => {});
+        await page.waitForTimeout(500);
+      }
+    }
+
+    // 2. Form Assignment Reconciliation
+    onProgress?.(`Applying Form Assembly assignments for user '${username}' (Target: ${targetFormIds.length} forms)...`);
+    const targetSet = new Set(targetFormIds.map(id => String(id).trim()));
+
+    // Wait for table to be ready
+    await page.waitForSelector('#tablaDatos tbody tr, table tbody tr', { timeout: 10000 }).catch(() => {});
+
+    // Get current rows and their assignment state
+    const currentRows = await page.evaluate(() => {
+      const trs = Array.from(document.querySelectorAll('#tablaDatos tbody tr, table tbody tr'));
+      return trs.map((tr, index) => {
+        const chk = tr.querySelector('input.GFEACheck, input[type="checkbox"]') as HTMLInputElement | null;
+        const tds = Array.from(tr.querySelectorAll('td'));
+        const formId = chk?.value || tds[0]?.textContent?.trim() || '';
+        const formName = tds[1]?.textContent?.trim() || '';
+        const assignSpan = tr.querySelector('td:nth-child(3) span, td span[onclick*="assignStatus"]');
+        const isAssigned = !!assignSpan?.classList.contains('fa-check') || !!chk?.checked;
+        return { index, formId, formName, isAssigned };
+      }).filter(r => r.formId);
+    });
+
+    onProgress?.(`Analyzing ${currentRows.length} available forms against target selection...`);
+
+    for (const row of currentRows) {
+      const shouldBeAssigned = targetSet.has(row.formId) || targetSet.has(row.formName);
+      if (shouldBeAssigned && !row.isAssigned) {
+        onProgress?.(`Assigning form "${row.formName}" (${row.formId})...`);
+        const rowLoc = page.locator(`#tablaDatos tbody tr:has(input[value="${row.formId}"]), #tablaDatos tbody tr:has-text("${row.formId}")`).first();
+        if (await rowLoc.count()) {
+          const assignSpan = rowLoc.locator('td:nth-child(3) span, td span[onclick*="assignStatus"]').first();
+          if (await assignSpan.count()) {
+            await assignSpan.click();
+            await page.waitForTimeout(600);
+          } else {
+            const chk = rowLoc.locator('input[type="checkbox"]').first();
+            if (await chk.count()) await chk.check().catch(() => {});
+          }
+        }
+      } else if (!shouldBeAssigned && row.isAssigned) {
+        onProgress?.(`Unassigning form "${row.formName}" (${row.formId})...`);
+        const rowLoc = page.locator(`#tablaDatos tbody tr:has(input[value="${row.formId}"]), #tablaDatos tbody tr:has-text("${row.formId}")`).first();
+        if (await rowLoc.count()) {
+          const assignSpan = rowLoc.locator('td:nth-child(3) span, td span[onclick*="assignStatus"]').first();
+          if (await assignSpan.count()) {
+            await assignSpan.click();
+            await page.waitForTimeout(600);
+          } else {
+            const chk = rowLoc.locator('input[type="checkbox"]').first();
+            if (await chk.count()) await chk.uncheck().catch(() => {});
+          }
+        }
+      }
+    }
+
+    onMutationDispatched?.();
+
+    // Check if save button is present and click it
+    const saveBtn = page.locator('#select_GFA, #btnAssignForms, button[type="submit"]:not(.fv-hidden-submit):has-text("Save"), input[type="submit"][value="Save"]').first();
+    if (await saveBtn.count()) {
+      onProgress?.('Saving Form Assembly mapping changes...');
+      await saveBtn.click().catch(() => {});
+      await page.waitForTimeout(1000);
+    }
+
+    // Re-scrape to determine assigned forms
+    const finalAssigned = await page.evaluate(() => {
+      const trs = Array.from(document.querySelectorAll('#tablaDatos tbody tr, table tbody tr'));
+      return trs.map((tr) => {
+        const chk = tr.querySelector('input.GFEACheck, input[type="checkbox"]') as HTMLInputElement | null;
+        const tds = Array.from(tr.querySelectorAll('td'));
+        const formId = chk?.value || tds[0]?.textContent?.trim() || '';
+        const formName = tds[1]?.textContent?.trim() || '';
+        const assignSpan = tr.querySelector('td:nth-child(3) span, td span[onclick*="assignStatus"]');
+        const isAssigned = !!assignSpan?.classList.contains('fa-check') || !!chk?.checked;
+        return { formId, formName, isAssigned };
+      }).filter(r => r.formId && r.isAssigned);
+    });
+
+    const assignedFormIds = finalAssigned.map(f => f.formId);
+    const assignedFormNames = finalAssigned.map(f => f.formName);
+
+    onProgress?.(`✓ Form Assembly mappings successfully updated: ${assignedFormIds.length} forms assigned.`);
+    return {
+      success: true,
+      username,
+      assignedFormIds,
+      assignedFormNames,
+      message: `Form Assembly mappings updated: ${assignedFormIds.length} forms mapped to user ${username}.`,
+    };
+  }
+
+  /**
+   * Opens an interactive headed Chrome session on /emrPanelSelection.
+   */
+  public static async openFormAssemblyInteractiveSession(
+    page: Page,
+    options: OpenFormAssemblyInteractiveSessionOptions
+  ): Promise<{ success: boolean; message: string }> {
+    const { emrPanelUrl, loginUrl, credentials, targetBranch, username, fullName, onProgress } = options;
+
+    onProgress?.('Ensuring authenticated session for Simplex client.');
+    const authRes = await this.ensureAuthenticated(page, {
+      targetUrl: emrPanelUrl,
+      loginUrl,
+      credentials,
+      targetBranch,
+    });
+    if (!authRes.authenticated) {
+      return {
+        success: false,
+        message: authRes.errorMessage || 'Authentication failed',
+      };
+    }
+
+    onProgress?.(`Opening Form Assembly screen at ${emrPanelUrl}...`);
+    await page.goto(emrPanelUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(1000);
+
+    if (username || fullName) {
+      onProgress?.(`Pre-filling user '${fullName || username}' on Form Assembly screen...`);
+      const userInput = page.locator('#txtUserName, #txtSelectUserName').first();
+      if (await userInput.count()) {
+        await userInput.evaluate((el: any) => { el.removeAttribute('readonly'); });
+        await userInput.focus();
+        await userInput.fill(fullName || username || '');
+        await userInput.dispatchEvent('input');
+        await userInput.dispatchEvent('keyup');
+        await page.waitForTimeout(500);
+      }
+    }
+
+    await page.bringToFront().catch(() => {});
+    return {
+      success: true,
+      message: `Client authenticated and navigated to Form Assembly screen.`,
+    };
+  }
+
 }

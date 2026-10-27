@@ -40,6 +40,13 @@ const KNOWN_SCREEN_ROUTES = [
   '/usereclaim',
   '/addeclaimuser',
   '/eclaimuser',
+  '/stocklocationusers',
+  '/addstocklocationuser',
+  '/billcounteruser',
+  '/addbillcounteruser',
+  '/viewpatientvisitdocumenttypes',
+  '/editpatientvisitdocumenttypes',
+  '/updatepatvisitdoctype',
 ];
 
 /**
@@ -387,4 +394,139 @@ export function resolveClientEclaimUserUrl(options: ResolveClientEclaimUserUrlOp
   });
 }
 
+export interface ResolveClientBillCounterUserUrlOptions {
+  baseUrl?: string;
+  configuredUrl?: string;
+  applicationPath?: string;
+  billCounterUserRoute?: string | null;
+}
 
+export function resolveClientBillCounterUserUrl(options: ResolveClientBillCounterUserUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve bill counter user URL');
+  }
+
+  const routeRaw = options.billCounterUserRoute || '/addbillCounteruser';
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: routeRaw,
+    fallbackRoute: '/addbillCounteruser',
+  });
+}
+
+export function resolveClientBillCounterListUrl(options: ResolveClientBillCounterUserUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve bill counter list URL');
+  }
+
+  const routeRaw = '/billcounteruser';
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: routeRaw,
+    fallbackRoute: '/billcounteruser',
+  });
+}
+
+export interface ResolveClientStockLocationUserUrlOptions {
+  baseUrl?: string;
+  configuredUrl?: string;
+  applicationPath?: string;
+  stockLocationUserRoute?: string | null;
+}
+
+/**
+ * Resolves the Add Stock Location User URL dynamically for the selected client.
+ * e.g. Configured Base URL + /AddStocklocationUser
+ * Never hardcodes host or version; normalizes trailing slashes and prevents duplicate paths.
+ */
+export function resolveClientStockLocationUserUrl(options: ResolveClientStockLocationUserUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve Add Stock Location User URL');
+  }
+
+  const routeRaw = options.stockLocationUserRoute || '/AddStocklocationUser';
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: routeRaw,
+    fallbackRoute: '/AddStocklocationUser',
+  });
+}
+
+/**
+ * Resolves the Stock Location Users list URL dynamically for the selected client.
+ * e.g. Configured Base URL + /StocklocationUsers
+ * Never hardcodes host or version; normalizes trailing slashes and prevents duplicate paths.
+ */
+export function resolveClientStockLocationListUrl(options: ResolveClientStockLocationUserUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve Stock Location Users list URL');
+  }
+
+  const routeRaw = options.stockLocationUserRoute || '/StocklocationUsers';
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: routeRaw,
+    fallbackRoute: '/StocklocationUsers',
+  });
+}
+
+export interface ResolveClientDocumentTypeUrlOptions {
+  baseUrl?: string;
+  configuredUrl?: string;
+  applicationPath?: string;
+  documentTypeRoute?: string | null;
+}
+
+/**
+ * Resolves the Document Types list URL dynamically for the selected client.
+ * e.g. Configured Base URL + /viewPatientVisitDocumentTypes
+ * Never hardcodes host or version; normalizes trailing slashes and prevents duplicate paths.
+ */
+export function resolveClientDocumentTypeListUrl(options: ResolveClientDocumentTypeUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve Document Types list URL');
+  }
+
+  const routeRaw = options.documentTypeRoute || '/viewPatientVisitDocumentTypes';
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: routeRaw,
+    fallbackRoute: '/viewPatientVisitDocumentTypes',
+  });
+}
+
+export interface ResolveClientDocumentTypeEditUrlOptions extends ResolveClientDocumentTypeUrlOptions {
+  docTypeId: string | number;
+  groupCode?: string;
+}
+
+/**
+ * Resolves the Edit Document Type URL dynamically for the selected client.
+ * e.g. Configured Base URL + /editPatientVisitDocumentTypes/:id/:group
+ * Never hardcodes host or version; normalizes trailing slashes and prevents duplicate paths.
+ */
+export function resolveClientDocumentTypeEditUrl(options: ResolveClientDocumentTypeEditUrlOptions): string {
+  const rawUrl = options.configuredUrl || options.baseUrl;
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw new Error('MISSING_CLIENT_URL: Client configured base URL is required to resolve Document Type edit URL');
+  }
+
+  const group = options.groupCode || 'DOC';
+  const routeRaw = `/editPatientVisitDocumentTypes/${options.docTypeId}/${group}`;
+  return resolveClientRoute({
+    baseUrl: rawUrl,
+    applicationPath: options.applicationPath,
+    route: routeRaw,
+    fallbackRoute: `/editPatientVisitDocumentTypes/${options.docTypeId}/${group}`,
+  });
+}

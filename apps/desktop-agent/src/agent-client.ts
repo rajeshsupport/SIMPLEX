@@ -158,17 +158,30 @@ export class AgentClient {
   }
 
   public async sendSyncBatch(runId: string, dto: SyncUserBatchDto): Promise<SyncUserBatchResponse> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (this.agentId) headers['x-agent-id'] = this.agentId;
-    if (this.token) headers['x-agent-token'] = this.token;
+    const doSend = async () => {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (this.agentId) headers['x-agent-id'] = this.agentId;
+      if (this.token) headers['x-agent-token'] = this.token;
+      if (this.lastSharedSecret) headers['x-agent-secret'] = this.lastSharedSecret;
 
-    const res = await fetch(`${this.apiBaseUrl}/api/v1/agents/runs/${runId}/client-users/sync-batches`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(dto),
-    });
+      return fetch(`${this.apiBaseUrl}/api/v1/agents/runs/${runId}/client-users/sync-batches`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(dto),
+      });
+    };
+
+    let res = await doSend();
+    if (res.status === 401 && this.lastUserId && this.lastSharedSecret) {
+      console.log('[AGENT_CLIENT] 401 on sync batch. Transparently re-pairing with API...');
+      const rePaired = await this.pair(this.lastUserId, this.lastSharedSecret);
+      if (rePaired) {
+        res = await doSend();
+      }
+    }
+
     if (!res.ok) {
       const err: any = await res.json().catch(() => ({ message: res.statusText }));
       throw new Error(err.message || `Failed to send sync batch: ${res.status}`);

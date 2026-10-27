@@ -1,7 +1,8 @@
+import { exec } from 'child_process';
 import * as crypto from 'crypto';
 import { BrowserContext, Page } from 'playwright';
 import { BrowserProfileManager, BrowserLifecycleManager, ChromeGuestLauncher, ClientMutationLockManager, WorkflowExecutor, UserManagementExecutor, ResourceManagementExecutor, SyncProgressUpdate, SelectorResolver, MultiTabExecutor } from '@hmc/automation';
-import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, resolveClientEmrPanelUrl, resolveClientEclaimUserUrl, normalizeClientBaseUrl, resolveTaskModePolicy, isMutationTaskType, MultiTabTargetItem } from '@hmc/shared';
+import { AgentTaskAssignment, AutomationRunStepTelemetry, resolveClientRoute, resolveClientRoleUrl, resolveClientResourceUrl, resolveClientResourceUserMappingUrl, resolveClientEmrPanelUrl, resolveClientEclaimUserUrl, resolveClientBillCounterUserUrl, resolveClientBillCounterListUrl, resolveClientStockLocationUserUrl, resolveClientStockLocationListUrl, resolveClientDocumentTypeListUrl, resolveClientDocumentTypeEditUrl, normalizeClientBaseUrl, resolveTaskModePolicy, isMutationTaskType, MultiTabTargetItem } from '@hmc/shared';
 import { AgentClient } from './agent-client.js';
 
 
@@ -142,22 +143,24 @@ export class AutomationWorker {
         }
       );
     } else {
-      // Single-flight lock for read-only or interactive tasks per client profile key
-      const inFlight = this.singleFlightTasks.get(profileKey);
-      if (inFlight) {
-        onProgress?.(`A task is already in-flight for client [${task.clientId}] (${namespace}). Awaiting execution...`);
-        return inFlight;
-      }
-
-      const taskExecutionPromise = this.performTaskExecution(resolvedTask, profileKey, effectiveUserId, namespace, onProgress);
-      this.singleFlightTasks.set(profileKey, taskExecutionPromise);
+      // Sequential FIFO queue per client profile key so tasks execute in order without dropping any task
+      const prevTask = this.singleFlightTasks.get(profileKey) || Promise.resolve();
+      let currentTaskDone!: () => void;
+      const currentTaskPromise = new Promise<void>((resolve) => {
+        currentTaskDone = resolve;
+      });
+      this.singleFlightTasks.set(profileKey, currentTaskPromise);
 
       try {
-        await taskExecutionPromise;
+        await prevTask.catch(() => {});
+        await this.performTaskExecution(resolvedTask, profileKey, effectiveUserId, namespace, onProgress);
       } catch (err: any) {
         await this.handleTaskExecutionError(task, err, onProgress);
       } finally {
-        this.singleFlightTasks.delete(profileKey);
+        currentTaskDone();
+        if (this.singleFlightTasks.get(profileKey) === currentTaskPromise) {
+          this.singleFlightTasks.delete(profileKey);
+        }
       }
     }
   }
@@ -391,7 +394,31 @@ export class AutomationWorker {
             await this.agentClient.sendSyncBatch(task.runId, finalDto);
           }
 
-          // Send lightweight completion telemetry (without oversized raw users array)
+          let scrapedBillCounters: any[] = [];
+          try {
+            const appPath = task.clientAppPath || task.payload?.applicationPath;
+            const effectiveBranch = task.targetBranch || (task.payload as any)?.targetBranch;
+            const billCounterListUrl = resolveClientBillCounterListUrl({
+              baseUrl: task.clientBaseUrl,
+              applicationPath: appPath,
+            });
+            onProgress?.(`[BACKGROUND SYNC] Fetching remote bill counter mappings from ${billCounterListUrl}...`);
+            const bcResult = await UserManagementExecutor.fetchBillCounterMappings(syncPage, {
+              billCounterListUrl,
+              loginUrl,
+              credentials: task.credentials,
+              targetBranch: effectiveBranch,
+              onProgress: (m) => onProgress?.(`[BILL COUNTER SYNC] ${m}`),
+            });
+            if (bcResult && bcResult.success && Array.isArray(bcResult.mappings)) {
+              scrapedBillCounters = bcResult.mappings;
+              onProgress?.(`✓ [BILL COUNTER SYNC] Retrieved ${scrapedBillCounters.length} live bill counter mappings.`);
+            }
+          } catch (bcErr: any) {
+            onProgress?.(`[BILL COUNTER SYNC] Note: Bill counter mappings scrape skipped: ${bcErr.message}`);
+          }
+
+          // Send lightweight completion telemetry (with scraped bill counters)
           await this.agentClient.sendTelemetry(task.runId, {
             status: 'COMPLETED',
             totalDurationMs,
@@ -400,6 +427,7 @@ export class AutomationWorker {
               totalScraped: syncRes.totalScraped,
               stage: 'COMPLETED',
               message: `Sync completed: ${syncRes.totalScraped} users reconciled across ${totalBatches} bounded batch(es).`,
+              billCounters: scrapedBillCounters,
             },
           });
         } else {
@@ -598,7 +626,17 @@ export class AutomationWorker {
             ? { username: task.credentials.username, password: task.credentials.password }
             : undefined,
           onProgress: (update) => {
-            onProgress?.(`[RESOURCE SYNC PROGRESS] ${update.message}`);
+            onProgress?.('[RESOURCE SYNC PROGRESS] ' + update.message);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: {
+                  message: update.message,
+                  stage: update.stage,
+                  count: update.count,
+                },
+              })
+              .catch(() => {});
           },
         });
 
@@ -674,12 +712,14 @@ export class AutomationWorker {
         });
 
         onProgress?.(`[INSPECT OPTIONS] Inspecting live Add User options at ${addUsersUrl}...`);
+        const effectiveBranch = task.targetBranch || (task.payload as any)?.targetBranch || (task.payload as any)?.payload?.targetBranch;
         const metadata = await UserManagementExecutor.inspectCreateFormMetadata(inspectPage, {
           addUsersUrl,
           clientId: task.clientId,
           applicationVersion: task.payload?.applicationVersion || 'v9.4',
           loginUrl,
           credentials: task.credentials,
+          targetBranch: effectiveBranch,
         });
 
         const totalDurationMs = Date.now() - startTime;
@@ -728,10 +768,367 @@ export class AutomationWorker {
       return;
     }
 
+    // =========================================================================
+    // 1.6 DEDICATED HEADLESS BILL COUNTER MAPPINGS EXTRACTOR (namespace: 'sync')
+    // =========================================================================
+    if (task.taskType === 'FETCH_BILL_COUNTER_MAPPINGS') {
+      let lease: any = null;
+      try {
+        onProgress?.(`[BILL COUNTER SYNC] Launching isolated headless browser context for client [${task.clientId}]...`);
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: 'AUTOMATION_OWNED',
+          namespace: 'sync',
+          isHeaded: false,
+          slowMo: 0,
+        });
+
+        const syncPage = lease.primaryPage;
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const billCounterListUrl = resolveClientBillCounterListUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+        const effectiveBranch =
+          task.targetBranch ||
+          (task.payload as any)?.targetBranch ||
+          (task.payload as any)?.payload?.targetBranch;
+
+        onProgress?.(`[BILL COUNTER SYNC] Extracting live Bill Counter mappings from ${billCounterListUrl}...`);
+        const fetchRes = await UserManagementExecutor.fetchBillCounterMappings(syncPage, {
+          billCounterListUrl,
+          loginUrl,
+          credentials: task.credentials,
+          targetBranch: effectiveBranch,
+          onProgress: (msg: string) => onProgress?.(msg),
+        });
+
+        const serializableResult = JSON.parse(JSON.stringify(fetchRes));
+        const totalDurationMs = Date.now() - startTime;
+
+        if (fetchRes.success) {
+          onProgress?.(`✓ Retrieved ${fetchRes.mappings.length} Bill Counter mappings.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: serializableResult,
+          });
+        } else {
+          const errCode = fetchRes.errorCode || 'FETCH_BILL_COUNTER_FAILED';
+          const errMsg = fetchRes.errorMessage || fetchRes.message || 'Failed to fetch Bill Counter mappings.';
+          onProgress?.(`✗ [BILL COUNTER ERROR] ${errMsg}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: errMsg,
+            totalDurationMs,
+            resultData: {
+              success: false,
+              errorCode: errCode,
+              errorMessage: errMsg,
+            },
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        const safeMsg = sanitizeErrorMessage(err.message || 'FETCH_BILL_COUNTER_FAILED');
+        onProgress?.(`[BILL COUNTER SYNC ERROR] ${safeMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs,
+          resultData: {
+            success: false,
+            errorCode: 'FETCH_BILL_COUNTER_FAILED',
+            errorMessage: safeMsg,
+          },
+        });
+      } finally {
+        if (lease) {
+          try {
+            await lease.close({ reason: 'BILL_COUNTER_SYNC_COMPLETED' });
+            onProgress?.('[BILL COUNTER SYNC] Headless context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    // =========================================================================
+    // 1.7 DEDICATED HEADLESS STOCK LOCATION MAPPINGS EXTRACTOR (namespace: 'sync')
+    // =========================================================================
+    if (task.taskType === 'FETCH_STOCK_LOCATION_MAPPINGS') {
+      let lease: any = null;
+      try {
+        onProgress?.(`[STOCK LOCATION SYNC] Launching isolated headless browser context for client [${task.clientId}]...`);
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: 'AUTOMATION_OWNED',
+          namespace: 'sync',
+          isHeaded: false,
+          slowMo: 0,
+        });
+
+        const syncPage = lease.primaryPage;
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const stockLocationListUrl = resolveClientStockLocationListUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+        const effectiveBranch =
+          task.targetBranch ||
+          (task.payload as any)?.targetBranch ||
+          (task.payload as any)?.payload?.targetBranch;
+
+        onProgress?.(`[STOCK LOCATION SYNC] Extracting live Stock Location mappings from ${stockLocationListUrl}...`);
+        const fetchRes = await UserManagementExecutor.fetchStockLocationMappings(syncPage, {
+          stockLocationListUrl,
+          loginUrl,
+          credentials: task.credentials,
+          targetBranch: effectiveBranch,
+          onProgress: (msg: string) => onProgress?.(msg),
+        });
+
+        const serializableResult = JSON.parse(JSON.stringify(fetchRes));
+        const totalDurationMs = Date.now() - startTime;
+
+        if (fetchRes.success) {
+          onProgress?.(`✓ Retrieved ${fetchRes.mappings.length} Stock Location mappings.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: serializableResult,
+          });
+        } else {
+          const safeError = sanitizeErrorMessage(fetchRes.errorMessage || fetchRes.message || 'Stock Location sync failed.');
+          onProgress?.(`✗ Stock Location sync failed: ${safeError}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: safeError,
+            totalDurationMs,
+            resultData: { ...serializableResult, errorMessage: safeError },
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        const safeMsg = sanitizeErrorMessage(err.message || 'FETCH_STOCK_LOCATION_FAILED');
+        onProgress?.(`[STOCK LOCATION SYNC ERROR] ${safeMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs,
+          resultData: {
+            success: false,
+            errorCode: 'FETCH_STOCK_LOCATION_FAILED',
+            errorMessage: safeMsg,
+          },
+        });
+      } finally {
+        if (lease) {
+          try {
+            await lease.close({ reason: 'STOCK_LOCATION_SYNC_COMPLETED' });
+            onProgress?.('[STOCK LOCATION SYNC] Headless context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
 
     // =========================================================================
     // 2. REMOTE CLIENT MUTATION WORKFLOWS (VISIBLE CHROME - namespace: 'mutation')
     // =========================================================================
+
+    
+    if (task.taskType === 'FETCH_FORM_ASSEMBLY_MAPPINGS') {
+      let lease: any = null;
+      try {
+        onProgress?.(`[FORM ASSEMBLY SYNC] Launching isolated browser context for client [${task.clientId}]...`);
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: 'AUTOMATION_OWNED',
+          namespace: 'sync',
+          isHeaded: false,
+          slowMo: 0,
+        });
+
+        const syncPage = lease.primaryPage;
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const emrPanelUrl = resolveClientEmrPanelUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+        const effectiveBranch =
+          task.targetBranch ||
+          (task.payload as any)?.targetBranch ||
+          (task.payload as any)?.payload?.targetBranch;
+
+        onProgress?.(`[FORM ASSEMBLY SYNC] Extracting Form Assembly forms from ${emrPanelUrl}...`);
+        const fetchRes = await UserManagementExecutor.fetchFormAssemblyMappings(syncPage, {
+          emrPanelUrl,
+          loginUrl,
+          credentials: task.credentials,
+          targetBranch: effectiveBranch,
+          userId: task.payload?.userId,
+          username: task.payload?.username,
+          onProgress: (msg: string) => onProgress?.(msg),
+        });
+
+        const serializableResult = JSON.parse(JSON.stringify(fetchRes));
+        const totalDurationMs = Date.now() - startTime;
+
+        if (fetchRes.success) {
+          onProgress?.(`✓ Retrieved ${fetchRes.forms.length} Form Assembly forms.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: serializableResult,
+          });
+        } else {
+          const safeError = sanitizeErrorMessage(fetchRes.errorMessage || fetchRes.message || 'Form Assembly sync failed.');
+          onProgress?.(`✗ Form Assembly sync failed: ${safeError}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: safeError,
+            totalDurationMs,
+            resultData: { ...serializableResult, errorMessage: safeError },
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        const safeMsg = sanitizeErrorMessage(err.message || 'FETCH_FORM_ASSEMBLY_FAILED');
+        onProgress?.(`[FORM ASSEMBLY SYNC ERROR] ${safeMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs,
+          resultData: {
+            success: false,
+            errorCode: 'FETCH_FORM_ASSEMBLY_FAILED',
+            errorMessage: safeMsg,
+          },
+        });
+      } finally {
+        if (lease) {
+          try {
+            await lease.close({ reason: 'FORM_ASSEMBLY_SYNC_COMPLETED' });
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    if (task.taskType === 'FETCH_DOCUMENT_TYPE_MAPPINGS') {
+      let lease: any = null;
+      try {
+        onProgress?.(`[DOCUMENT TYPES SYNC] Launching isolated headless browser context for client [${task.clientId}]...`);
+        lease = await this.browserLifecycleManager.acquireLease({
+          taskId: task.taskType,
+          runId: task.runId,
+          clientId: task.clientId,
+          userId: effectiveUserId,
+          ownerType: 'AUTOMATION_OWNED',
+          namespace: 'sync',
+          isHeaded: false,
+          slowMo: 0,
+        });
+
+        const syncPage = lease.primaryPage;
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const documentTypeListUrl = resolveClientDocumentTypeListUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+        });
+        const loginUrl = resolveClientRoute({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+          route: task.loginRoute,
+          fallbackRoute: '/login',
+        });
+        const effectiveBranch =
+          task.targetBranch ||
+          (task.payload as any)?.targetBranch ||
+          (task.payload as any)?.payload?.targetBranch;
+
+        onProgress?.(`[DOCUMENT TYPES SYNC] Extracting live Patient Visit Document Types from ${documentTypeListUrl}...`);
+        const fetchRes = await UserManagementExecutor.fetchDocumentTypeMappings(syncPage, {
+          documentTypeListUrl,
+          loginUrl,
+          credentials: task.credentials,
+          targetBranch: effectiveBranch,
+          onProgress: (msg: string) => onProgress?.(msg),
+        });
+
+        const serializableResult = JSON.parse(JSON.stringify(fetchRes));
+        const totalDurationMs = Date.now() - startTime;
+
+        if (fetchRes.success) {
+          onProgress?.(`✓ Retrieved ${fetchRes.documentTypes.length} document types with ${fetchRes.userMappings.length} mappings.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: serializableResult,
+          });
+        } else {
+          const safeError = sanitizeErrorMessage(fetchRes.errorMessage || fetchRes.message || 'Document types sync failed.');
+          onProgress?.(`✗ Document types sync failed: ${safeError}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: safeError,
+            totalDurationMs,
+            resultData: { ...serializableResult, errorMessage: safeError },
+          });
+        }
+      } catch (err: any) {
+        const totalDurationMs = Date.now() - startTime;
+        const safeMsg = sanitizeErrorMessage(err.message || 'FETCH_DOCUMENT_TYPE_FAILED');
+        onProgress?.(`[DOCUMENT TYPES SYNC ERROR] ${safeMsg}`);
+        await this.agentClient.sendTelemetry(task.runId, {
+          status: 'FAILED',
+          errorMessage: safeMsg,
+          totalDurationMs,
+          resultData: {
+            success: false,
+            errorCode: 'FETCH_DOCUMENT_TYPE_FAILED',
+            errorMessage: safeMsg,
+          },
+        });
+      } finally {
+        if (lease) {
+          try {
+            await lease.close({ reason: 'DOCUMENT_TYPES_SYNC_COMPLETED' });
+            onProgress?.('[DOCUMENT TYPES SYNC] Headless context cleanly released.');
+          } catch {}
+        }
+      }
+      return;
+    }
+
     if (isMutationTaskType(task.taskType)) {
       await this.executeMutationWithLifecycle(task, effectiveUserId, startTime, onProgress);
       return;
@@ -1015,7 +1412,307 @@ export class AutomationWorker {
           return;
         }
 
+        
+        // Map Bill Counter User
+        
+        // Fetch Bill Counter Mappings
+        if (task.taskType === 'FETCH_BILL_COUNTER_MAPPINGS') {
+          const reportProgress = (msg: string) => {
+            onProgress?.(msg);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: msg, stage: 'EXTRACTING' },
+              })
+              .catch(() => {});
+          };
+
+          reportProgress('Opening Bill Counter User list screen…');
+
+          const billCounterListUrl = resolveClientBillCounterListUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+          });
+
+          const fetchRes = await UserManagementExecutor.fetchBillCounterMappings(mutationPage, {
+            billCounterListUrl,
+            loginUrl,
+            credentials: task.credentials,
+            targetBranch: effectiveBranch,
+            onProgress: reportProgress,
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(fetchRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (fetchRes.success) {
+            onProgress?.(`✓ Retrieved ${fetchRes.mappings.length} Bill Counter mappings.`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(fetchRes.errorMessage || fetchRes.message || 'Failed to fetch Bill Counter mappings.');
+            onProgress?.(`✗ Fetch failed: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        if (task.taskType === 'MAP_BILL_COUNTER_USER') {
+          const reportProgress = (msg: string) => {
+            onProgress?.(msg);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: msg, stage: 'MUTATING' },
+              })
+              .catch(() => {});
+          };
+
+          reportProgress('Opening Bill Counter User mapping screen…');
+
+          const addBillCounterUrl = resolveClientBillCounterUserUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            billCounterUserRoute: task.payload?.billCounterUserRoute || task.payload?.addBillCounterUrl,
+          });
+
+          const billCounterListUrl = resolveClientBillCounterListUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+          });
+
+          const mapRes = await UserManagementExecutor.mapBillCounterUser(mutationPage, {
+            addBillCounterUrl,
+            billCounterListUrl,
+            username: task.payload.username,
+            remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
+            roleName: task.payload?.roleName || task.payload?.role,
+            loginUrl,
+            credentials: task.credentials,
+            targetBranch: effectiveBranch,
+            onProgress: reportProgress,
+            onMutationDispatched: () => {
+              mutationPhase = 'MUTATION_DISPATCHED';
+            },
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(mapRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (mapRes.success) {
+            onProgress?.(`✓ ${mapRes.message}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(mapRes.errorMessage || mapRes.message || 'Bill counter mapping failed.');
+            onProgress?.(`✗ Mapping failed: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        if (task.taskType === 'MAP_STOCK_LOCATION_USER') {
+          const reportProgress = (msg: string) => {
+            onProgress?.(msg);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: msg, stage: 'MUTATING' },
+              })
+              .catch(() => {});
+          };
+
+          reportProgress('Opening Add Stock Location User mapping screen…');
+
+          const addStockLocationUrl = resolveClientStockLocationUserUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            stockLocationUserRoute: task.payload?.stockLocationUserRoute || task.payload?.addStockLocationUrl,
+          });
+
+          const stockLocationListUrl = resolveClientStockLocationListUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+          });
+
+          const mapRes = await UserManagementExecutor.mapStockLocationUser(mutationPage, {
+            addStockLocationUrl,
+            stockLocationListUrl,
+            username: task.payload.username,
+            remoteUserId: task.payload?.remoteUserId || task.remoteUserId,
+            fullName: task.payload?.fullName || task.payload?.name,
+            stockLocationNames: task.payload?.stockLocationNames,
+            stockLocationIds: task.payload?.stockLocationIds,
+            loginUrl,
+            credentials: task.credentials,
+            targetBranch: effectiveBranch,
+            onProgress: reportProgress,
+            onMutationDispatched: () => {
+              mutationPhase = 'MUTATION_DISPATCHED';
+            },
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(mapRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (mapRes.success) {
+            onProgress?.(`✓ ${mapRes.message}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(mapRes.errorMessage || mapRes.message || 'Stock location mapping failed.');
+            onProgress?.(`✗ Mapping failed: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
         // 5. Process Single User Full Workflow
+
+        
+        if (task.taskType === 'UPDATE_FORM_ASSEMBLY_MAPPINGS') {
+          const reportProgress = (msg: string) => {
+            onProgress?.(msg);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: msg, stage: 'MUTATING' },
+              })
+              .catch(() => {});
+          };
+
+          reportProgress('Opening Form Assembly screen…');
+
+          const emrPanelUrl = resolveClientEmrPanelUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+          });
+
+          const updateRes = await UserManagementExecutor.updateFormAssemblyMappings(mutationPage, {
+            emrPanelUrl,
+            loginUrl,
+            credentials: task.credentials,
+            targetBranch: effectiveBranch,
+            userId: task.payload.userId,
+            username: task.payload.username,
+            fullName: task.payload.fullName,
+            targetFormIds: task.payload.formIds || task.payload.targetFormIds || [],
+            onProgress: reportProgress,
+            onMutationDispatched: () => {
+              mutationPhase = 'MUTATION_DISPATCHED';
+            },
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(updateRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (updateRes.success) {
+            onProgress?.(`✓ ${updateRes.message}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(updateRes.errorMessage || updateRes.message || 'Form Assembly mapping update failed.');
+            onProgress?.(`✗ Update failed: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
+        if (task.taskType === 'UPDATE_DOCUMENT_TYPE_MAPPINGS') {
+          const reportProgress = (msg: string) => {
+            onProgress?.(msg);
+            this.agentClient
+              .sendTelemetry(task.runId, {
+                status: 'RUNNING',
+                resultData: { message: msg, stage: 'MUTATING' },
+              })
+              .catch(() => {});
+          };
+
+          reportProgress('Opening Edit Patient Visit Document Types screen…');
+
+          const documentTypeListUrl = resolveClientDocumentTypeListUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+          });
+
+          const editUrl = task.payload?.editUrl || resolveClientDocumentTypeEditUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            docTypeId: task.payload.docTypeId,
+            groupCode: task.payload.userDocGroup || 'DOC',
+          });
+
+          const updateRes = await UserManagementExecutor.updateDocumentTypeMappings(mutationPage, {
+            docTypeId: task.payload.docTypeId,
+            selectedUsernames: task.payload.selectedUsernames || [],
+            userDocGroup: task.payload.userDocGroup,
+            documentTypeListUrl,
+            editUrl,
+            loginUrl,
+            credentials: task.credentials,
+            targetBranch: effectiveBranch,
+            onProgress: reportProgress,
+            onMutationDispatched: () => {
+              mutationPhase = 'MUTATION_DISPATCHED';
+            },
+          });
+
+          const serializableResult = JSON.parse(JSON.stringify(updateRes));
+          const totalDurationMs = Date.now() - startTime;
+
+          if (updateRes.success) {
+            onProgress?.(`✓ ${updateRes.message}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'COMPLETED',
+              totalDurationMs,
+              resultData: serializableResult,
+            });
+          } else {
+            const safeError = sanitizeErrorMessage(updateRes.errorMessage || updateRes.message || 'Document type mapping update failed.');
+            onProgress?.(`✗ Update failed: ${safeError}`);
+            await this.agentClient.sendTelemetry(task.runId, {
+              status: 'FAILED',
+              errorMessage: safeError,
+              totalDurationMs,
+              resultData: { ...serializableResult, errorMessage: safeError },
+            });
+          }
+          return;
+        }
+
         if (task.taskType === 'PROCESS_USER_FULL_WORKFLOW') {
           const payloadData = task.payload?.payload || task.payload;
           const addUsersUrl = resolveClientRoute({
@@ -1663,21 +2360,28 @@ export class AutomationWorker {
     let lease: any = null;
 
     try {
-      // Check if an active pre-existing operator context already exists for this client
-      let existingContext = this.activeOperatorContexts.get(profileKey);
-      if (existingContext) {
-        try {
-          existingContext.pages();
-        } catch {
-          try { await existingContext.close(); } catch {}
-          this.activeOperatorContexts.delete(profileKey);
-          existingContext = undefined;
+      // For explicit operator session launches (OPEN_INTERACTIVE_CLIENT_SESSION),
+      // we must ALWAYS spawn a fresh visible Chrome window for the operator rather than
+      // reusing a stale background context that silently swallows the click.
+      const isExplicitOperatorSession = (task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION' || task.taskType === 'INTERACTIVE_LOGIN') && task.options?.leaveBrowserOpen === true;
+
+      let existingContext: BrowserContext | undefined = undefined;
+      if (task.taskType !== 'OPEN_INTERACTIVE_CLIENT_SESSION' && task.taskType !== 'OPEN_STOCK_LOCATION_SESSION' && task.taskType !== 'OPEN_DOCUMENT_TYPE_SESSION' && task.taskType !== 'OPEN_FORM_ASSEMBLY_SESSION') {
+        existingContext = this.activeOperatorContexts.get(profileKey);
+        if (existingContext) {
+          try {
+            if (existingContext.pages().length === 0) {
+              this.activeOperatorContexts.delete(profileKey);
+              existingContext = undefined;
+            }
+          } catch {
+            try { await existingContext?.close(); } catch {}
+            this.activeOperatorContexts.delete(profileKey);
+            existingContext = undefined;
+          }
         }
       }
 
-      // Pre-existing operator browser only = OPERATOR_OWNED, or explicit operator session with leaveBrowserOpen === true.
-      // Every browser launched by User/Resource automation, headed or headless = AUTOMATION_OWNED.
-      const isExplicitOperatorSession = (task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION' || task.taskType === 'INTERACTIVE_LOGIN') && task.options?.leaveBrowserOpen === true;
       isOperatorOwned = Boolean(existingContext) || isExplicitOperatorSession;
 
       try {
@@ -1712,23 +2416,190 @@ export class AutomationWorker {
       if (!context || !page) return;
       await page.bringToFront().catch(() => {});
 
+      const operatorCtxKey = task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION'
+        ? `interactive_${task.runId}_${Date.now()}`
+        : profileKey;
+
       if (isOperatorOwned) {
-        this.activeOperatorContexts.set(profileKey, context);
+        this.activeOperatorContexts.set(operatorCtxKey, context);
         context.on('close', () => {
-          this.activeOperatorContexts.delete(profileKey);
+          this.activeOperatorContexts.delete(operatorCtxKey);
         });
         lease.detachInterceptors?.();
       }
 
+      // Bring newly opened headed Chrome window to the foreground on the Windows desktop
+      if (process.platform === 'win32' && (task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION' || task.taskType === 'INTERACTIVE_LOGIN')) {
+        try {
+          const browserProc = (lease.browser as any)?.process?.();
+          const pid = browserProc?.pid;
+          if (pid) {
+            exec(`powershell -NoProfile -Command "$w = New-Object -ComObject WScript.Shell; $w.AppActivate(${pid})"`, () => {});
+          } else {
+            exec(`powershell -NoProfile -Command "$w = New-Object -ComObject WScript.Shell; $w.AppActivate('Chrome')"`, () => {});
+          }
+        } catch {}
+      }
+
       const resolvedLoginUrl = buildAbsoluteUrl(task.clientBaseUrl, task.loginRoute, '/login');
+
+      // OPEN_STOCK_LOCATION_SESSION uses robust UserManagementExecutor with dynamic branch handling
+      if (task.taskType === 'OPEN_STOCK_LOCATION_SESSION') {
+        if (!page) throw new Error('Chrome browser page could not be initialized');
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const addStockLocationUrl = task.targetRoute?.startsWith('http')
+          ? task.targetRoute
+          : resolveClientStockLocationUserUrl({
+              baseUrl: task.clientBaseUrl,
+              applicationPath: appPath,
+              stockLocationUserRoute: task.targetRoute,
+            });
+
+        const sessionRes = await UserManagementExecutor.openStockLocationInteractiveSession(page, {
+          addStockLocationUrl,
+          username: task.payload?.username,
+          fullName: task.payload?.fullName,
+          loginUrl: resolvedLoginUrl,
+          credentials: task.credentials,
+          targetBranch: task.targetBranch,
+          onProgress,
+        });
+
+        lease.detachInterceptors?.();
+        const totalDurationMs = Date.now() - startTime;
+        if (sessionRes.success) {
+          onProgress?.(`Stock Location mapping screen opened for ${task.payload?.username || 'user'}.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: sessionRes,
+          });
+        } else {
+          onProgress?.(`Stock Location session failed: ${sessionRes.message}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            totalDurationMs,
+            errorMessage: sessionRes.message,
+            resultData: sessionRes,
+          });
+        }
+        return;
+      }
+
+
+      
+      // OPEN_FORM_ASSEMBLY_SESSION
+      if (task.taskType === 'OPEN_FORM_ASSEMBLY_SESSION') {
+        if (!page) throw new Error('Chrome browser page could not be initialized');
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const emrPanelUrl = resolveClientEmrPanelUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+        });
+
+        const sessionRes = await UserManagementExecutor.openFormAssemblyInteractiveSession(page, {
+          emrPanelUrl,
+          loginUrl: resolvedLoginUrl,
+          credentials: task.credentials,
+          targetBranch: task.targetBranch,
+          userId: task.payload?.userId,
+          username: task.payload?.username,
+          fullName: task.payload?.fullName,
+          onProgress,
+        });
+
+        lease.detachInterceptors?.();
+        const totalDurationMs = Date.now() - startTime;
+        if (sessionRes.success) {
+          onProgress?.(`Form Assembly screen opened.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: {
+              success: true,
+              message: 'Form Assembly screen opened in browser.',
+              targetUrl: emrPanelUrl,
+            },
+          });
+        } else {
+          const safeMsg = sanitizeErrorMessage(sessionRes.message || 'Failed to open Form Assembly screen');
+          onProgress?.(`Failed to open Form Assembly screen: ${safeMsg}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            errorMessage: safeMsg,
+            totalDurationMs,
+            resultData: { success: false, errorMessage: safeMsg },
+          });
+        }
+        return;
+      }
+
+      // OPEN_DOCUMENT_TYPE_SESSION
+      if (task.taskType === 'OPEN_DOCUMENT_TYPE_SESSION') {
+        if (!page) throw new Error('Chrome browser page could not be initialized');
+        const appPath = task.clientAppPath || task.payload?.applicationPath;
+        const documentTypeListUrl = resolveClientDocumentTypeListUrl({
+          baseUrl: task.clientBaseUrl,
+          applicationPath: appPath,
+        });
+
+        let editUrl: string | undefined = undefined;
+        if (task.payload?.docTypeId) {
+          editUrl = resolveClientDocumentTypeEditUrl({
+            baseUrl: task.clientBaseUrl,
+            applicationPath: appPath,
+            docTypeId: task.payload.docTypeId,
+            groupCode: task.payload.groupCode || 'DOC',
+          });
+        }
+
+        const sessionRes = await UserManagementExecutor.openDocumentTypeInteractiveSession(page, {
+          documentTypeListUrl,
+          editUrl: task.targetRoute?.startsWith('http') ? task.targetRoute : editUrl,
+          docTypeId: task.payload?.docTypeId,
+          groupCode: task.payload?.groupCode,
+          username: task.payload?.username,
+          fullName: task.payload?.fullName,
+          loginUrl: resolvedLoginUrl,
+          credentials: task.credentials,
+          targetBranch: task.targetBranch,
+          onProgress,
+        });
+
+        lease.detachInterceptors?.();
+        const totalDurationMs = Date.now() - startTime;
+        if (sessionRes.success) {
+          onProgress?.(`Patient Visit Document Types screen opened.`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'COMPLETED',
+            totalDurationMs,
+            resultData: sessionRes,
+          });
+        } else {
+          onProgress?.(`Document type session failed: ${sessionRes.message}`);
+          await this.agentClient.sendTelemetry(task.runId, {
+            status: 'FAILED',
+            totalDurationMs,
+            errorMessage: sessionRes.message,
+            resultData: sessionRes,
+          });
+        }
+        return;
+      }
 
       onProgress?.(`Checking client session…`);
       const isSessionActive = await WorkflowExecutor.checkSessionActive(page, task.workflowVersion);
 
       if (isSessionActive && (task.taskType === 'INTERACTIVE_LOGIN' || task.taskType === 'OPEN_INTERACTIVE_CLIENT_SESSION')) {
+        const targetUrl = task.targetRoute
+          ? (task.targetRoute.startsWith('http') ? task.targetRoute : buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute))
+          : buildAbsoluteUrl(task.clientBaseUrl, undefined, '/hmc/dashboard');
+        await page?.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await page?.bringToFront().catch(() => {});
+
         lease.detachInterceptors?.();
         const totalDurationMs = Date.now() - startTime;
-        onProgress?.(`Login successful — client ready.`);
+        onProgress?.(`Login verified — client window ready.`);
         await this.agentClient.sendTelemetry(task.runId, {
           status: 'COMPLETED',
           totalDurationMs,
@@ -1747,6 +2618,7 @@ export class AutomationWorker {
         usersUrl: buildAbsoluteUrl(task.clientBaseUrl, task.targetRoute, '/users'),
         username: task.credentials?.username || '',
         password: task.credentials?.password || '',
+        targetBranch: task.targetBranch || (task.payload as any)?.targetBranch,
         ...task.payload,
       };
 

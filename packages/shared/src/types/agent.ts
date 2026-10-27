@@ -61,6 +61,17 @@ export type AgentTaskType =
   | 'SET_CLIENT_USER_STATUS'
   | 'RESET_CLIENT_USER_PASSWORD'
   | 'RESET_PASSWORD'
+  | 'MAP_BILL_COUNTER_USER'
+  | 'FETCH_BILL_COUNTER_MAPPINGS'
+  | 'MAP_STOCK_LOCATION_USER'
+  | 'FETCH_STOCK_LOCATION_MAPPINGS'
+  | 'OPEN_STOCK_LOCATION_SESSION'
+  | 'FETCH_DOCUMENT_TYPE_MAPPINGS'
+  | 'UPDATE_DOCUMENT_TYPE_MAPPINGS'
+  | 'OPEN_DOCUMENT_TYPE_SESSION'
+  | 'FETCH_FORM_ASSEMBLY_MAPPINGS'
+  | 'UPDATE_FORM_ASSEMBLY_MAPPINGS'
+  | 'OPEN_FORM_ASSEMBLY_SESSION'
   | 'EDIT_CLIENT_USER'
   | 'EDIT_AND_UPDATE_CLIENT'
   | 'IMPORT_CLIENT_USERS'
@@ -173,6 +184,17 @@ export const TASK_MODE_POLICY = {
   SET_CLIENT_USER_STATUS: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
   RESET_CLIENT_USER_PASSWORD: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
   RESET_PASSWORD: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  MAP_BILL_COUNTER_USER: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  FETCH_BILL_COUNTER_MAPPINGS: { namespace: 'read_only', executionMode: 'HEADLESS_SYNC', isHeaded: false },
+  MAP_STOCK_LOCATION_USER: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  FETCH_STOCK_LOCATION_MAPPINGS: { namespace: 'read_only', executionMode: 'HEADLESS_SYNC', isHeaded: false },
+  OPEN_STOCK_LOCATION_SESSION: { namespace: 'interactive', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  FETCH_DOCUMENT_TYPE_MAPPINGS: { namespace: 'read_only', executionMode: 'HEADLESS_SYNC', isHeaded: false },
+  UPDATE_DOCUMENT_TYPE_MAPPINGS: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  OPEN_DOCUMENT_TYPE_SESSION: { namespace: 'interactive', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  FETCH_FORM_ASSEMBLY_MAPPINGS: { namespace: 'read_only', executionMode: 'HEADLESS_SYNC', isHeaded: false },
+  UPDATE_FORM_ASSEMBLY_MAPPINGS: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
+  OPEN_FORM_ASSEMBLY_SESSION: { namespace: 'interactive', executionMode: 'HEADED_MUTATION', isHeaded: true },
   EDIT_CLIENT_USER: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
   EDIT_AND_UPDATE_CLIENT: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
   IMPORT_CLIENT_USERS: { namespace: 'mutation', executionMode: 'HEADED_MUTATION', isHeaded: true },
@@ -212,6 +234,8 @@ export const READ_ONLY_HEADLESS_TASK_TYPES = [
   'VERIFY_USER_EXISTS',
   'VERIFY_USER_ROLES',
   'VERIFY_USER_STATUS',
+  'FETCH_DOCUMENT_TYPE_MAPPINGS',
+  'FETCH_FORM_ASSEMBLY_MAPPINGS',
 ] as const;
 
 export const MUTATION_HEADED_TASK_TYPES = [
@@ -225,6 +249,10 @@ export const MUTATION_HEADED_TASK_TYPES = [
   'SET_CLIENT_USER_STATUS',
   'RESET_CLIENT_USER_PASSWORD',
   'RESET_PASSWORD',
+  'MAP_BILL_COUNTER_USER',
+  'MAP_STOCK_LOCATION_USER',
+  'UPDATE_DOCUMENT_TYPE_MAPPINGS',
+  'UPDATE_FORM_ASSEMBLY_MAPPINGS',
   'EDIT_CLIENT_USER',
   'EDIT_AND_UPDATE_CLIENT',
   'IMPORT_CLIENT_USERS',
@@ -247,6 +275,9 @@ export const MUTATION_HEADED_TASK_TYPES = [
 
 export const INTERACTIVE_TASK_TYPES = [
   'OPEN_INTERACTIVE_CLIENT_SESSION',
+  'OPEN_STOCK_LOCATION_SESSION',
+  'OPEN_DOCUMENT_TYPE_SESSION',
+  'OPEN_FORM_ASSEMBLY_SESSION',
   'OPEN_MULTIPLE_TABS_SESSION',
   'INTERACTIVE_LOGIN',
   'TEST_LOGIN',

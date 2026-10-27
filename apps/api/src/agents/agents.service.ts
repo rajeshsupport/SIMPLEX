@@ -598,6 +598,36 @@ export class AgentsService {
             existingSummary.oneTimeCredentialEventId = deliveryRes.oneTimeEventId;
             existingSummary.credentialDeliveryStatus = deliveryRes.credentialDeliveryStatus;
           }
+
+          // Authoritative auto-persistence of scraped bill counters from headless sync
+          if (Array.isArray(existingSummary.billCounters) && existingSummary.billCounters.length > 0 && run.clientId) {
+            try {
+              const rawMappings = existingSummary.billCounters;
+              const clientId = run.clientId;
+              await this.runRepo.manager.query('DELETE FROM client_bill_counter_mappings WHERE clientId = @0', [clientId]);
+              const normalize = (s?: string | null) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+              for (const item of rawMappings) {
+                if (item.billCounterName && item.userName) {
+                  await this.runRepo.manager.query(
+                    `INSERT INTO client_bill_counter_mappings (id, clientId, billCounterName, userName, normalizedUserName, role, status, lastSyncedAt, createdAt, updatedAt)
+                     VALUES (NEWID(), @0, @1, @2, @3, @4, @5, SYSUTCDATETIME(), SYSUTCDATETIME(), SYSUTCDATETIME())`,
+                    [
+                      clientId,
+                      item.billCounterName,
+                      item.userName,
+                      normalize(item.userName),
+                      item.role || null,
+                      item.isActive === false ? 'INACTIVE' : 'ACTIVE',
+                    ]
+                  );
+                }
+              }
+              await this.reconciliationService.reconcileBillCounterStatus(clientId);
+            } catch (bcSaveErr: any) {
+              this.logger.warn(`Failed to persist bill counters from telemetry: ${bcSaveErr.message}`);
+            }
+          }
+
           run.resultSummaryJson = JSON.stringify(existingSummary);
         }
       }

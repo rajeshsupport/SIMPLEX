@@ -384,6 +384,7 @@ export class WorkflowExecutor {
 
     // Bounded polling loop: Poll every 300ms up to 15s to eliminate premature races during navigation
     let discoveredBranches: string[] = [];
+    let hasAttemptedBranchSelection = false;
 
     while (Date.now() - verifyStartTime < maxVerifyTimeoutMs) {
       // 1. Check for MFA / OTP / CAPTCHA prompt
@@ -421,33 +422,40 @@ export class WorkflowExecutor {
         };
       }
 
-      // 2.5 Option 2: Check for Post-Login Branch Selection (/userBaseBranch, /loginCheck or CHOOSE BRANCH)
-      const isBranchSelection = await this.checkBranchSelectionScreen(page);
-      if (isBranchSelection) {
-        const targetBranch = (variables.targetBranch || variables.branchName || '') as string;
-        const branchRes = await this.handleBranchSelection(page, targetBranch, onStepUpdate);
-        if (branchRes.discoveredBranches && branchRes.discoveredBranches.length > 0) {
-          discoveredBranches = branchRes.discoveredBranches;
-        }
-        if (!branchRes.selected && branchRes.errorCode) {
-          telStep6.status = 'FAILED';
-          telStep6.errorMessage = branchRes.errorMessage;
-          stepsTelemetry.push(telStep6);
-          onStepUpdate?.(telStep6);
+      // 2.5 FIRST: Check for Post-Login Branch Selection (/userBaseBranch, /loginCheck or CHOOSE BRANCH)
+      if (!hasAttemptedBranchSelection) {
+        const isBranchSelection = await this.checkBranchSelectionScreen(page);
+        if (isBranchSelection) {
+          hasAttemptedBranchSelection = true;
+          const targetBranch = (variables.targetBranch || variables.branchName || '') as string;
+          const branchRes = await this.handleBranchSelection(page, targetBranch, onStepUpdate);
+          if (branchRes.discoveredBranches && branchRes.discoveredBranches.length > 0) {
+            discoveredBranches = branchRes.discoveredBranches;
+          }
+          if (!branchRes.selected && branchRes.errorCode) {
+            telStep6.status = 'FAILED';
+            telStep6.errorMessage = branchRes.errorMessage;
+            stepsTelemetry.push(telStep6);
+            onStepUpdate?.(telStep6);
 
-          return {
-            success: false,
-            status: 'FAILED',
-            classifiedCode: branchRes.errorCode,
-            errorMessage: branchRes.errorMessage,
-            failedStepIndex: 6,
-            stepsTelemetry,
-            resultData: discoveredBranches.length > 0 ? { discoveredBranches } : undefined,
-          };
+            return {
+              success: false,
+              status: 'FAILED',
+              classifiedCode: branchRes.errorCode,
+              errorMessage: branchRes.errorMessage,
+              failedStepIndex: 6,
+              stepsTelemetry,
+              resultData: discoveredBranches.length > 0 ? { discoveredBranches } : undefined,
+            };
+          }
+          if (branchRes.selected) {
+            authVerified = true;
+            break;
+          }
         }
       }
 
-      // 3. Check for Dashboard Arrival / Authenticated Elements
+      // 2.6 SECOND: Check for Dashboard Arrival / Authenticated Elements
       const isSuccess = await this.checkSessionActive(page, workflow);
       if (isSuccess) {
         authVerified = true;
@@ -667,8 +675,22 @@ export class WorkflowExecutor {
       return false;
     }
 
-    // 1. URL pattern check (must NOT be at a /login route, except /logincheck when dashboard rendered)
-    if (currentUrl.includes('/login') && !currentUrl.includes('/logincheck')) {
+    // 1. URL pattern check (must NOT be at a login or branch selection route)
+    if (
+      currentUrl.includes('/login') ||
+      currentUrl.includes('/userbasebranch') ||
+      currentUrl.includes('/changeuserbranch')
+    ) {
+      return false;
+    }
+
+    // 1.5 Branch selection elements present (branch must be selected before session is considered active)
+    const isBranchSelectVisible = await page
+      .locator('.onbranchSelect:visible, form#loginFormChangeRole:visible, #chooseBranch:visible, form#userBaseBranch:visible')
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (isBranchSelectVisible) {
       return false;
     }
 
@@ -779,6 +801,14 @@ export class WorkflowExecutor {
     try {
       const currentUrl = page.url().toLowerCase();
       if (
+        currentUrl.includes('/dashboard') ||
+        currentUrl.includes('/services') ||
+        currentUrl.includes('/users') ||
+        currentUrl.includes('/home')
+      ) {
+        return false;
+      }
+      if (
         currentUrl.includes('/userbasebranch') ||
         currentUrl.includes('/changeuserbranch') ||
         currentUrl.includes('/logincheck')
@@ -787,7 +817,7 @@ export class WorkflowExecutor {
       }
       const branchHeader = await page
         .locator(
-          'text="CHOOSE BRANCH", text="Choose Branch", #chooseBranch, .choose-branch, h1:has-text("CHOOSE BRANCH" i), h2:has-text("CHOOSE BRANCH" i), h3:has-text("CHOOSE BRANCH" i), div:has-text("CHOOSE BRANCH" i), .jOrgChart, #chart, a[href*="loginCheck"], a[href*="userBaseBranch"], a[href*="changeUserBranch"], select[name="branch"], select#ddlBranch, #userBaseBranch, #changeUserBranch, [data-testid="branch-selection"]'
+          '#chooseBranch, .choose-branch, h1:has-text("CHOOSE BRANCH" i), h2:has-text("CHOOSE BRANCH" i), form#userBaseBranch, form#changeUserBranch, form#loginFormChangeRole, .onbranchSelect, #chart.jOrgChart, [data-testid="branch-selection"]'
         )
         .first()
         .isVisible()
@@ -909,6 +939,25 @@ export class WorkflowExecutor {
               const stripped = normalize(o.text.replace(/^[\[\(]?[a-z0-9_-]+[\]\)]?\s*[-–:]\s*/i, ''));
               return stripped === targetNorm;
             });
+          }
+
+          // Fallback: substring matching (e.g. "Testing_GAELAN..." vs "Testing_GAELAN MEDICAL CARE ONE DAY")
+          if (matches.length === 0) {
+            matches = validOptions.filter((o) => {
+              const oTextNorm = normalize(o.text);
+              return (
+                (oTextNorm.length >= 5 && targetNorm.includes(oTextNorm)) ||
+                (targetNorm.length >= 5 && oTextNorm.includes(targetNorm))
+              );
+            });
+            if (matches.length > 1) {
+              matches.sort((a, b) => {
+                const diffA = Math.abs(normalize(a.text).length - targetNorm.length);
+                const diffB = Math.abs(normalize(b.text).length - targetNorm.length);
+                return diffA - diffB;
+              });
+              matches = [matches[0]];
+            }
           }
 
           if (matches.length === 0) {
@@ -1194,11 +1243,17 @@ export class WorkflowExecutor {
               }
               // Substring inclusion
               else if (targetNormVal.length >= 5 && (textNormVal.includes(targetNormVal) || targetNormVal.includes(textNormVal))) {
-                const longer = Math.max(textNormVal.length, targetNormVal.length);
-                const shorter = Math.min(textNormVal.length, targetNormVal.length);
-                if (shorter / longer > 0.6) {
+                match = true;
+                score = 70;
+              }
+              // Token overlap matching (e.g. "Testing GAELAN MEDICAL CARE ONE DAY")
+              else if (targetNormVal.length >= 5) {
+                const targetWords = targetNormVal.split(/\s+/).filter((w: string) => w.length > 2);
+                const textWords = textNormVal.split(/\s+/).filter((w: string) => w.length > 2);
+                const commonWords = targetWords.filter((w: string) => textWords.includes(w));
+                if (commonWords.length >= 2 && commonWords.length / Math.min(targetWords.length, textWords.length) >= 0.5) {
                   match = true;
-                  score = 60;
+                  score = 50 + commonWords.length * 5;
                 }
               }
 

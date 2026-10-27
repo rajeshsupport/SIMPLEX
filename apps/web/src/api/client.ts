@@ -1,4 +1,4 @@
-import type { EmrFormsQueryResult } from '@hmc/shared';
+import type { EmrFormsQueryResult, ClientUser } from '@hmc/shared';
 
 const API_BASE = '/api/v1';
 
@@ -186,6 +186,7 @@ export class ApiClient {
 export const clientResourcesApi = {
   getResources: (params: {
     clientId: string;
+    branchName?: string;
     search?: string;
     specialty?: string;
     resourceType?: string;
@@ -196,6 +197,7 @@ export const clientResourcesApi = {
   }) => {
     const q = new URLSearchParams();
     q.set('clientId', params.clientId);
+    if (params.branchName) q.set('branchName', params.branchName);
     if (params.search) q.set('search', params.search);
     if (params.specialty) q.set('specialty', params.specialty);
     if (params.resourceType) q.set('resourceType', params.resourceType);
@@ -203,13 +205,25 @@ export const clientResourcesApi = {
     if (params.isResourceHuman !== undefined) q.set('isResourceHuman', String(params.isResourceHuman));
     if (params.page) q.set('page', String(params.page));
     if (params.limit) q.set('limit', String(params.limit));
-    return ApiClient.request<{ data: any[]; total: number; page: number; limit: number }>(`/client-resources?${q.toString()}`);
+    return ApiClient.request<{ data: any[]; total: number; page: number; limit: number; summary?: any }>(`/client-resources?${q.toString()}`);
   },
 
-  syncResources: (clientId: string, targetBranch?: string) =>
-    ApiClient.request<{ success: boolean; message: string; count?: number }>('/client-resources/sync', {
+  syncResources: (clientId: string, targetBranch?: string, signal?: AbortSignal) =>
+    ApiClient.request<{
+      success: boolean;
+      message: string;
+      count?: number;
+      totalScraped?: number;
+      createdCount?: number;
+      updatedCount?: number;
+      humanCount?: number;
+      nonHumanCount?: number;
+      totalInScope?: number;
+      totalInDatabase?: number;
+    }>('/client-resources/sync', {
       method: 'POST',
       body: JSON.stringify({ clientId, targetBranch }),
+      signal,
     }),
 
   createResource: (payload: any) =>
@@ -402,6 +416,213 @@ export const clientResourcesApi = {
 };
 
 export const clientUsersApi = {
+  mapBillCounterUser: (id: string, payload?: { targetBranch?: string; roleName?: string }) =>
+    ApiClient.request<{
+      success: boolean;
+      alreadyExists?: boolean;
+      username?: string;
+      billCounterName?: string;
+      roleName?: string;
+      message: string;
+    }>(`/client-users/${id}/map-bill-counter`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    }),
+
+  getStockLocationUrls: (clientId: string) =>
+    ApiClient.request<{
+      clientId: string;
+      clientCode: string;
+      clientName: string;
+      baseUrl: string;
+      applicationPath?: string;
+      stockLocationListUrl: string;
+      addStockLocationUrl: string;
+    }>(`/client-users/stock-location-urls?clientId=${encodeURIComponent(clientId)}`),
+
+  getStockLocationMappings: (clientId: string) =>
+    ApiClient.request<{
+      mappings: Array<{
+        id: string;
+        clientId: string;
+        stockLocationName: string;
+        userName: string;
+        username?: string;
+        status: string;
+        lastSyncedAt: string;
+      }>;
+      count: number;
+      lastSyncedAt: string | null;
+    }>(`/client-users/stock-location-mappings?clientId=${encodeURIComponent(clientId)}`),
+
+  refreshStockLocationMappings: (clientId: string, targetBranch?: string) =>
+    ApiClient.request<{
+      success: boolean;
+      count: number;
+      matchedUsersCount: number;
+      message: string;
+    }>(`/client-users/stock-location-mappings/refresh?clientId=${encodeURIComponent(clientId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ targetBranch }),
+    }),
+
+  mapStockLocationUser: (id: string, payload?: {
+    targetBranch?: string;
+    stockLocationNames?: string[];
+    stockLocationIds?: string[];
+  }) =>
+    ApiClient.request<{
+      success: boolean;
+      alreadyExists?: boolean;
+      username?: string;
+      mappedLocations?: string[];
+      message: string;
+    }>(`/client-users/${id}/map-stock-location`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    }),
+
+  openStockLocationSession: (id: string, payload?: { targetBranch?: string }) =>
+    ApiClient.request<{
+      id: string;
+      status: string;
+      runType: string;
+    }>(`/client-users/${id}/open-stock-location-session`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    }),
+
+
+  getDocumentTypes: (clientId: string) =>
+    ApiClient.request<{
+      documentTypes: Array<{
+        docTypeId: string;
+        docTypeName: string;
+        userDocGroup?: string;
+        groupCode?: string;
+        mappedUsersCount: number;
+        totalUsersCount?: number;
+        mappedUsernames: string[];
+        mappedUserFullNames?: string[];
+        lastSyncedAt?: string;
+      }>;
+      totalDocumentTypes: number;
+      totalMappings: number;
+      allUsers: Array<{
+        username: string;
+        fullName: string;
+        isDocumentTypeMapped: boolean;
+        documentTypeNames?: string | null;
+      }>;
+    }>(`/client-users/document-types?clientId=${encodeURIComponent(clientId)}`),
+
+  refreshDocumentTypeMappings: (clientId: string, targetBranch?: string) =>
+    ApiClient.request<{
+      success: boolean;
+      count: number;
+      matchedUsersCount: number;
+      documentTypesCount: number;
+      message: string;
+    }>(`/client-users/document-type-mappings/refresh?clientId=${encodeURIComponent(clientId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ targetBranch }),
+    }),
+
+  updateDocumentTypeMappings: (
+    clientId: string,
+    docTypeId: string,
+    payload: { selectedUsernames: string[]; targetBranch?: string; userDocGroup?: string }
+  ) =>
+    ApiClient.request<{
+      success: boolean;
+      docTypeId: string;
+      docTypeName?: string;
+      selectedUsernames: string[];
+      message: string;
+    }>(`/client-users/document-types/${encodeURIComponent(docTypeId)}/update-mappings?clientId=${encodeURIComponent(clientId)}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  openDocumentTypeSession: (payload: {
+    clientId: string;
+    docTypeId?: string;
+    username?: string;
+    targetBranch?: string;
+  }) =>
+    ApiClient.request<{
+      id: string;
+      status: string;
+      runType: string;
+    }>(`/client-users/open-document-type-session?clientId=${encodeURIComponent(payload.clientId)}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+
+  getFormAssemblyForms: (clientId: string, userId?: string) =>
+    ApiClient.request<{
+      forms: Array<{
+        formId: string;
+        formName: string;
+        groupName?: string;
+        isDefault?: boolean;
+        isMapped?: boolean;
+        assignedUsersCount?: number;
+        assignedUsernames?: string[];
+      }>;
+      totalForms: number;
+      userMappedCount: number;
+      userMappedForms: string[];
+      user?: {
+        id: string;
+        username: string;
+        fullName: string;
+        isFormAssemblyMapped: boolean;
+        formAssemblyNames?: string | null;
+      };
+    }>(`/client-users/form-assembly?clientId=${encodeURIComponent(clientId)}${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`),
+
+  refreshFormAssemblyMappings: (clientId: string, targetBranch?: string) =>
+    ApiClient.request<{
+      success: boolean;
+      count: number;
+      matchedUsersCount: number;
+      formsCount: number;
+      message: string;
+    }>(`/client-users/form-assembly/refresh`, {
+      method: 'POST',
+      body: JSON.stringify({ clientId, targetBranch }),
+    }),
+
+  updateFormAssemblyMappings: (
+    userId: string,
+    payload: { clientId: string; formIds: string[]; targetBranch?: string }
+  ) =>
+    ApiClient.request<{
+      success: boolean;
+      assignedFormIds: string[];
+      assignedFormNames: string[];
+      user: ClientUser;
+      message: string;
+    }>(`/client-users/${encodeURIComponent(userId)}/update-form-assembly`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  openFormAssemblySession: (
+    userId: string,
+    payload: { clientId: string; targetBranch?: string }
+  ) =>
+    ApiClient.request<{
+      success: boolean;
+      message: string;
+      targetUrl?: string;
+    }>(`/client-users/${encodeURIComponent(userId)}/open-form-assembly-session`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   mapUserRoles: (payload: {
     clientId: string;
     username: string;

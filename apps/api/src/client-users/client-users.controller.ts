@@ -60,6 +60,151 @@ export class ClientUsersController {
     );
   }
 
+  
+  @Get('bill-counter-mappings')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getBillCounterMappings(
+    @Query('clientId') clientId: string
+  ) {
+    return this.clientUsersService.getBillCounterMappings(clientId);
+  }
+
+  @Get('stock-location-urls')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getStockLocationUrls(
+    @Query('clientId') clientId: string
+  ) {
+    return this.clientUsersService.getStockLocationUrls(clientId);
+  }
+
+  @Get('stock-location-mappings')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getStockLocationMappings(
+    @Query('clientId') clientId: string
+  ) {
+    return this.clientUsersService.getStockLocationMappings(clientId);
+  }
+
+
+  
+  @Get('form-assembly')
+  async getFormAssemblyForms(
+    @Query('clientId') clientId: string,
+    @Query('userId') userId?: string
+  ) {
+    return this.clientUsersService.getFormAssemblyForms(clientId, userId);
+  }
+
+  @Post('form-assembly/refresh')
+  async refreshFormAssemblyMappings(
+    @Body('clientId') clientId: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.fetchFormAssemblyMappingsRemote(clientId, user, targetBranch);
+  }
+
+  @Post(':id/update-form-assembly')
+  async updateFormAssemblyMappings(
+    @Param('id') id: string,
+    @Body('clientId') clientId: string,
+    @Body('formIds') formIds: string[],
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.updateFormAssemblyMappingsRemote(id, user, { clientId, formIds, targetBranch });
+  }
+
+  @Post(':id/open-form-assembly-session')
+  async openFormAssemblySession(
+    @Param('id') id: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.openFormAssemblySessionRemote(id, user, targetBranch);
+  }
+
+  @Get('document-types')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  async getDocumentTypes(
+    @Query('clientId') clientId: string
+  ) {
+    return this.clientUsersService.getDocumentTypes(clientId);
+  }
+
+  @Post('document-type-mappings/refresh')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @HttpCode(HttpStatus.OK)
+  async refreshDocumentTypeMappings(
+    @Query('clientId') clientId: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.fetchDocumentTypeMappingsRemote(clientId, user, targetBranch);
+  }
+
+  @Post('document-types/:docTypeId/update-mappings')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_EDIT)
+  @HttpCode(HttpStatus.OK)
+  async updateDocumentTypeMappings(
+    @Param('docTypeId') docTypeId: string,
+    @Query('clientId') clientId: string,
+    @Body('selectedUsernames') selectedUsernames: string[],
+    @Body('targetBranch') targetBranch: string | undefined,
+    @Body('userDocGroup') userDocGroup: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.updateDocumentTypeMappingsRemote(
+      clientId,
+      docTypeId,
+      selectedUsernames || [],
+      user,
+      targetBranch,
+      userDocGroup
+    );
+  }
+
+  @Post('open-document-type-session')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async openDocumentTypeSession(
+    @Query('clientId') clientId: string,
+    @Body('docTypeId') docTypeId: string | undefined,
+    @Body('username') username: string | undefined,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.openDocumentTypeSessionRemote(
+      clientId,
+      user,
+      docTypeId,
+      username,
+      targetBranch
+    );
+  }
+
+  @Post('stock-location-mappings/refresh')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @HttpCode(HttpStatus.OK)
+  async refreshStockLocationMappings(
+    @Query('clientId') clientId: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.fetchStockLocationMappingsRemote(clientId, user, targetBranch);
+  }
+
+  @Post('bill-counter-mappings/refresh')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_SYNC)
+  @HttpCode(HttpStatus.OK)
+  async refreshBillCounterMappings(
+    @Query('clientId') clientId: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.fetchBillCounterMappingsRemote(clientId, user, targetBranch);
+  }
+
   @Get('form-options')
   @RequirePermissions(PERMISSIONS.CLIENT_USERS_CREATE)
   async getFormOptions(
@@ -189,6 +334,43 @@ export class ClientUsersController {
     @CurrentUser() user: JwtPayload
   ) {
     return this.clientUsersService.setUserStatus(id, status, user, targetBranch);
+  }
+
+  
+  @Post(':id/map-bill-counter')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_EDIT)
+  @HttpCode(HttpStatus.OK)
+  async mapBillCounterUser(
+    @Param('id') id: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @Body('roleName') roleName: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.mapBillCounterUser(id, user, targetBranch, roleName);
+  }
+
+  @Post(':id/map-stock-location')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_EDIT)
+  @HttpCode(HttpStatus.OK)
+  async mapStockLocationUser(
+    @Param('id') id: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @Body('stockLocationNames') stockLocationNames: string[] | undefined,
+    @Body('stockLocationIds') stockLocationIds: string[] | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.mapStockLocationUserRemote(id, user, { targetBranch, stockLocationNames, stockLocationIds });
+  }
+
+  @Post(':id/open-stock-location-session')
+  @RequirePermissions(PERMISSIONS.CLIENT_USERS_VIEW)
+  @HttpCode(HttpStatus.OK)
+  async openStockLocationSession(
+    @Param('id') id: string,
+    @Body('targetBranch') targetBranch: string | undefined,
+    @CurrentUser() user: JwtPayload
+  ) {
+    return this.clientUsersService.openStockLocationSessionRemote(id, user, targetBranch);
   }
 
   @Post(':id/reset-password')

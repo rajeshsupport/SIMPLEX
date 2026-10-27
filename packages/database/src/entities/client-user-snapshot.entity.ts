@@ -97,6 +97,39 @@ export class ClientUserSnapshot {
   @Column({ type: 'bit', default: 1 })
   isPresentRemotely!: boolean;
 
+  @Column({ type: 'bit', default: 0 })
+  isBillCounterMapped!: boolean;
+
+  @Column({ type: 'nvarchar', length: 150, nullable: true })
+  billCounterName?: string | null;
+
+  @Column({ type: 'bit', default: 0 })
+  isStockLocationMapped!: boolean;
+
+  @Column({ type: 'nvarchar', length: 'max', nullable: true })
+  stockLocationNames?: string | null;
+
+  @Column({ type: 'int', default: 0 })
+  stockLocationCount!: number;
+
+  @Column({ type: 'bit', default: 0 })
+  isDocumentTypeMapped!: boolean;
+
+  @Column({ type: 'nvarchar', length: 'max', nullable: true })
+  documentTypeNames?: string | null;
+
+  @Column({ type: 'int', default: 0 })
+  documentTypeCount!: number;
+
+  @Column({ type: 'bit', default: 0 })
+  isFormAssemblyMapped!: boolean;
+
+  @Column({ type: 'nvarchar', length: 'max', nullable: true })
+  formAssemblyNames?: string | null;
+
+  @Column({ type: 'int', default: 0 })
+  formAssemblyCount!: number;
+
   @Column({ type: 'nvarchar', length: 100, nullable: true })
   syncRunId?: string | null;
 

@@ -101,10 +101,11 @@ export class AgentsController {
     @Param('runId') runId: string,
     @Headers('x-agent-id') agentId: string,
     @Headers('x-agent-token') agentToken: string,
+    @Headers('x-agent-secret') agentSecret: string | undefined,
     @Body() dto: SyncUserBatchDto
   ) {
     dto.runId = runId;
-    return this.reconciliationService.ingestSyncBatch(runId, dto, { agentId, agentToken });
+    return this.reconciliationService.ingestSyncBatch(runId, dto, { agentId, agentToken, agentSecret });
   }
 
   @Post('dispatch-open-and-login')

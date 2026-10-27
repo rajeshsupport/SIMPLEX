@@ -56,7 +56,29 @@ export interface ClientUser {
   createdAt?: string;
   updatedAt?: string;
   credentialDeliveryStatus?: CredentialDeliveryStatus;
+  isBillCounterMapped?: boolean;
+  billCounterName?: string;
+  isStockLocationMapped?: boolean;
+  stockLocationNames?: string | null;
+  stockLocationCount?: number;
+  isDocumentTypeMapped?: boolean;
+  documentTypeNames?: string | null;
+  documentTypeCount?: number;
+  isFormAssemblyMapped?: boolean;
+  formAssemblyNames?: string | null;
+  formAssemblyCount?: number;
   message?: string;
+}
+
+export interface ClientStockLocationMappingItem {
+  id?: string;
+  clientId: string;
+  userName: string;
+  username?: string;
+  stockLocationName: string;
+  stockLocationId?: string;
+  status: string;
+  lastSyncedAt?: string;
 }
 
 export interface FormDropdownOption {
@@ -642,4 +664,73 @@ export interface SyncUserBatchResponse {
   receivedCount: number;
   finalized?: boolean;
   persistedCount?: number;
+}
+
+export interface BillCounterMappingItem {
+  billCounterName: string;
+  userName: string;
+  role?: string;
+  isActive?: boolean;
+}
+
+export interface ClientDocumentTypeItem {
+  docTypeId: string;
+  docTypeName: string;
+  groupCode?: string;
+  userDocGroup?: string;
+  mappedUsersCount: number;
+  totalUsersCount?: number;
+  mappedUsernames: string[];
+  mappedUserFullNames?: string[];
+  lastSyncedAt?: string;
+}
+
+export interface ClientDocumentTypeMappingRecord {
+  id?: string;
+  clientId: string;
+  documentTypeId: string;
+  documentTypeName: string;
+  userDocGroup?: string;
+  userName: string;
+  username?: string;
+  status: string;
+  lastSyncedAt?: string;
+}
+
+export interface UpdateDocumentTypeMappingDto {
+  docTypeId: string;
+  selectedUsernames: string[];
+  userDocGroup?: string;
+  targetBranch?: string;
+}
+
+export interface ClientFormAssemblyItem {
+  formId: string;
+  formName: string;
+  groupName?: string;
+  isDefault?: boolean;
+  isMapped?: boolean;
+  assignedUsersCount?: number;
+  assignedUsernames?: string[];
+  lastSyncedAt?: string;
+}
+
+export interface ClientFormAssemblyMappingRecord {
+  id?: string;
+  clientId: string;
+  formId: string;
+  formName: string;
+  groupName?: string;
+  userName: string;
+  username?: string;
+  isDefault?: boolean;
+  status: string;
+  lastSyncedAt?: string;
+}
+
+export interface UpdateFormAssemblyMappingDto {
+  userId?: string;
+  username: string;
+  formIds: string[];
+  targetBranch?: string;
 }

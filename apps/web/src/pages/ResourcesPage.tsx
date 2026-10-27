@@ -3,6 +3,7 @@ import {
   Layers,
   Search,
   RefreshCw,
+  Loader2,
   Plus,
   FileSpreadsheet,
   Download,
@@ -123,14 +124,26 @@ export const ResourcesPage: React.FC = () => {
   const [selectedClientId, setSelectedClientId] = useState<string>('');
   const [selectedBranch, setSelectedBranch] = useState<string>('');
   const [customBranch, setCustomBranch] = useState<string>('');
+  const effectiveBranch = selectedBranch === '__custom__' ? customBranch.trim() : selectedBranch;
   const [isLoadingClients, setIsLoadingClients] = useState<boolean>(true);
 
   // Resources Data State
   const [resources, setResources] = useState<ResourceItem[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
-  const [resourceSummary, setResourceSummary] = useState<{ total: number; humanCount: number; nonHumanCount: number; linkedCount: number } | null>(null);
+  const [resourceSummary, setResourceSummary] = useState<{ total: number; humanCount: number; nonHumanCount: number; linkedCount: number; totalClientResources?: number; branchName?: string | null } | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [syncElapsedSeconds, setSyncElapsedSeconds] = useState<number>(0);
+  const [syncProgressMessage, setSyncProgressMessage] = useState<string>('');
+  const syncTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+  const syncAbortRef = React.useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (syncTimerRef.current) clearInterval(syncTimerRef.current);
+      if (syncAbortRef.current) syncAbortRef.current.abort();
+    };
+  }, []);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -711,7 +724,7 @@ export const ResourcesPage: React.FC = () => {
     }
   }, [wUsername, wMappingUsername]);
 
-  // Load resources when client or filters change
+  // Load resources when client, branch or filters change
   const fetchResources = useCallback(async () => {
     if (!selectedClientId) return;
     setIsLoading(true);
@@ -719,6 +732,7 @@ export const ResourcesPage: React.FC = () => {
     try {
       const res = await clientResourcesApi.getResources({
         clientId: selectedClientId,
+        branchName: effectiveBranch || undefined,
         search: search.trim() || undefined,
         specialty: specialtyFilter || undefined,
         resourceType: typeFilter || undefined,
@@ -737,7 +751,7 @@ export const ResourcesPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedClientId, search, specialtyFilter, typeFilter, isHumanFilter, statusFilter, page, limit]);
+  }, [selectedClientId, effectiveBranch, search, specialtyFilter, typeFilter, isHumanFilter, statusFilter, page, limit]);
 
   useEffect(() => {
     fetchResources();
@@ -747,17 +761,74 @@ export const ResourcesPage: React.FC = () => {
   const handleSync = async () => {
     if (!selectedClientId || isSyncing) return;
     setIsSyncing(true);
+    setSyncElapsedSeconds(0);
+    setSyncProgressMessage('Authenticating securely…');
     setErrorMessage(null);
     setSuccessMessage(null);
+
+    if (syncTimerRef.current) clearInterval(syncTimerRef.current);
+    const abortController = new AbortController();
+    syncAbortRef.current = abortController;
+
+    const startTime = Date.now();
+    syncTimerRef.current = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      setSyncElapsedSeconds(elapsed);
+      if (elapsed >= 18) {
+        setSyncProgressMessage('Finalizing and synchronizing resource records…');
+      } else if (elapsed >= 10) {
+        setSyncProgressMessage('Extracting human & non-human resources across all pages…');
+      } else if (elapsed >= 5) {
+        setSyncProgressMessage('Navigating to client resource directory…');
+      } else {
+        setSyncProgressMessage('Authenticating securely…');
+      }
+    }, 1000);
+
     try {
-      const res = await clientResourcesApi.syncResources(selectedClientId, effectiveBranch || undefined);
-      setSuccessMessage(res.message || 'Resource discovery completed.');
+      const res = await clientResourcesApi.syncResources(
+        selectedClientId,
+        effectiveBranch || undefined,
+        abortController.signal
+      );
+      if (syncTimerRef.current) clearInterval(syncTimerRef.current);
+      setIsSyncing(false);
+      setSyncProgressMessage('');
+      const count = res.totalScraped ?? res.count ?? 0;
+      const created = res.createdCount ?? 0;
+      const updated = res.updatedCount ?? 0;
+      const inScope = res.totalInScope ?? count;
+      const inDb = res.totalInDatabase;
+      const branchMsg = effectiveBranch ? ` for ${effectiveBranch}` : '';
+
+      let countMsg = `${count} resources synchronized successfully${branchMsg} (${created} created, ${updated} updated).`;
+      if (inDb !== undefined && inDb !== inScope) {
+        countMsg += ` Branch total: ${inScope} (${inDb} total across all branches in database).`;
+      }
+      setSuccessMessage(`✓ ${countMsg}`);
       fetchResources();
     } catch (err: any) {
-      setErrorMessage(err.message || 'Resource synchronization failed.');
-    } finally {
+      if (syncTimerRef.current) clearInterval(syncTimerRef.current);
       setIsSyncing(false);
+      setSyncProgressMessage('');
+      if (err.name === 'AbortError' || abortController.signal.aborted) {
+        setErrorMessage('Resource sync cancelled by user.');
+      } else {
+        setErrorMessage(err.message || 'Resource synchronization failed.');
+      }
     }
+  };
+
+  const handleCancelSync = () => {
+    if (syncAbortRef.current) {
+      syncAbortRef.current.abort();
+    }
+    if (syncTimerRef.current) {
+      clearInterval(syncTimerRef.current);
+    }
+    setIsSyncing(false);
+    setSyncProgressMessage('');
+    setErrorMessage('Resource sync cancelled by user.');
   };
 
   // Reset integrated wizard form
@@ -933,6 +1004,7 @@ export const ResourcesPage: React.FC = () => {
         operatingFrom: wOperatingFrom !== undefined && wOperatingFrom !== '' ? wOperatingFrom : '00:00',
         operatingTo: wOperatingTo !== undefined && wOperatingTo !== '' ? wOperatingTo : '23:55',
         branchId: wBranchId || undefined,
+        allowReuseIfExisting: true,
       };
 
       const res = await clientResourcesApi.createResourceOnly(payload);
@@ -2387,7 +2459,6 @@ export const ResourcesPage: React.FC = () => {
   };
 
   const selectedClient = clients.find((c) => c.id === selectedClientId);
-  const effectiveBranch = selectedBranch === '__custom__' ? customBranch.trim() : selectedBranch;
   const totalPages = Math.ceil(totalCount / limit) || 1;
 
   // Compute stat counters
@@ -2485,6 +2556,23 @@ export const ResourcesPage: React.FC = () => {
         </div>
       </div>
 
+      {isSyncing && (
+        <div className="flex items-center justify-between gap-3 p-3 rounded-lg border bg-sky-950/50 border-sky-800 text-sky-300 text-xs font-semibold shadow-md">
+          <div className="flex items-center gap-2.5">
+            <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+            <span>{syncProgressMessage || 'Connecting to automation agent…'}</span>
+            <span className="text-slate-400 font-mono text-[11px]">({syncElapsedSeconds}s)</span>
+          </div>
+          <button
+            onClick={handleCancelSync}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-300 rounded text-xs font-medium transition-colors shadow-sm"
+          >
+            <XCircle className="w-3.5 h-3.5" />
+            Cancel Sync
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       {errorMessage && (
         <div className="flex items-center gap-2 p-4 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-sm">
@@ -2515,7 +2603,14 @@ export const ResourcesPage: React.FC = () => {
           </div>
           <div>
             <div className="text-xs text-slate-400 font-medium">Total Resources</div>
-            <div className="text-2xl font-bold text-slate-100">{totalDisplay}</div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-bold text-slate-100">{totalDisplay}</span>
+              {resourceSummary?.totalClientResources && resourceSummary.totalClientResources !== totalDisplay && (
+                <span className="text-[11px] text-slate-400 font-normal">
+                  ({resourceSummary.totalClientResources} all branches)
+                </span>
+              )}
+            </div>
           </div>
         </div>
 

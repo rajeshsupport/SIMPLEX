@@ -2,6 +2,8 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   Users,
   Plus,
+  Boxes,
+  MapPin,
   KeyRound,
   Eye,
   Edit2,
@@ -17,6 +19,7 @@ import {
   AlertCircle,
   XCircle,
   FileSpreadsheet,
+  FileText,
   Building2,
   Phone,
   Mail,
@@ -30,8 +33,9 @@ import {
   X,
   Check,
   GitBranch,
+  LayoutGrid,
 } from 'lucide-react';
-import { ApiClient } from '../api/client.js';
+import { ApiClient, clientUsersApi } from '../api/client.js';
 import { Modal } from '../components/Modal.js';
 import { EnvironmentBadge } from '../components/EnvironmentBadge.js';
 import {
@@ -48,6 +52,9 @@ import {
   computeBidirectionalRoleDiff,
   AutomationInProgressResponse,
   UserCreationRunStatusResponse,
+  resolveClientStockLocationUserUrl,
+  resolveClientStockLocationListUrl,
+  resolveClientEmrPanelUrl,
 } from '@hmc/shared';
 import { useAuth } from '../context/AuthContext.js';
 
@@ -604,6 +611,9 @@ export const UsersPage: React.FC = () => {
     setRoleFilter('ALL');
     setPage(1);
     setActionMessage(null);
+    setBillCounterStatusMap({});
+    setStockLocationStatusMap({});
+    setFormAssemblyStatusMap({});
     const targetClient = clients.find((c) => c.id === newClientId);
     setSelectedClientId(newClientId);
     localStorage.setItem('hmc_selected_client_id', newClientId);
@@ -639,6 +649,44 @@ export const UsersPage: React.FC = () => {
         }
       }
       setUsers(dedupedUsers);
+      const newStatusMap: Record<string, { isMapped: boolean; billCounterName?: string }> = {};
+      for (const u of dedupedUsers) {
+        newStatusMap[u.id] = {
+          isMapped: !!u.isBillCounterMapped,
+          billCounterName: u.billCounterName || undefined,
+        };
+      }
+      setBillCounterStatusMap(newStatusMap);
+      const newStockStatusMap: Record<string, { isMapped: boolean; stockLocationNames?: string; count?: number }> = {};
+      for (const u of dedupedUsers) {
+        newStockStatusMap[u.id] = {
+          isMapped: !!u.isStockLocationMapped,
+          stockLocationNames: u.stockLocationNames || undefined,
+          count: u.stockLocationCount || 0,
+        };
+      }
+      setStockLocationStatusMap(newStockStatusMap);
+
+      const newDocTypeStatusMap: Record<string, { isMapped: boolean; documentTypeNames?: string; count?: number }> = {};
+      for (const u of dedupedUsers) {
+        newDocTypeStatusMap[u.id] = {
+          isMapped: !!u.isDocumentTypeMapped,
+          documentTypeNames: u.documentTypeNames || undefined,
+          count: u.documentTypeCount,
+        };
+      }
+      setDocTypeStatusMap(newDocTypeStatusMap);
+      const newFormAssemblyStatusMap: Record<string, { isMapped: boolean; formAssemblyNames?: string; count?: number }> = {};
+      for (const u of dedupedUsers) {
+        newFormAssemblyStatusMap[u.id] = {
+          isMapped: !!u.isFormAssemblyMapped,
+          formAssemblyNames: u.formAssemblyNames || undefined,
+          count: u.formAssemblyCount,
+        };
+      }
+      setFormAssemblyStatusMap(newFormAssemblyStatusMap);
+
+
       setTotalCount(res.totalCount !== undefined ? res.totalCount : dedupedUsers.length);
       setLastSyncedAt(res.lastSyncedAt || null);
       if (res.liveClientOptions) {
@@ -898,8 +946,8 @@ export const UsersPage: React.FC = () => {
 
       while (!isComplete) {
         const elapsedTotal = Date.now() - startTime;
-        if (elapsedTotal >= 90000) {
-          const timeoutMsg = 'Sync timed out after 90 seconds. Previous cached data is still available.';
+        if (elapsedTotal >= 180000) {
+          const timeoutMsg = 'Sync timed out after 180 seconds. Previous cached data is still available.';
           setSyncProgressMessage(timeoutMsg);
           setActionMessage({
             type: 'error',
@@ -1389,6 +1437,737 @@ export const UsersPage: React.FC = () => {
   // Password Reset in Simplex
   const [isResetConfirmModalOpen, setIsResetConfirmModalOpen] = useState(false);
   const [isMutatingReset, setIsMutatingReset] = useState(false);
+  
+  // Bill Counter User Mapping
+  const [selectedBillCounterUser, setSelectedBillCounterUser] = useState<ClientUser | null>(null);
+  const [isBillCounterModalOpen, setIsBillCounterModalOpen] = useState(false);
+  const [isMutatingBillCounter, setIsMutatingBillCounter] = useState(false);
+  const [isCheckingBillCounters, setIsCheckingBillCounters] = useState(false);
+  const [billCounterStatusMap, setBillCounterStatusMap] = useState<Record<string, { isMapped: boolean; billCounterName?: string }>>({});
+  const [billCounterMutationResult, setBillCounterMutationResult] = useState<{
+    success: boolean;
+    alreadyExists?: boolean;
+    billCounterName?: string;
+    roleName?: string;
+    message: string;
+  } | null>(null);
+  const [billCounterMutationError, setBillCounterMutationError] = useState<string | null>(null);
+
+
+  // Patient Visit Document Types Mapping State
+  const [selectedDocTypeUser, setSelectedDocTypeUser] = useState<ClientUser | null>(null);
+  const [isDocTypeModalOpen, setIsDocTypeModalOpen] = useState(false);
+  const [docTypeModalTab, setDocTypeModalTab] = useState<'USER' | 'DOC_TYPE'>('USER');
+  const [availableDocTypes, setAvailableDocTypes] = useState<any[]>([]);
+  const [selectedDocTypeForView, setSelectedDocTypeForView] = useState<any | null>(null);
+  const [userDocTypeIds, setUserDocTypeIds] = useState<string[]>([]);
+  const [docTypeUsernames, setDocTypeUsernames] = useState<string[]>([]);
+  const [docTypeSearchTerm, setDocTypeSearchTerm] = useState('');
+  const [userDocSearchTerm, setUserDocSearchTerm] = useState('');
+  
+  // Form Assembly states
+  const [selectedFormAssemblyUser, setSelectedFormAssemblyUser] = useState<ClientUser | null>(null);
+  const [isFormAssemblyModalOpen, setIsFormAssemblyModalOpen] = useState(false);
+  const [isMutatingFormAssembly, setIsMutatingFormAssembly] = useState(false);
+  const [isOpeningFormAssemblySession, setIsOpeningFormAssemblySession] = useState(false);
+  const [isCheckingFormAssembly, setIsCheckingFormAssembly] = useState(false);
+  const [isLoadingFormAssemblyModal, setIsLoadingFormAssemblyModal] = useState(false);
+  const [availableFormAssemblyForms, setAvailableFormAssemblyForms] = useState<Array<{ formId: string; formName: string; groupName?: string; isDefault?: boolean }>>([]);
+  const [selectedFormAssemblyIds, setSelectedFormAssemblyIds] = useState<string[]>([]);
+  const [formAssemblyStatusMap, setFormAssemblyStatusMap] = useState<Record<string, { isMapped: boolean; formAssemblyNames?: string; count?: number }>>({});
+  const [formAssemblyMutationResult, setFormAssemblyMutationResult] = useState<{ message: string; assignedFormNames?: string[] } | null>(null);
+  const [formAssemblyMutationError, setFormAssemblyMutationError] = useState<string | null>(null);
+  const [formAssemblySearch, setFormAssemblySearch] = useState<string>('');
+
+  const handleCheckFormAssembly = async () => {
+    if (!selectedClientId || isCheckingFormAssembly) return;
+    setIsCheckingFormAssembly(true);
+    try {
+      const res = await clientUsersApi.refreshFormAssemblyMappings(
+        selectedClientId,
+        selectedBranch || undefined
+      );
+      await loadUsers();
+      setActionMessage({
+        type: 'success',
+        text: res.message || `Checked /emrPanelSelection: ${res.formsCount} forms (${res.matchedUsersCount} users mapped).`,
+      });
+    } catch (err: any) {
+      setActionMessage({
+        type: 'error',
+        text: `Form Assembly check failed: ${err.message || 'Unknown error'}`,
+      });
+    } finally {
+      setIsCheckingFormAssembly(false);
+    }
+  };
+
+  const handleOpenFormAssemblyModal = async (u: ClientUser) => {
+    setSelectedFormAssemblyUser(u);
+    setFormAssemblyMutationResult(null);
+    setFormAssemblyMutationError(null);
+    setFormAssemblySearch('');
+    setIsFormAssemblyModalOpen(true);
+    setIsLoadingFormAssemblyModal(true);
+
+    try {
+      const res = await clientUsersApi.getFormAssemblyForms(u.clientId || selectedClientId, u.id);
+      const forms = res.forms || [];
+      setAvailableFormAssemblyForms(forms);
+
+      const mappedIds = forms.filter((f) => f.isMapped).map((f) => f.formId);
+      if (mappedIds.length === 0 && u.formAssemblyNames) {
+        const names = u.formAssemblyNames.split(',').map((n) => n.trim().toLowerCase());
+        const matched = forms.filter((f) => names.includes(f.formName.toLowerCase())).map((f) => f.formId);
+        setSelectedFormAssemblyIds(matched);
+      } else {
+        setSelectedFormAssemblyIds(mappedIds);
+      }
+    } catch (err: any) {
+      setFormAssemblyMutationError(`Failed to load forms: ${err.message}`);
+    } finally {
+      setIsLoadingFormAssemblyModal(false);
+    }
+  };
+
+  const handleToggleFormAssembly = (formId: string) => {
+    setSelectedFormAssemblyIds((prev) =>
+      prev.includes(formId) ? prev.filter((id) => id !== formId) : [...prev, formId]
+    );
+  };
+
+  const handleExecuteFormAssemblyMapping = async () => {
+    if (!selectedFormAssemblyUser || isMutatingFormAssembly) return;
+    setIsMutatingFormAssembly(true);
+    setFormAssemblyMutationError(null);
+    setFormAssemblyMutationResult(null);
+
+    try {
+      const res = await clientUsersApi.updateFormAssemblyMappings(selectedFormAssemblyUser.id, {
+        clientId: selectedFormAssemblyUser.clientId || selectedClientId,
+        formIds: selectedFormAssemblyIds,
+        targetBranch: selectedBranch || undefined,
+      });
+
+      setFormAssemblyMutationResult(res);
+      const isNowMapped = res.assignedFormIds.length > 0;
+      const joinedNames = res.assignedFormNames.join(', ');
+
+      setFormAssemblyStatusMap((prev) => ({
+        ...prev,
+        [selectedFormAssemblyUser.id]: {
+          isMapped: isNowMapped,
+          formAssemblyNames: joinedNames,
+          count: res.assignedFormIds.length,
+        },
+      }));
+
+      setUsers((prevUsers) =>
+        prevUsers.map((usr) =>
+          usr.id === selectedFormAssemblyUser.id
+            ? {
+                ...usr,
+                isFormAssemblyMapped: isNowMapped,
+                formAssemblyNames: joinedNames,
+                formAssemblyCount: res.assignedFormIds.length,
+              }
+            : usr
+        )
+      );
+
+      setActionMessage({
+        type: 'success',
+        text: res.message || `User '${selectedFormAssemblyUser.username}' Form Assembly mappings updated.`,
+      });
+    } catch (err: any) {
+      const cleanError = err.message || 'Form Assembly mapping update failed.';
+      setFormAssemblyMutationError(cleanError);
+      setActionMessage({
+        type: 'error',
+        text: cleanError,
+      });
+    } finally {
+      setIsMutatingFormAssembly(false);
+    }
+  };
+
+  const handleOpenFormAssemblySession = async () => {
+    if (!selectedFormAssemblyUser || isOpeningFormAssemblySession) return;
+    setIsOpeningFormAssemblySession(true);
+    setFormAssemblyMutationError(null);
+
+    try {
+      const res = await clientUsersApi.openFormAssemblySession(selectedFormAssemblyUser.id, {
+        clientId: selectedFormAssemblyUser.clientId || selectedClientId,
+        targetBranch: selectedBranch || undefined,
+      });
+
+      setActionMessage({
+        type: 'success',
+        text: res.message || `Opening Form Assembly screen for ${selectedFormAssemblyUser.username}.`,
+      });
+    } catch (err: any) {
+      setFormAssemblyMutationError(err.message || 'Failed to open Form Assembly screen in client application.');
+    } finally {
+      setIsOpeningFormAssemblySession(false);
+    }
+  };
+
+  const [isCheckingDocumentTypes, setIsCheckingDocumentTypes] = useState(false);
+  const [isLoadingDocTypes, setIsLoadingDocTypes] = useState(false);
+  const [isMutatingDocType, setIsMutatingDocType] = useState(false);
+  const [isOpeningDocTypeSession, setIsOpeningDocTypeSession] = useState(false);
+  const [docTypeMutationError, setDocTypeMutationError] = useState<string | null>(null);
+  const [docTypeMutationResult, setDocTypeMutationResult] = useState<{
+    success: boolean;
+    message: string;
+    count?: number;
+    docTypeId?: string;
+  } | null>(null);
+  const [docTypeStatusMap, setDocTypeStatusMap] = useState<Record<string, { isMapped: boolean; documentTypeNames?: string; count?: number }>>({});
+
+  const handleCheckDocumentTypes = async () => {
+    if (!selectedClientId || isCheckingDocumentTypes) return;
+    setIsCheckingDocumentTypes(true);
+    setActionMessage(null);
+    try {
+      const res = await clientUsersApi.refreshDocumentTypeMappings(
+        selectedClientId,
+        effectiveBranch || undefined
+      );
+      await loadUsers();
+      setActionMessage({
+        type: 'success',
+        text: res.message || `Checked /viewPatientVisitDocumentTypes: ${res.documentTypesCount} document types (${res.matchedUsersCount} users mapped).`,
+      });
+    } catch (err: any) {
+      const cleanError = err?.response?.data?.message || err?.message || 'Remote Document Types inspection failed.';
+      setActionMessage({
+        type: 'error',
+        text: `Document Types sync error: ${cleanError}`,
+      });
+    } finally {
+      setIsCheckingDocumentTypes(false);
+    }
+  };
+
+  const handleOpenDocTypeModal = async (u: ClientUser) => {
+    setSelectedDocTypeUser(u);
+    setIsDocTypeModalOpen(true);
+    setDocTypeMutationError(null);
+    setDocTypeMutationResult(null);
+    setDocTypeModalTab('USER');
+    setDocTypeSearchTerm('');
+    setUserDocSearchTerm('');
+    setIsLoadingDocTypes(true);
+
+    try {
+      const res = await clientUsersApi.getDocumentTypes(u.clientId || selectedClientId);
+      const docTypes = res.documentTypes || [];
+      setAvailableDocTypes(docTypes);
+
+      // Determine which document types currently map this user
+      const targetUsername = (u.username || '').toLowerCase().trim();
+      const mappedIds = docTypes
+        .filter((dt: any) =>
+          (dt.mappedUsernames || []).some((uname: string) => uname.toLowerCase().trim() === targetUsername)
+        )
+        .map((dt: any) => dt.docTypeId);
+      setUserDocTypeIds(mappedIds);
+
+      // Default selected document type for DOC_TYPE view
+      if (docTypes.length > 0) {
+        setSelectedDocTypeForView(docTypes[0]);
+        setDocTypeUsernames(docTypes[0].mappedUsernames || []);
+      }
+    } catch (err: any) {
+      setDocTypeMutationError(err.message || 'Failed to load document types');
+    } finally {
+      setIsLoadingDocTypes(false);
+    }
+  };
+
+  const handleSelectDocTypeForView = (docType: any) => {
+    setSelectedDocTypeForView(docType);
+    setDocTypeUsernames(docType.mappedUsernames || []);
+    setDocTypeMutationError(null);
+    setDocTypeMutationResult(null);
+  };
+
+  const handleToggleDocTypeForUser = (docTypeId: string) => {
+    setUserDocTypeIds((prev) =>
+      prev.includes(docTypeId) ? prev.filter((id) => id !== docTypeId) : [...prev, docTypeId]
+    );
+  };
+
+  const handleToggleUserForDocType = (username: string) => {
+    setDocTypeUsernames((prev) =>
+      prev.includes(username) ? prev.filter((un) => un !== username) : [...prev, username]
+    );
+  };
+
+  const handleSaveDocTypeMappings = async () => {
+    if (isMutatingDocType) return;
+    setIsMutatingDocType(true);
+    setDocTypeMutationError(null);
+    setDocTypeMutationResult(null);
+
+    try {
+      if (docTypeModalTab === 'DOC_TYPE') {
+        if (!selectedDocTypeForView) return;
+        const res = await clientUsersApi.updateDocumentTypeMappings(
+          selectedClientId,
+          selectedDocTypeForView.docTypeId,
+          {
+            selectedUsernames: docTypeUsernames,
+            targetBranch: effectiveBranch || undefined,
+            userDocGroup: selectedDocTypeForView.userDocGroup || 'DOC',
+          }
+        );
+
+        setDocTypeMutationResult(res);
+        await loadUsers();
+        setActionMessage({
+          type: 'success',
+          text: res.message || `Updated mappings for ${selectedDocTypeForView.docTypeName}.`,
+        });
+      } else {
+        // Tab: USER mode
+        // For the selected user, update every document type that changed
+        if (!selectedDocTypeUser) return;
+        const username = selectedDocTypeUser.username;
+
+        let anyUpdated = false;
+        for (const dt of availableDocTypes) {
+          const currentlyMapped = (dt.mappedUsernames || []).includes(username);
+          const shouldBeMapped = userDocTypeIds.includes(dt.docTypeId);
+
+          if (currentlyMapped !== shouldBeMapped) {
+            let newUsers = [...(dt.mappedUsernames || [])];
+            if (shouldBeMapped) {
+              newUsers.push(username);
+            } else {
+              newUsers = newUsers.filter((u) => u !== username);
+            }
+
+            await clientUsersApi.updateDocumentTypeMappings(
+              selectedClientId,
+              dt.docTypeId,
+              {
+                selectedUsernames: newUsers,
+                targetBranch: effectiveBranch || undefined,
+                userDocGroup: dt.userDocGroup || 'DOC',
+              }
+            );
+            anyUpdated = true;
+          }
+        }
+
+        const mappedDocNames = availableDocTypes
+          .filter((dt) => userDocTypeIds.includes(dt.docTypeId))
+          .map((dt) => dt.docTypeName);
+
+        const isNowMapped = mappedDocNames.length > 0;
+        setDocTypeStatusMap((prev) => ({
+          ...prev,
+          [selectedDocTypeUser.id]: {
+            isMapped: isNowMapped,
+            documentTypeNames: mappedDocNames.join(', '),
+            count: mappedDocNames.length,
+          },
+        }));
+
+        setUsers((prev) =>
+          prev.map((usr) =>
+            usr.id === selectedDocTypeUser.id
+              ? {
+                  ...usr,
+                  isDocumentTypeMapped: isNowMapped,
+                  documentTypeNames: mappedDocNames.join(', '),
+                  documentTypeCount: mappedDocNames.length,
+                }
+              : usr
+          )
+        );
+
+        setDocTypeMutationResult({
+          success: true,
+          message: `User '${selectedDocTypeUser.username}' updated: ${mappedDocNames.length} document type(s) mapped.`,
+        });
+        await loadUsers();
+        setActionMessage({
+          type: 'success',
+          text: `Successfully updated document types for '${selectedDocTypeUser.username}'.`,
+        });
+      }
+    } catch (err: any) {
+      const cleanError = err?.response?.data?.message || err?.message || 'Failed to update document type mappings.';
+      setDocTypeMutationError(cleanError);
+      setActionMessage({
+        type: 'error',
+        text: `Document Type update failed: ${cleanError}`,
+      });
+    } finally {
+      setIsMutatingDocType(false);
+    }
+  };
+
+  const handleOpenDocTypeSession = async () => {
+    if (isOpeningDocTypeSession) return;
+    setIsOpeningDocTypeSession(true);
+    setDocTypeMutationError(null);
+    try {
+      await clientUsersApi.openDocumentTypeSession({
+        clientId: selectedClientId,
+        docTypeId: selectedDocTypeForView?.docTypeId,
+        username: selectedDocTypeUser?.username,
+        targetBranch: effectiveBranch || undefined,
+      });
+      setActionMessage({
+        type: 'success',
+        text: 'Chrome session launched: Authenticating and navigating to Patient Visit Document Types mapping screen...',
+      });
+    } catch (err: any) {
+      setDocTypeMutationError(err.message || 'Failed to open interactive session');
+    } finally {
+      setIsOpeningDocTypeSession(false);
+    }
+  };
+
+  // Stock Location User Mapping
+  const [selectedStockLocationUser, setSelectedStockLocationUser] = useState<ClientUser | null>(null);
+  const [isStockLocationModalOpen, setIsStockLocationModalOpen] = useState(false);
+  const [isMutatingStockLocation, setIsMutatingStockLocation] = useState(false);
+  const [isOpeningStockSession, setIsOpeningStockSession] = useState(false);
+  const [isCheckingStockLocations, setIsCheckingStockLocations] = useState(false);
+  const [selectedStockLocations, setSelectedStockLocations] = useState<string[]>([]);
+  const [stockLocationStatusMap, setStockLocationStatusMap] = useState<Record<string, { isMapped: boolean; stockLocationNames?: string; count?: number }>>({});
+  const [stockLocationMutationResult, setStockLocationMutationResult] = useState<{
+    success: boolean;
+    alreadyExists?: boolean;
+    mappedLocations?: string[];
+    message: string;
+  } | null>(null);
+  const [stockLocationMutationError, setStockLocationMutationError] = useState<string | null>(null);
+
+  const AVAILABLE_STOCK_LOCATIONS = [
+    'Main Store',
+    'OP Pharmacy',
+    'AESTHETIC',
+    'BLOOD COLLECTION',
+    'CARDIOLOGY',
+    'CSSD',
+    'DENTAL 2',
+    'DENTAL 3',
+    'ENT',
+    'GP1',
+    'Obstetric Gynecology 2',
+    'OPD general',
+    'Ophtalmology',
+    'Pediatric',
+    'Urology',
+    'Vaccination'
+  ];
+
+  const handleOpenStockLocationModal = (u: ClientUser) => {
+    setSelectedStockLocationUser(u);
+    setStockLocationMutationResult(null);
+    setStockLocationMutationError(null);
+    
+    // Pre-check currently mapped locations or default to first
+    const currentMapped = stockLocationStatusMap[u.id]?.stockLocationNames || u.stockLocationNames;
+    if (currentMapped) {
+      const parts = currentMapped.split(',').map((s) => s.trim()).filter(Boolean);
+      setSelectedStockLocations(parts);
+    } else {
+      setSelectedStockLocations(['Main Store']);
+    }
+    setIsStockLocationModalOpen(true);
+  };
+
+  const handleToggleStockLocation = (locName: string) => {
+    setSelectedStockLocations((prev) =>
+      prev.includes(locName) ? prev.filter((l) => l !== locName) : [...prev, locName]
+    );
+  };
+
+  const handleCheckStockLocations = async () => {
+    if (!selectedClientId || isCheckingStockLocations) return;
+    setIsCheckingStockLocations(true);
+    setActionMessage(null);
+    try {
+      const res = await ApiClient.request<{
+        success: boolean;
+        count: number;
+        matchedUsersCount: number;
+        message: string;
+      }>(`/client-users/stock-location-mappings/refresh?clientId=${encodeURIComponent(selectedClientId)}`, {
+        method: 'POST',
+        body: JSON.stringify({ targetBranch: effectiveBranch || undefined }),
+      });
+
+      // Reload users to pick up updated database snapshots
+      await loadUsers();
+
+      setActionMessage({
+        type: 'success',
+        text: res.message || `Checked /StocklocationUsers: ${res.count} mappings found (${res.matchedUsersCount} users mapped).`,
+      });
+    } catch (err: any) {
+      const cleanError = err?.response?.data?.message || err?.message || 'Remote Stock Location inspection failed.';
+      setActionMessage({
+        type: 'error',
+        text: `Stock Location sync error: ${cleanError}`,
+      });
+    } finally {
+      setIsCheckingStockLocations(false);
+    }
+  };
+
+  const handleExecuteStockLocationMapping = async () => {
+    if (!selectedStockLocationUser || isMutatingStockLocation) return;
+    if (selectedStockLocations.length === 0) {
+      setStockLocationMutationError('Please select at least one stock location to map.');
+      return;
+    }
+    setIsMutatingStockLocation(true);
+    setStockLocationMutationError(null);
+    setStockLocationMutationResult(null);
+    try {
+      const res = await ApiClient.request<{
+        success: boolean;
+        alreadyExists?: boolean;
+        username?: string;
+        mappedLocations?: string[];
+        message: string;
+      }>(`/client-users/${selectedStockLocationUser.id}/map-stock-location`, {
+        method: 'POST',
+        body: JSON.stringify({
+          targetBranch: effectiveBranch || undefined,
+          stockLocationNames: selectedStockLocations,
+        }),
+      });
+
+      setStockLocationMutationResult(res);
+      const mappedLocs = res.mappedLocations || selectedStockLocations;
+      const joinedNames = mappedLocs.join(', ');
+
+      setStockLocationStatusMap((prev) => ({
+        ...prev,
+        [selectedStockLocationUser.id]: {
+          isMapped: true,
+          stockLocationNames: joinedNames,
+          count: mappedLocs.length,
+        },
+      }));
+
+      setUsers((prev) =>
+        prev.map((usr) =>
+          usr.id === selectedStockLocationUser.id
+            ? { ...usr, isStockLocationMapped: true, stockLocationNames: joinedNames, stockLocationCount: mappedLocs.length }
+            : usr
+        )
+      );
+
+      setActionMessage({
+        type: 'success',
+        text: res.message || `User '${selectedStockLocationUser.username}' mapped to stock location(s): ${joinedNames}.`,
+      });
+    } catch (err: any) {
+      const cleanError = err?.response?.data?.message || err?.message || 'Stock Location mapping failed.';
+      setStockLocationMutationError(cleanError);
+      setActionMessage({
+        type: 'error',
+        text: `Stock Location mapping failed: ${cleanError}`,
+      });
+    } finally {
+      setIsMutatingStockLocation(false);
+    }
+  };
+
+  const handleOpenStockLocationSession = async () => {
+    if (!selectedStockLocationUser || isOpeningStockSession) return;
+    setIsOpeningStockSession(true);
+    setStockLocationMutationError(null);
+    try {
+      const res = await ApiClient.request<{
+        id: string;
+        status: string;
+        runType: string;
+      }>(`/client-users/${selectedStockLocationUser.id}/open-stock-location-session`, {
+        method: 'POST',
+        body: JSON.stringify({ targetBranch: effectiveBranch || undefined }),
+      });
+
+      setActionMessage({
+        type: 'success',
+        text: `Opening client application for ${selectedStockLocationUser.username} with user pre-selected (Run: ${res.id}).`,
+      });
+    } catch (err: any) {
+      const cleanError = err?.response?.data?.message || err?.message || 'Failed to open interactive client session.';
+      setStockLocationMutationError(cleanError);
+    } finally {
+      setIsOpeningStockSession(false);
+    }
+  };
+
+  const handleOpenBillCounterModal = (u: ClientUser) => {
+    setSelectedBillCounterUser(u);
+    setBillCounterMutationResult(null);
+    setBillCounterMutationError(null);
+    setIsBillCounterModalOpen(true);
+  };
+
+
+  const handleCheckBillCounters = async () => {
+    if (!selectedClientId || isCheckingBillCounters) return;
+    setIsCheckingBillCounters(true);
+    setActionMessage(null);
+    try {
+      const res = await ApiClient.request<{
+        success: boolean;
+        count: number;
+        matchedUsersCount: number;
+        message: string;
+      }>(`/client-users/bill-counter-mappings/refresh?clientId=${encodeURIComponent(selectedClientId)}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          targetBranch: effectiveBranch || undefined,
+        }),
+      });
+      setActionMessage({
+        type: 'success',
+        text: res.message || `Checked /billcounteruser: ${res.count} mappings found (${res.matchedUsersCount} users mapped).`,
+      });
+      await loadUsers();
+    } catch (err: any) {
+      setActionMessage({
+        type: 'error',
+        text: `Failed to check bill counters: ${err.message || 'Remote inspection failed.'}`,
+      });
+    } finally {
+      setIsCheckingBillCounters(false);
+    }
+  };
+
+  const handleExecuteBillCounterMapping = async () => {
+    if (!selectedBillCounterUser || isMutatingBillCounter) return;
+    setIsMutatingBillCounter(true);
+    setBillCounterMutationError(null);
+    setBillCounterMutationResult(null);
+    try {
+      const res = await ApiClient.request<{
+        success: boolean;
+        alreadyExists?: boolean;
+        username?: string;
+        billCounterName?: string;
+        roleName?: string;
+        message: string;
+      }>(`/client-users/${selectedBillCounterUser.id}/map-bill-counter`, {
+        method: 'POST',
+        body: JSON.stringify({
+          targetBranch: effectiveBranch || undefined,
+          roleName: selectedBillCounterUser.role || undefined,
+        }),
+      });
+      setBillCounterMutationResult(res);
+      const mappedName = res.billCounterName || 'Mapped Counter';
+      setBillCounterStatusMap((prev) => ({
+        ...prev,
+        [selectedBillCounterUser.id]: {
+          isMapped: true,
+          billCounterName: mappedName,
+        },
+      }));
+      setUsers((prev) =>
+        prev.map((usr) =>
+          usr.id === selectedBillCounterUser.id
+            ? { ...usr, isBillCounterMapped: true, billCounterName: mappedName }
+            : usr
+        )
+      );
+      setActionMessage({
+        type: 'success',
+        text: res.message || `User '${selectedBillCounterUser.username}' mapped to bill counter successfully.`,
+      });
+    } catch (err: any) {
+      const cleanError = (err.message || 'Bill Counter mapping failed').replace(/^Sync failed:\s*/i, '');
+      setBillCounterMutationError(cleanError);
+      setActionMessage({
+        type: 'error',
+        text: `Bill Counter mapping failed: ${cleanError}`,
+      });
+    } finally {
+      setIsMutatingBillCounter(false);
+    }
+  };
+
+  const handleOpenStockLocationList = () => {
+    if (!selectedClient) {
+      setActionMessage({
+        type: 'error',
+        text: 'No client selected. Please select a client first.',
+      });
+      return;
+    }
+    if (!selectedClient.baseUrl || !selectedClient.baseUrl.trim()) {
+      setActionMessage({
+        type: 'error',
+        text: `MISSING_CLIENT_URL: Client '${selectedClient.clientCode || selectedClientId}' does not have a configured Application Base URL. Please configure client base URL in Clients management.`,
+      });
+      return;
+    }
+    try {
+      const listUrl = resolveClientStockLocationListUrl({
+        baseUrl: selectedClient.baseUrl,
+        applicationPath: selectedClient.applicationPath,
+      });
+      window.open(listUrl, '_blank', 'noopener,noreferrer');
+      setActionMessage({
+        type: 'success',
+        text: `Opening Stock Location Users for ${selectedClient.clientCode}: ${listUrl}`,
+      });
+    } catch (err: any) {
+      setActionMessage({
+        type: 'error',
+        text: `INVALID_CLIENT_URL: ${err.message || 'Failed to resolve Stock Location URL'}`,
+      });
+    }
+  };
+
+  const handleOpenStockLocationAdd = (u: ClientUser) => {
+    if (!selectedClient) {
+      setActionMessage({
+        type: 'error',
+        text: 'No client selected. Please select a client first.',
+      });
+      return;
+    }
+    if (!selectedClient.baseUrl || !selectedClient.baseUrl.trim()) {
+      setActionMessage({
+        type: 'error',
+        text: `MISSING_CLIENT_URL: Client '${selectedClient.clientCode || selectedClientId}' does not have a configured Application Base URL. Please configure client base URL in Clients management.`,
+      });
+      return;
+    }
+    try {
+      const addUrl = resolveClientStockLocationUserUrl({
+        baseUrl: selectedClient.baseUrl,
+        applicationPath: selectedClient.applicationPath,
+      });
+      window.open(addUrl, '_blank', 'noopener,noreferrer');
+      setActionMessage({
+        type: 'success',
+        text: `Opening Add Stock Location User for ${u.username}: ${addUrl}`,
+      });
+    } catch (err: any) {
+      setActionMessage({
+        type: 'error',
+        text: `INVALID_CLIENT_URL: ${err.message || 'Failed to resolve Add Stock Location User URL'}`,
+      });
+    }
+  };
+
   const handleResetPasswordExecute = async () => {
     if (!selectedUser || isMutatingReset) return;
     setIsMutatingReset(true);
@@ -2135,6 +2914,73 @@ export const UsersPage: React.FC = () => {
             </div>
 
             <button
+              onClick={handleCheckBillCounters}
+              disabled={isCheckingBillCounters || syncing}
+              title="Inspect remote /billcounteruser to check already-mapped users and sync indicators"
+              className="flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 rounded-lg font-semibold shadow transition-all disabled:opacity-50"
+            >
+              {isCheckingBillCounters ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+              ) : (
+                <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+              )}
+              <span>{isCheckingBillCounters ? 'Checking Bill Counters…' : 'Check Bill Counters'}</span>
+            </button>
+
+
+
+            <button
+              onClick={handleCheckFormAssembly}
+              disabled={isCheckingFormAssembly || syncing || !selectedClientId}
+              title={selectedClient?.baseUrl
+                ? `Inspect remote /emrPanelSelection to verify Form Assembly mappings for ${selectedClient.clientCode}`
+                : 'Check Form Assembly'
+              }
+              className="flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-purple-400 border border-purple-500/30 rounded-lg font-semibold shadow transition-all disabled:opacity-50"
+            >
+              {isCheckingFormAssembly ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" />
+              ) : (
+                <LayoutGrid className="w-3.5 h-3.5 text-purple-400" />
+              )}
+              <span>{isCheckingFormAssembly ? 'Checking Form Assembly…' : 'Check Form Assembly'}</span>
+            </button>
+
+            <button
+              onClick={handleCheckDocumentTypes}
+              disabled={isCheckingDocumentTypes || syncing || !selectedClientId}
+              title={selectedClient?.baseUrl
+                ? `Inspect remote /viewPatientVisitDocumentTypes to verify mapped users and sync indicators for ${selectedClient.clientCode}`
+                : 'Check Document Types'
+              }
+              className="flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 border border-sky-500/30 rounded-lg font-semibold shadow transition-all disabled:opacity-50"
+            >
+              {isCheckingDocumentTypes ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />
+              ) : (
+                <FileText className="w-3.5 h-3.5 text-sky-400" />
+              )}
+              <span>{isCheckingDocumentTypes ? 'Checking Document Types…' : 'Check Document Types'}</span>
+            </button>
+
+            <button
+              onClick={handleCheckStockLocations}
+              disabled={isCheckingStockLocations || syncing || !selectedClientId}
+              title={selectedClient?.baseUrl
+                ? `Inspect remote /StocklocationUsers to verify mapped users and sync indicators for ${selectedClient.clientCode}`
+                : 'Check Stock Locations'
+              }
+              className="flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-amber-400 border border-amber-500/30 rounded-lg font-semibold shadow transition-all disabled:opacity-50"
+            >
+              {isCheckingStockLocations ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+              ) : (
+                <Boxes className="w-3.5 h-3.5 text-amber-400" />
+              )}
+              <span>{isCheckingStockLocations ? 'Checking Stock Locations…' : 'Check Stock Locations'}</span>
+            </button>
+
+            <button
               onClick={handleSyncUsers}
               disabled={syncing}
               className="flex items-center gap-2 px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-semibold shadow-lg shadow-sky-950/50 transition-all disabled:opacity-50"
@@ -2350,7 +3196,7 @@ export const UsersPage: React.FC = () => {
                 <th className="px-4 py-3">Created Date/Time</th>
                 <th className="px-4 py-3">Updated Date/Time</th>
                 <th className="px-4 py-3">Last Synced</th>
-                <th className="px-4 py-3 text-right">Actions</th>
+                <th className="px-4 py-3 text-right sticky right-0 bg-slate-950 shadow-[-6px_0_10px_-2px_rgba(0,0,0,0.5)] z-10">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
@@ -2373,7 +3219,7 @@ export const UsersPage: React.FC = () => {
                   const isActive = u.status === 'ACTIVE';
 
                   return (
-                    <tr key={u.id} className="hover:bg-slate-850/50 transition-colors">
+                    <tr key={u.id} className="hover:bg-slate-850/50 transition-colors group">
                       <td className="px-4 py-3 font-mono text-slate-500">{sNo}</td>
                       <td className="px-4 py-3 font-semibold text-white">{u.fullName}</td>
                       <td className="px-4 py-3 font-mono text-sky-400">{u.username}</td>
@@ -2402,7 +3248,7 @@ export const UsersPage: React.FC = () => {
                       <td className="px-4 py-3 font-mono text-[10px] text-slate-500">
                         {new Date(u.lastSyncedAt).toLocaleTimeString()}
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 text-right sticky right-0 bg-slate-900 group-hover:bg-slate-850 shadow-[-6px_0_10px_-2px_rgba(0,0,0,0.5)] z-10">
                         <div className="flex items-center justify-end gap-1.5">
                           {/* View */}
                           <button
@@ -2499,6 +3345,151 @@ export const UsersPage: React.FC = () => {
                                 className="p-1.5 text-slate-400 hover:text-sky-400 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-40 disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
                               >
                                 <Shield className="w-3.5 h-3.5" />
+                              </button>
+                            );
+                          })()}
+
+                          
+                          {/* Map Bill Counter User */}
+                          {canEdit && (() => {
+                            const isThisUserMutating = isMutatingBillCounter && selectedBillCounterUser?.id === u.id;
+                            const isMapped = billCounterStatusMap[u.id] !== undefined
+                              ? billCounterStatusMap[u.id].isMapped
+                              : !!u.isBillCounterMapped;
+                            const billCounterName = billCounterStatusMap[u.id]?.billCounterName || u.billCounterName;
+                            const pinClass = isMapped
+                              ? 'text-emerald-500 hover:text-emerald-400 hover:bg-emerald-950/30'
+                              : 'text-rose-500 hover:text-rose-400 hover:bg-rose-950/30';
+                            const tooltipText = isMapped
+                              ? `Bill Counter Mapped (${billCounterName || 'Active'}) — Click to re-map or change`
+                              : 'Map Bill Counter User';
+
+                            return (
+                              <button
+                                disabled={isMutatingBillCounter}
+                                onClick={() => {
+                                  if (isMutatingBillCounter) return;
+                                  handleOpenBillCounterModal(u);
+                                }}
+                                title={tooltipText}
+                                aria-label={`Bill Counter for ${u.username}: ${isMapped ? 'Mapped' : 'Unmapped'}`}
+                                className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${pinClass}`}
+                              >
+                                {isThisUserMutating ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <MapPin className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            );
+                          })()}
+
+
+                          
+                          {/* Map Form Assembly */}
+                          {canEdit && (() => {
+                            const isThisUserMutating = (isMutatingFormAssembly || isOpeningFormAssemblySession) && selectedFormAssemblyUser?.id === u.id;
+                            const statusInfo = formAssemblyStatusMap[u.id];
+                            const isMapped = statusInfo !== undefined ? statusInfo.isMapped : !!u.isFormAssemblyMapped;
+                            const formNames = statusInfo?.formAssemblyNames || u.formAssemblyNames;
+                            const count = statusInfo?.count ?? u.formAssemblyCount ?? (isMapped ? 1 : 0);
+
+                            // EXACT COLOR RULES:
+                            // Green if user has at least one valid Form Assembly form mapped
+                            // Red if user has no Form Assembly forms mapped
+                            const iconClass = isMapped
+                              ? 'text-emerald-500 hover:text-emerald-400 hover:bg-emerald-950/30'
+                              : 'text-rose-500 hover:text-rose-400 hover:bg-rose-950/30';
+
+                            const formTooltipText = isMapped
+                              ? `Form Assembly: Mapped (${formNames || `${count} form(s)`}) — Click to manage Form Assembly forms`
+                              : `Form Assembly: Not Mapped — Click to map Form Assembly forms for ${u.username}`;
+
+                            return (
+                              <button
+                                disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                                onClick={() => handleOpenFormAssemblyModal(u)}
+                                title={formTooltipText}
+                                aria-label={`Form Assembly for ${u.username}: ${isMapped ? 'Mapped' : 'Unmapped'}`}
+                                className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${iconClass}`}
+                              >
+                                {isThisUserMutating ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <LayoutGrid className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            );
+                          })()}
+
+                          {/* Map Patient Visit Document Types */}
+                          {canEdit && (() => {
+                            const isThisUserMutating = isMutatingDocType && selectedDocTypeUser?.id === u.id;
+                            const statusInfo = docTypeStatusMap[u.id];
+                            const isMapped = statusInfo !== undefined ? statusInfo.isMapped : !!u.isDocumentTypeMapped;
+                            const docNames = statusInfo?.documentTypeNames || u.documentTypeNames;
+                            const count = statusInfo?.count ?? u.documentTypeCount ?? (isMapped ? 1 : 0);
+
+                            // EXACT COLOR RULES:
+                            // Green if user has at least one valid Document Type mapping
+                            // Red if user has no valid Document Type mapping
+                            const iconClass = isMapped
+                              ? 'text-emerald-500 hover:text-emerald-400 hover:bg-emerald-950/30'
+                              : 'text-rose-500 hover:text-rose-400 hover:bg-rose-950/30';
+
+                            const docTooltipText = isMapped
+                              ? `Patient Visit Document Types: Mapped (${docNames || `${count} type(s)`}) — Click to manage mappings`
+                              : `Patient Visit Document Types: Unmapped — Click to map document types for ${u.username}`;
+
+                            return (
+                              <button
+                                disabled={isMutatingDocType || isOpeningDocTypeSession}
+                                onClick={() => handleOpenDocTypeModal(u)}
+                                title={docTooltipText}
+                                aria-label={`Document Types for ${u.username}: ${isMapped ? 'Mapped' : 'Unmapped'}`}
+                                className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${iconClass}`}
+                              >
+                                {isThisUserMutating ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <FileText className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            );
+                          })()}
+
+                          {/* Map Stock Location User */}
+                          {canEdit && (() => {
+                            const isThisUserMutating = (isMutatingStockLocation || isOpeningStockSession) && selectedStockLocationUser?.id === u.id;
+                            const statusInfo = stockLocationStatusMap[u.id];
+                            const isMapped = statusInfo !== undefined ? statusInfo.isMapped : !!u.isStockLocationMapped;
+                            const locationNames = statusInfo?.stockLocationNames || u.stockLocationNames;
+                            const count = statusInfo?.count ?? u.stockLocationCount ?? (isMapped ? 1 : 0);
+
+                            // EXACT COLOR RULES:
+                            // Green if user already has at least one valid Stock Location mapping
+                            // Yellow if user has no Stock Location mapping (default unmapped, never red)
+                            const iconClass = isMapped
+                              ? 'text-emerald-500 hover:text-emerald-400 hover:bg-emerald-950/30'
+                              : 'text-amber-400 hover:text-amber-300 hover:bg-amber-950/30';
+
+                            const tooltipText = isMapped
+                              ? `Stock Location: Mapped (${locationNames || `${count} location(s)`}) — Click to manage or re-map`
+                              : `Stock Location: Unmapped — Click to map stock location for ${u.username}`;
+
+                            return (
+                              <button
+                                disabled={isMutatingStockLocation || isOpeningStockSession}
+                                onClick={() => handleOpenStockLocationModal(u)}
+                                title={tooltipText}
+                                aria-label={`Stock Location for ${u.username}: ${isMapped ? 'Mapped' : 'Unmapped'}`}
+                                className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${iconClass}`}
+                              >
+                                {isThisUserMutating ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Boxes className="w-3.5 h-3.5" />
+                                )}
                               </button>
                             );
                           })()}
@@ -3580,6 +4571,1072 @@ export const UsersPage: React.FC = () => {
               >
                 {isMutatingReset ? 'Resetting in Simplex…' : 'Reset Password in Simplex'}
               </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      
+
+
+      {/* Modal: Form Assembly Mapping */}
+      <Modal
+        isOpen={isFormAssemblyModalOpen}
+        onClose={() => !isMutatingFormAssembly && !isOpeningFormAssemblySession && setIsFormAssemblyModalOpen(false)}
+        title="Form Assembly Mapping"
+      >
+        {selectedFormAssemblyUser && (
+          <div className="space-y-4 text-xs max-h-[80vh] overflow-y-auto pr-1">
+            {/* User & Client Context */}
+            <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800/80 space-y-2">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Target User:</span>
+                <span className="font-semibold text-white">
+                  {selectedFormAssemblyUser.username} {selectedFormAssemblyUser.fullName ? `(${selectedFormAssemblyUser.fullName})` : ''}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Client Application:</span>
+                <span className="font-medium text-slate-200">
+                  {selectedClient?.clientName || selectedFormAssemblyUser.clientName || 'Simplex Client'} ({selectedClient?.clientCode})
+                </span>
+              </div>
+              {selectedFormAssemblyUser.role && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Assigned Roles:</span>
+                  <span className="font-medium text-purple-300">{selectedFormAssemblyUser.role}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center pt-1 border-t border-slate-800/60">
+                <span className="text-slate-400">Current Mapping Status:</span>
+                <div>
+                  {formAssemblyStatusMap[selectedFormAssemblyUser.id]?.isMapped || selectedFormAssemblyUser.isFormAssemblyMapped ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400">
+                      <CheckCircle2 className="w-3 h-3" />
+                      Mapped ({selectedFormAssemblyIds.length} form{selectedFormAssemblyIds.length !== 1 ? 's' : ''})
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-950/60 border border-rose-800/60 text-rose-400">
+                      <XCircle className="w-3 h-3" />
+                      Not Mapped
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Resolved URL banner */}
+            <div className="px-3 py-2 bg-slate-900/40 rounded border border-slate-800/80 text-[11px] text-slate-400 flex items-center justify-between">
+              <span className="truncate">
+                Screen URL: <span className="font-mono text-purple-300">{selectedClient?.baseUrl ? resolveClientEmrPanelUrl({ baseUrl: selectedClient.baseUrl, applicationPath: selectedClient.applicationPath }) : '/emrPanelSelection'}</span>
+              </span>
+              <span className="text-purple-400 font-semibold shrink-0 ml-2">Dynamic Resolver</span>
+            </div>
+
+            {/* Form Selection Controls */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-semibold text-slate-200">
+                  Available Form Assembly Forms ({availableFormAssemblyForms.length}):
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedFormAssemblyIds.length === availableFormAssemblyForms.length) {
+                      setSelectedFormAssemblyIds([]);
+                    } else {
+                      setSelectedFormAssemblyIds(availableFormAssemblyForms.map(f => f.formId));
+                    }
+                  }}
+                  className="text-[11px] text-purple-400 hover:text-purple-300 font-semibold"
+                >
+                  {selectedFormAssemblyIds.length === availableFormAssemblyForms.length ? 'Deselect All' : 'Select All'}
+                </button>
+              </div>
+
+              {/* Search input */}
+              <div className="mb-2 relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Filter forms by name or group..."
+                  value={formAssemblySearch}
+                  onChange={(e) => setFormAssemblySearch(e.target.value)}
+                  className="w-full bg-slate-900/80 border border-slate-700/80 rounded px-2.5 py-1.5 pl-8 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                />
+              </div>
+
+              {/* Checkboxes List */}
+              <div className="max-h-60 overflow-y-auto space-y-1 pr-1 bg-slate-900/40 p-2 rounded-lg border border-slate-800">
+                {isLoadingFormAssemblyModal ? (
+                  <div className="py-8 flex flex-col items-center justify-center text-slate-400 text-xs">
+                    <Loader2 className="w-5 h-5 animate-spin text-purple-400 mb-2" />
+                    <span>Loading available Form Assembly forms…</span>
+                  </div>
+                ) : availableFormAssemblyForms.length === 0 ? (
+                  <div className="py-8 text-center text-slate-500 text-xs">
+                    No Form Assembly forms discovered for this client.
+                  </div>
+                ) : (
+                  availableFormAssemblyForms
+                    .filter((f) => {
+                      if (!formAssemblySearch.trim()) return true;
+                      const q = formAssemblySearch.toLowerCase();
+                      return f.formName.toLowerCase().includes(q) || (f.groupName && f.groupName.toLowerCase().includes(q));
+                    })
+                    .map((form) => {
+                      const isChecked = selectedFormAssemblyIds.includes(form.formId);
+                      return (
+                        <label
+                          key={form.formId}
+                          className={`flex items-center justify-between p-2 rounded cursor-pointer transition-colors border ${
+                            isChecked
+                              ? 'bg-purple-950/20 border-purple-500/30 text-white'
+                              : 'bg-slate-800/40 border-slate-700/40 text-slate-300 hover:bg-slate-800/80'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                              onChange={() => handleToggleFormAssembly(form.formId)}
+                              className="rounded border-slate-700 text-purple-600 focus:ring-purple-500 focus:ring-offset-slate-900 bg-slate-800 cursor-pointer disabled:cursor-not-allowed"
+                            />
+                            <span className="text-xs font-medium">{form.formName}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {form.isDefault && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                Default
+                              </span>
+                            )}
+                            {form.groupName && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-700/60 text-slate-300">
+                                {form.groupName}
+                              </span>
+                            )}
+                          </div>
+                        </label>
+                      );
+                    })
+                )}
+              </div>
+            </div>
+
+            {/* Workflow Notice */}
+            <p className="text-[11px] text-slate-400 leading-relaxed bg-slate-900/60 p-2.5 rounded border border-slate-800/80">
+              Saving will authenticate securely to <span className="font-semibold text-white">{selectedClient?.clientCode}</span>, navigate dynamically to <span className="font-mono text-purple-300">/emrPanelSelection</span>, assign newly checked forms, preserve remaining checked forms, unassign explicitly unchecked forms, and update Central Console status immediately.
+            </p>
+
+            {/* Error & Success Messages */}
+            {formAssemblyMutationError && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-lg flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-rose-300 leading-snug">{formAssemblyMutationError}</p>
+              </div>
+            )}
+
+            {formAssemblyMutationResult && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs text-emerald-300 leading-snug font-medium">{formAssemblyMutationResult.message}</p>
+                  {formAssemblyMutationResult.assignedFormNames && formAssemblyMutationResult.assignedFormNames.length > 0 && (
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Assigned: <span className="text-white">{formAssemblyMutationResult.assignedFormNames.join(', ')}</span>
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                onClick={handleOpenFormAssemblySession}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-purple-400 border border-purple-500/30 rounded font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                title="Launch a visible, authenticated Chrome browser window directly to /emrPanelSelection with this user selected"
+              >
+                {isOpeningFormAssemblySession ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Opening Browser…</span>
+                  </>
+                ) : (
+                  <>
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                    <span>Open in Client App</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                  onClick={() => setIsFormAssemblyModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+                >
+                  {formAssemblyMutationResult ? 'Close' : 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                  onClick={handleExecuteFormAssemblyMapping}
+                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {isMutatingFormAssembly ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving Mappings…</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Save Mappings ({selectedFormAssemblyIds.length})</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+
+      {/* Modal: Form Assembly Mapping */}
+      <Modal
+        isOpen={isFormAssemblyModalOpen}
+        onClose={() => !isMutatingFormAssembly && !isOpeningFormAssemblySession && setIsFormAssemblyModalOpen(false)}
+        title="Form Assembly Mapping"
+      >
+        {selectedFormAssemblyUser && (
+          <div className="space-y-4 text-xs max-h-[80vh] overflow-y-auto pr-1">
+            {/* User & Client Context */}
+            <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800/80 space-y-2">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Target User:</span>
+                <span className="font-semibold text-white">
+                  {selectedFormAssemblyUser.username} {selectedFormAssemblyUser.fullName ? `(${selectedFormAssemblyUser.fullName})` : ''}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Client Application:</span>
+                <span className="font-medium text-slate-200">
+                  {selectedClient?.clientName || selectedFormAssemblyUser.clientName || 'Simplex Client'} ({selectedClient?.clientCode})
+                </span>
+              </div>
+              {selectedFormAssemblyUser.role && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Assigned Roles:</span>
+                  <span className="font-medium text-purple-300">{selectedFormAssemblyUser.role}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center pt-1 border-t border-slate-800/60">
+                <span className="text-slate-400">Current Mapping Status:</span>
+                <div>
+                  {formAssemblyStatusMap[selectedFormAssemblyUser.id]?.isMapped || selectedFormAssemblyUser.isFormAssemblyMapped ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400">
+                      <CheckCircle2 className="w-3 h-3" />
+                      Mapped ({selectedFormAssemblyIds.length} form{selectedFormAssemblyIds.length !== 1 ? 's' : ''})
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-950/60 border border-rose-800/60 text-rose-400">
+                      <XCircle className="w-3 h-3" />
+                      Not Mapped
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Resolved URL banner */}
+            <div className="px-3 py-2 bg-slate-900/40 rounded border border-slate-800/80 text-[11px] text-slate-400 flex items-center justify-between">
+              <span className="truncate">
+                Screen URL: <span className="font-mono text-purple-300">{selectedClient?.baseUrl ? resolveClientEmrPanelUrl({ baseUrl: selectedClient.baseUrl, applicationPath: selectedClient.applicationPath }) : '/emrPanelSelection'}</span>
+              </span>
+              <span className="text-purple-400 font-semibold shrink-0 ml-2">Dynamic Resolver</span>
+            </div>
+
+            {/* Form Selection Controls */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-semibold text-slate-200">
+                  Available Form Assembly Forms ({availableFormAssemblyForms.length}):
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedFormAssemblyIds.length === availableFormAssemblyForms.length) {
+                      setSelectedFormAssemblyIds([]);
+                    } else {
+                      setSelectedFormAssemblyIds(availableFormAssemblyForms.map(f => f.formId));
+                    }
+                  }}
+                  className="text-[11px] text-purple-400 hover:text-purple-300 font-semibold"
+                >
+                  {selectedFormAssemblyIds.length === availableFormAssemblyForms.length ? 'Deselect All' : 'Select All'}
+                </button>
+              </div>
+
+              {/* Search input */}
+              <div className="mb-2 relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Filter forms by name or group..."
+                  value={formAssemblySearch}
+                  onChange={(e) => setFormAssemblySearch(e.target.value)}
+                  className="w-full bg-slate-900/80 border border-slate-700/80 rounded px-2.5 py-1.5 pl-8 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                />
+              </div>
+
+              {/* Checkboxes List */}
+              <div className="max-h-60 overflow-y-auto space-y-1 pr-1 bg-slate-900/40 p-2 rounded-lg border border-slate-800">
+                {isLoadingFormAssemblyModal ? (
+                  <div className="py-8 flex flex-col items-center justify-center text-slate-400 text-xs">
+                    <Loader2 className="w-5 h-5 animate-spin text-purple-400 mb-2" />
+                    <span>Loading available Form Assembly forms…</span>
+                  </div>
+                ) : availableFormAssemblyForms.length === 0 ? (
+                  <div className="py-8 text-center text-slate-500 text-xs">
+                    No Form Assembly forms discovered for this client.
+                  </div>
+                ) : (
+                  availableFormAssemblyForms
+                    .filter((f) => {
+                      if (!formAssemblySearch.trim()) return true;
+                      const q = formAssemblySearch.toLowerCase();
+                      return f.formName.toLowerCase().includes(q) || (f.groupName && f.groupName.toLowerCase().includes(q));
+                    })
+                    .map((form) => {
+                      const isChecked = selectedFormAssemblyIds.includes(form.formId);
+                      return (
+                        <label
+                          key={form.formId}
+                          className={`flex items-center justify-between p-2 rounded cursor-pointer transition-colors border ${
+                            isChecked
+                              ? 'bg-purple-950/20 border-purple-500/30 text-white'
+                              : 'bg-slate-800/40 border-slate-700/40 text-slate-300 hover:bg-slate-800/80'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                              onChange={() => handleToggleFormAssembly(form.formId)}
+                              className="rounded border-slate-700 text-purple-600 focus:ring-purple-500 focus:ring-offset-slate-900 bg-slate-800 cursor-pointer disabled:cursor-not-allowed"
+                            />
+                            <span className="text-xs font-medium">{form.formName}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {form.isDefault && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                Default
+                              </span>
+                            )}
+                            {form.groupName && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-700/60 text-slate-300">
+                                {form.groupName}
+                              </span>
+                            )}
+                          </div>
+                        </label>
+                      );
+                    })
+                )}
+              </div>
+            </div>
+
+            {/* Workflow Notice */}
+            <p className="text-[11px] text-slate-400 leading-relaxed bg-slate-900/60 p-2.5 rounded border border-slate-800/80">
+              Saving will authenticate securely to <span className="font-semibold text-white">{selectedClient?.clientCode}</span>, navigate dynamically to <span className="font-mono text-purple-300">/emrPanelSelection</span>, assign newly checked forms, preserve remaining checked forms, unassign explicitly unchecked forms, and update Central Console status immediately.
+            </p>
+
+            {/* Error & Success Messages */}
+            {formAssemblyMutationError && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-lg flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-rose-300 leading-snug">{formAssemblyMutationError}</p>
+              </div>
+            )}
+
+            {formAssemblyMutationResult && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs text-emerald-300 leading-snug font-medium">{formAssemblyMutationResult.message}</p>
+                  {formAssemblyMutationResult.assignedFormNames && formAssemblyMutationResult.assignedFormNames.length > 0 && (
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Assigned: <span className="text-white">{formAssemblyMutationResult.assignedFormNames.join(', ')}</span>
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                onClick={handleOpenFormAssemblySession}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-purple-400 border border-purple-500/30 rounded font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                title="Launch a visible, authenticated Chrome browser window directly to /emrPanelSelection with this user selected"
+              >
+                {isOpeningFormAssemblySession ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Opening Browser…</span>
+                  </>
+                ) : (
+                  <>
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                    <span>Open in Client App</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                  onClick={() => setIsFormAssemblyModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+                >
+                  {formAssemblyMutationResult ? 'Close' : 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isMutatingFormAssembly || isOpeningFormAssemblySession}
+                  onClick={handleExecuteFormAssemblyMapping}
+                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {isMutatingFormAssembly ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving Mappings…</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Save Mappings ({selectedFormAssemblyIds.length})</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Patient Visit Document Types Mapping */}
+      <Modal
+        isOpen={isDocTypeModalOpen}
+        onClose={() => !isMutatingDocType && !isOpeningDocTypeSession && setIsDocTypeModalOpen(false)}
+        title="Patient Visit Document Types Mapping"
+      >
+        {selectedDocTypeUser && (
+          <div className="space-y-4 text-xs max-h-[80vh] overflow-y-auto pr-1">
+            {/* User & Client Context */}
+            <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800/80 space-y-2">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Target User:</span>
+                <span className="font-semibold text-white">
+                  {selectedDocTypeUser.username} {selectedDocTypeUser.fullName ? `(${selectedDocTypeUser.fullName})` : ''}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Client Application:</span>
+                <span className="font-semibold text-white">
+                  {selectedClient?.clientName || selectedDocTypeUser.clientName || 'Simplex Client'} ({selectedClient?.clientCode})
+                </span>
+              </div>
+              {effectiveBranch && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Target Branch:</span>
+                  <span className="font-semibold text-sky-400">{effectiveBranch}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Current Mapping Status:</span>
+                {docTypeStatusMap[selectedDocTypeUser.id]?.isMapped || selectedDocTypeUser.isDocumentTypeMapped ? (
+                  <span className="font-semibold text-emerald-400 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    Mapped ({docTypeStatusMap[selectedDocTypeUser.id]?.documentTypeNames || selectedDocTypeUser.documentTypeNames || 'Active'})
+                  </span>
+                ) : (
+                  <span className="font-semibold text-rose-400 flex items-center gap-1">
+                    <XCircle className="w-3.5 h-3.5 text-rose-400" />
+                    Unmapped (No Document Types assigned)
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* View Mode Tabs */}
+            <div className="flex border-b border-slate-800 gap-2">
+              <button
+                type="button"
+                onClick={() => setDocTypeModalTab('USER')}
+                className={`px-3 py-1.5 font-semibold text-xs border-b-2 transition-all ${
+                  docTypeModalTab === 'USER'
+                    ? 'border-sky-500 text-sky-400'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Map Document Types to {selectedDocTypeUser.username}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDocTypeModalTab('DOC_TYPE')}
+                className={`px-3 py-1.5 font-semibold text-xs border-b-2 transition-all ${
+                  docTypeModalTab === 'DOC_TYPE'
+                    ? 'border-sky-500 text-sky-400'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Manage Users by Document Type
+              </button>
+            </div>
+
+            {isLoadingDocTypes ? (
+              <div className="p-8 text-center text-slate-400 flex flex-col items-center gap-2">
+                <Loader2 className="w-6 h-6 animate-spin text-sky-400" />
+                <span>Loading Patient Visit Document Types from database...</span>
+              </div>
+            ) : docTypeModalTab === 'USER' ? (
+              /* TAB 1: USER VIEW (Select Document Types for this User) */
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-500" />
+                    <input
+                      type="text"
+                      placeholder="Search document types..."
+                      value={docTypeSearchTerm}
+                      onChange={(e) => setDocTypeSearchTerm(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setUserDocTypeIds(availableDocTypes.map((dt) => dt.docTypeId))}
+                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded text-[11px]"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUserDocTypeIds([])}
+                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded text-[11px]"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto p-1 bg-slate-950/40 rounded border border-slate-800/60">
+                  {availableDocTypes
+                    .filter((dt) =>
+                      dt.docTypeName.toLowerCase().includes(docTypeSearchTerm.toLowerCase())
+                    )
+                    .map((dt) => {
+                      const isChecked = userDocTypeIds.includes(dt.docTypeId);
+                      return (
+                        <label
+                          key={dt.docTypeId}
+                          className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors border ${
+                            isChecked
+                              ? 'bg-sky-950/30 border-sky-700/50 text-white'
+                              : 'bg-slate-900/40 border-slate-800/60 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleDocTypeForUser(dt.docTypeId)}
+                            className="rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-sky-500"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <span className="font-medium text-xs truncate block">{dt.docTypeName}</span>
+                            <span className="text-[10px] text-slate-500 block">
+                              Group: {dt.userDocGroup || 'DOC'} ({dt.mappedUsersCount} mapped)
+                            </span>
+                          </div>
+                        </label>
+                      );
+                    })}
+                </div>
+              </div>
+            ) : (
+              /* TAB 2: DOCUMENT TYPE VIEW (Pick Document Type & select Users) */
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <label className="text-slate-400 whitespace-nowrap">Select Document Type:</label>
+                  <select
+                    value={selectedDocTypeForView?.docTypeId || ''}
+                    onChange={(e) => {
+                      const dt = availableDocTypes.find((d) => d.docTypeId === e.target.value);
+                      if (dt) handleSelectDocTypeForView(dt);
+                    }}
+                    className="flex-1 bg-slate-900 border border-slate-800 rounded px-3 py-1.5 text-slate-200 text-xs focus:outline-none focus:border-sky-500"
+                  >
+                    {availableDocTypes.map((dt) => (
+                      <option key={dt.docTypeId} value={dt.docTypeId}>
+                        {dt.docTypeName} ({dt.mappedUsersCount} users mapped)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-500" />
+                    <input
+                      type="text"
+                      placeholder="Search users..."
+                      value={userDocSearchTerm}
+                      onChange={(e) => setUserDocSearchTerm(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 text-xs focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setDocTypeUsernames(users.map((u) => u.username))}
+                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded text-[11px]"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDocTypeUsernames([])}
+                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded text-[11px]"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto p-1 bg-slate-950/40 rounded border border-slate-800/60">
+                  {users
+                    .filter(
+                      (u) =>
+                        u.username.toLowerCase().includes(userDocSearchTerm.toLowerCase()) ||
+                        u.fullName.toLowerCase().includes(userDocSearchTerm.toLowerCase())
+                    )
+                    .map((u) => {
+                      const isChecked = docTypeUsernames.includes(u.username);
+                      return (
+                        <label
+                          key={u.id}
+                          className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors border ${
+                            isChecked
+                              ? 'bg-sky-950/30 border-sky-700/50 text-white'
+                              : 'bg-slate-900/40 border-slate-800/60 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleUserForDocType(u.username)}
+                            className="rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-sky-500"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <span className="font-medium text-xs truncate block">{u.username}</span>
+                            <span className="text-[10px] text-slate-500 truncate block">{u.fullName}</span>
+                          </div>
+                        </label>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+
+            <p className="text-slate-400 text-[11px] leading-relaxed">
+              Updates will authenticate to <span className="font-semibold text-white">{selectedClient?.clientCode}</span>, navigate dynamically to <span className="font-mono text-slate-300">/viewPatientVisitDocumentTypes</span> / <span className="font-mono text-slate-300">/editPatientVisitDocumentTypes/:id</span>, update checkboxes, and persist verified mappings back into Central Console.
+            </p>
+
+            {docTypeMutationError && (
+              <div className="p-2.5 bg-rose-950/40 border border-rose-800/60 rounded-lg text-rose-300 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold">Operation Failed</p>
+                  <p className="text-[11px] text-rose-300/90 mt-0.5">{docTypeMutationError}</p>
+                </div>
+              </div>
+            )}
+
+            {docTypeMutationResult && (
+              <div className="p-2.5 rounded-lg border text-xs flex items-start gap-2 bg-emerald-950/40 border-emerald-800/60 text-emerald-300">
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold">Mapping Succeeded</p>
+                  <p className="text-[11px] mt-0.5">{docTypeMutationResult.message}</p>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isMutatingDocType || isOpeningDocTypeSession}
+                onClick={handleOpenDocTypeSession}
+                title="Launch a visible, authenticated Chrome browser window on your desktop to the document types screen"
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 border border-sky-500/30 rounded font-semibold disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {isOpeningDocTypeSession ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Opening Browser…</span>
+                  </>
+                ) : (
+                  <>
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Open in Client App</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isMutatingDocType || isOpeningDocTypeSession}
+                  onClick={() => setIsDocTypeModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+                >
+                  {docTypeMutationResult ? 'Close' : 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isMutatingDocType || isOpeningDocTypeSession}
+                  onClick={handleSaveDocTypeMappings}
+                  className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {isMutatingDocType ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving…</span>
+                    </>
+                  ) : (
+                    <span>Save Mappings</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Map Stock Location User */}
+      <Modal
+        isOpen={isStockLocationModalOpen}
+        onClose={() => !isMutatingStockLocation && !isOpeningStockSession && setIsStockLocationModalOpen(false)}
+        title="Stock Location User Mapping"
+      >
+        {selectedStockLocationUser && (
+          <div className="space-y-4 text-xs">
+            <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800/80 space-y-2">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Target User:</span>
+                <span className="font-semibold text-white">
+                  {selectedStockLocationUser.username} {selectedStockLocationUser.fullName ? `(${selectedStockLocationUser.fullName})` : ''}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Client Application:</span>
+                <span className="font-semibold text-white">
+                  {selectedClient?.clientName || selectedStockLocationUser.clientName || 'Simplex Client'} ({selectedClient?.clientCode})
+                </span>
+              </div>
+              {effectiveBranch && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Target Branch:</span>
+                  <span className="font-semibold text-sky-400">{effectiveBranch}</span>
+                </div>
+              )}
+              {selectedStockLocationUser.role && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Assigned Role:</span>
+                  <span className="font-semibold text-amber-300">{selectedStockLocationUser.role}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Current Mapping Status:</span>
+                {stockLocationStatusMap[selectedStockLocationUser.id]?.isMapped || selectedStockLocationUser.isStockLocationMapped ? (
+                  <span className="font-semibold text-emerald-400 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    Mapped ({stockLocationStatusMap[selectedStockLocationUser.id]?.stockLocationNames || selectedStockLocationUser.stockLocationNames || 'Active'})
+                  </span>
+                ) : (
+                  <span className="font-semibold text-amber-400 flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                    Unmapped (Yellow)
+                  </span>
+                )}
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Destination Route:</span>
+                <span className="font-mono text-[11px] text-slate-300">/AddStocklocationUser</span>
+              </div>
+            </div>
+
+            {/* Multiple Stock Locations Checkbox Selector */}
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <label className="font-semibold text-slate-200">
+                  Select Stock Location(s): <span className="text-amber-400">({selectedStockLocations.length} selected)</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedStockLocations.length === AVAILABLE_STOCK_LOCATIONS.length) {
+                      setSelectedStockLocations([]);
+                    } else {
+                      setSelectedStockLocations([...AVAILABLE_STOCK_LOCATIONS]);
+                    }
+                  }}
+                  className="text-[11px] text-sky-400 hover:text-sky-300 underline"
+                >
+                  {selectedStockLocations.length === AVAILABLE_STOCK_LOCATIONS.length ? 'Deselect All' : 'Select All'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto p-2.5 bg-slate-950/70 border border-slate-800 rounded-lg">
+                {AVAILABLE_STOCK_LOCATIONS.map((loc) => {
+                  const isChecked = selectedStockLocations.includes(loc);
+                  return (
+                    <label
+                      key={loc}
+                      className={`flex items-center gap-2 p-1.5 rounded cursor-pointer transition-colors text-[11px] ${
+                        isChecked ? 'bg-sky-950/40 text-sky-200 border border-sky-800/40' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => handleToggleStockLocation(loc)}
+                        className="rounded border-slate-700 text-sky-600 focus:ring-sky-500"
+                      />
+                      <span className="truncate">{loc}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <p className="text-slate-400 text-[11px] leading-relaxed">
+              Automatic mapping will authenticate to <span className="font-semibold text-white">{selectedClient?.clientCode}</span>, navigate to <span className="font-mono text-slate-300">/AddStocklocationUser</span>, select <span className="text-white font-medium">{selectedStockLocationUser.username}</span> in the <span className="font-semibold text-slate-300">STOCK LOCATION USER NAME</span> dropdown, check all selected location(s), submit the form, and authoritatively verify on <span className="font-mono text-slate-300">/StocklocationUsers</span>.
+            </p>
+
+            {stockLocationMutationError && (
+              <div className="p-2.5 bg-rose-950/40 border border-rose-800/60 rounded-lg text-rose-300 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold">Operation Failed</p>
+                  <p className="text-[11px] text-rose-300/90 mt-0.5">{stockLocationMutationError}</p>
+                </div>
+              </div>
+            )}
+
+            {stockLocationMutationResult && (
+              <div className="p-2.5 rounded-lg border text-xs flex items-start gap-2 bg-emerald-950/40 border-emerald-800/60 text-emerald-300">
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold">Mapping Succeeded</p>
+                  <p className="text-[11px] mt-0.5">{stockLocationMutationResult.message}</p>
+                  {stockLocationMutationResult.mappedLocations && (
+                    <div className="mt-1 text-[11px] opacity-90">
+                      Locations: <span className="font-medium text-white">{stockLocationMutationResult.mappedLocations.join(', ')}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isMutatingStockLocation || isOpeningStockSession}
+                onClick={handleOpenStockLocationSession}
+                title="Launch a visible, authenticated Chrome browser window on your desktop with user pre-selected"
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 border border-sky-500/30 rounded font-semibold disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {isOpeningStockSession ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Opening Browser…</span>
+                  </>
+                ) : (
+                  <>
+                    <Boxes className="w-3.5 h-3.5" />
+                    <span>Open in Client App</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isMutatingStockLocation || isOpeningStockSession}
+                  onClick={() => setIsStockLocationModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+                >
+                  {stockLocationMutationResult ? 'Close' : 'Cancel'}
+                </button>
+                {!stockLocationMutationResult && (
+                  <button
+                    type="button"
+                    disabled={isMutatingStockLocation || isOpeningStockSession || selectedStockLocations.length === 0}
+                    onClick={handleExecuteStockLocationMapping}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-semibold shadow disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isMutatingStockLocation ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Saving Mapping…</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Map & Save ({selectedStockLocations.length})</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Map Bill Counter User */}
+      <Modal
+        isOpen={isBillCounterModalOpen}
+        onClose={() => !isMutatingBillCounter && setIsBillCounterModalOpen(false)}
+        title="Map Bill Counter User"
+      >
+        {selectedBillCounterUser && (
+          <div className="space-y-4 text-xs">
+            <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-800/80 space-y-2">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Target User:</span>
+                <span className="font-semibold text-white">
+                  {selectedBillCounterUser.username} {selectedBillCounterUser.fullName ? `(${selectedBillCounterUser.fullName})` : ''}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Client Application:</span>
+                <span className="font-semibold text-white">
+                  {selectedClient?.clientName || selectedBillCounterUser.clientName || 'Simplex Client'} ({selectedClient?.clientCode})
+                </span>
+              </div>
+              {effectiveBranch && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Target Branch:</span>
+                  <span className="font-semibold text-sky-400">{effectiveBranch}</span>
+                </div>
+              )}
+              {selectedBillCounterUser.role && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Assigned Role:</span>
+                  <span className="font-semibold text-amber-300">{selectedBillCounterUser.role}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Current Mapping Status:</span>
+                {selectedBillCounterUser.isBillCounterMapped ? (
+                  <span className="font-semibold text-emerald-400 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    Mapped ({selectedBillCounterUser.billCounterName || 'Active'})
+                  </span>
+                ) : (
+                  <span className="font-semibold text-rose-400">
+                    Not Mapped
+                  </span>
+                )}
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Destination Route:</span>
+                <span className="font-mono text-[11px] text-slate-300">/addbillCounteruser</span>
+              </div>
+            </div>
+
+            <p className="text-slate-400 text-[11px] leading-relaxed">
+              The desktop automation agent will automatically navigate to the client's Bill Counter screen, select the first available Bill Counter, match user <span className="text-white font-medium">{selectedBillCounterUser.username}</span>, select the appropriate role, submit the form, and authoritatively verify the record on the Bill Counter list table (<span className="font-mono text-slate-300">/billcounteruser</span>).
+            </p>
+
+            {billCounterMutationError && (
+              <div className="p-2.5 bg-rose-950/40 border border-rose-800/60 rounded-lg text-rose-300 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold">Mapping Failed</p>
+                  <p className="text-[11px] text-rose-300/90 mt-0.5">{billCounterMutationError}</p>
+                </div>
+              </div>
+            )}
+
+            {billCounterMutationResult && (
+              <div
+                className={`p-2.5 rounded-lg border text-xs flex items-start gap-2 ${
+                  billCounterMutationResult.alreadyExists
+                    ? 'bg-amber-950/40 border-amber-800/60 text-amber-300'
+                    : 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-semibold">
+                    {billCounterMutationResult.alreadyExists ? 'Already Mapped' : 'Mapping Succeeded'}
+                  </p>
+                  <p className="text-[11px] mt-0.5">{billCounterMutationResult.message}</p>
+                  {billCounterMutationResult.billCounterName && (
+                    <div className="mt-1 text-[11px] opacity-90">
+                      Bill Counter: <span className="font-medium text-white">{billCounterMutationResult.billCounterName}</span>
+                      {billCounterMutationResult.roleName && (
+                        <span> | Role: <span className="font-medium text-white">{billCounterMutationResult.roleName}</span></span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isMutatingBillCounter}
+                onClick={() => setIsBillCounterModalOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold disabled:opacity-50"
+              >
+                {billCounterMutationResult ? 'Close' : 'Cancel'}
+              </button>
+              {!billCounterMutationResult && (
+                <button
+                  type="button"
+                  disabled={isMutatingBillCounter}
+                  onClick={handleExecuteBillCounterMapping}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded font-semibold shadow disabled:opacity-50 flex items-center gap-2"
+                >
+                  {isMutatingBillCounter ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Mapping Bill Counter…</span>
+                    </>
+                  ) : (
+                    <>
+                      <MapPin className="w-3.5 h-3.5" />
+                      <span>Confirm & Map Bill Counter</span>
+                    </>
+                  )}
+                </button>
+              )}
             </div>
           </div>
         )}

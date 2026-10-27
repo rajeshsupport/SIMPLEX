@@ -142,8 +142,35 @@ export interface ClientResourceFilter {
   resourceType?: string;
   specialty?: string;
   status?: ClientResourceStatus | 'ALL';
+  branchName?: string;
   page?: number;
   limit?: number;
+}
+
+export interface ClientResourceSummary {
+  total: number;
+  humanCount: number;
+  nonHumanCount: number;
+  linkedCount: number;
+  totalClientResources?: number;
+  branchName?: string | null;
+}
+
+export interface ClientResourceSyncResult {
+  success: boolean;
+  liveStatus: string;
+  message: string;
+  targetBranch?: string | null;
+  totalScraped: number;
+  createdCount: number;
+  updatedCount: number;
+  humanCount: number;
+  nonHumanCount: number;
+  totalInScope: number;
+  totalInDatabase: number;
+  resources: any[];
+  departments?: string[];
+  resourceTypes?: string[];
 }
 
 export interface EmrFormMasterItem {

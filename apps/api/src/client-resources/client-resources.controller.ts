@@ -51,6 +51,7 @@ export class ClientResourcesController {
     @Query('status') status: ClientResourceStatus | 'ALL',
     @Query('specialty') specialty: string,
     @Query('resourceType') resourceType: string,
+    @Query('branchName') branchName: string,
     @Query('page') page: number,
     @Query('limit') limit: number,
     @CurrentUser() user: JwtPayload
@@ -66,6 +67,7 @@ export class ClientResourcesController {
         status,
         specialty,
         resourceType,
+        branchName,
         page,
         limit,
       },

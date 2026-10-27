@@ -68,17 +68,11 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
   const server = express();
-  const defaultJsonParser = express.json({ limit: '100kb' });
-  // Scoped parser for 100-user chunks: 500 KB (512,000 bytes) ensures 100 records with maximum permissible 4-byte UTF-8 fields (~460 KB) fit with an 11.2% safety margin, while tightly bounding memory.
-  const batchJsonParser = express.json({ limit: '500kb' });
-  const defaultUrlEncodedParser = express.urlencoded({ limit: '100kb', extended: true });
+  const defaultJsonParser = express.json({ limit: '10mb' });
+  const defaultUrlEncodedParser = express.urlencoded({ limit: '10mb', extended: true });
 
   // Dedicated single-parser routing middleware: exactly one JSON parser consumes any request.
   server.use((req: any, res: any, next: any) => {
-    const reqPath = req.path || (req.url ? req.url.split('?')[0] : '');
-    if (/^\/api\/v1\/agents\/runs\/[^/]+\/client-users\/sync-batches\/?$/.test(reqPath)) {
-      return batchJsonParser(req, res, next);
-    }
     return defaultJsonParser(req, res, next);
   });
   server.use(defaultUrlEncodedParser);

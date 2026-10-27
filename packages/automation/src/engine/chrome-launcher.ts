@@ -121,7 +121,8 @@ export class ChromeGuestLauncher {
       '--disable-component-update',
       '--disable-background-networking',
       '--disable-sync',
-      '--window-position=100,100',
+      '--start-maximized',
+      '--new-window',
     ];
 
     if (options.additionalArgs && options.additionalArgs.length > 0) {
@@ -187,8 +188,8 @@ export class ChromeGuestLauncher {
         }
       } else {
         const error = new Error(
-          'GOOGLE_CHROME_GUEST_UNAVAILABLE: Google Chrome is not installed or Guest Mode could not be launched. ' +
-          'Verified executable path /Applications/Google Chrome.app/Contents/MacOS/Google Chrome was not accessible, ' +
+          'GOOGLE_CHROME_GUEST_UNAVAILABLE: Google Chrome is not installed or could not be launched. ' +
+          `Verified executable path ${config.detectedExecutablePath || 'chrome.exe'} was not accessible, ` +
           'and ALLOW_CHROMIUM_FALLBACK is set to false.'
         );
         (error as any).code = 'GOOGLE_CHROME_GUEST_UNAVAILABLE';
@@ -198,7 +199,7 @@ export class ChromeGuestLauncher {
 
     // 4. Create fresh, completely isolated context (zero persistent profile / zero userDataDir)
     const context = await browser.newContext({
-      viewport: options.viewport || { width: 1440, height: 900 },
+      viewport: options.viewport !== undefined ? options.viewport : (effectiveHeadless ? { width: 1440, height: 900 } : null),
       ignoreHTTPSErrors: options.ignoreHTTPSErrors !== undefined ? options.ignoreHTTPSErrors : true,
     });
 

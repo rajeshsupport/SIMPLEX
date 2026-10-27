@@ -7,7 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import * as crypto from 'crypto';
 import {
   Client,
@@ -113,7 +113,7 @@ export class ClientResourcesService {
     total: number;
     page: number;
     limit: number;
-    summary?: { total: number; humanCount: number; nonHumanCount: number; linkedCount: number };
+    summary?: { total: number; humanCount: number; nonHumanCount: number; linkedCount: number; totalClientResources?: number; branchName?: string | null };
   }> {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) {
@@ -127,6 +127,21 @@ export class ClientResourcesService {
     const queryBuilder = this.resourceSnapshotRepo
       .createQueryBuilder('resource')
       .where('resource.clientId = :clientId', { clientId });
+
+    const branchFilter = filter.branchName && filter.branchName.trim() && filter.branchName !== 'ALL'
+      ? filter.branchName.trim()
+      : null;
+
+    let branchScopedWhere: any = { clientId };
+    if (branchFilter) {
+      const hasBranchRecords = await this.resourceSnapshotRepo.count({
+        where: { clientId, branchName: branchFilter },
+      });
+      if (hasBranchRecords > 0) {
+        queryBuilder.andWhere('resource.branchName = :bName', { bName: branchFilter });
+        branchScopedWhere = { clientId, branchName: branchFilter };
+      }
+    }
 
     if (filter.search && filter.search.trim()) {
       const s = `%${filter.search.trim()}%`;
@@ -160,13 +175,15 @@ export class ClientResourcesService {
 
     const [entities, total] = await queryBuilder.getManyAndCount();
 
-    const [totalAll, totalHumans, totalNonHumans, totalLinked] = await Promise.all([
+    const [totalClientAll, totalScoped, totalHumans, totalNonHumans, totalLinked] = await Promise.all([
       this.resourceSnapshotRepo.count({ where: { clientId } }),
-      this.resourceSnapshotRepo.count({ where: { clientId, isResourceHuman: true } }),
-      this.resourceSnapshotRepo.count({ where: { clientId, isResourceHuman: false } }),
+      this.resourceSnapshotRepo.count({ where: branchScopedWhere }),
+      this.resourceSnapshotRepo.count({ where: { ...branchScopedWhere, isResourceHuman: true } }),
+      this.resourceSnapshotRepo.count({ where: { ...branchScopedWhere, isResourceHuman: false } }),
       this.resourceSnapshotRepo
         .createQueryBuilder('r')
         .where('r.clientId = :clientId', { clientId })
+        .andWhere(branchScopedWhere.branchName ? 'r.branchName = :bName' : '1=1', { bName: branchScopedWhere.branchName })
         .andWhere('r.linkedUsername IS NOT NULL AND r.linkedUsername != \'\'')
         .getCount(),
     ]);
@@ -208,10 +225,12 @@ export class ClientResourcesService {
       page,
       limit,
       summary: {
-        total: totalAll,
+        total: totalScoped,
         humanCount: totalHumans,
         nonHumanCount: totalNonHumans,
         linkedCount: totalLinked,
+        totalClientResources: totalClientAll,
+        branchName: branchScopedWhere.branchName || null,
       },
     };
   }
@@ -951,11 +970,37 @@ export class ClientResourcesService {
   /**
    * Single Resource Creation
    */
+  private async cleanupStaleResourceRuns(clientId: string): Promise<void> {
+    try {
+      const nonTerminal = ['PENDING', 'QUEUED', 'RUNNING', 'CLAIMED', 'AUTHENTICATING', 'NAVIGATING', 'EXTRACTING'];
+      const staleRuns = await this.runRepo.find({
+        where: {
+          clientId,
+          runType: In(['SYNC_CLIENT_RESOURCES_HEADLESS', 'CREATE_CLIENT_RESOURCE', 'MAP_RESOURCE_USER'] as any),
+          status: In(nonTerminal),
+        },
+      });
+      const now = Date.now();
+      for (const r of staleRuns) {
+        const createdAt = r.createdAt ? new Date(r.createdAt).getTime() : now;
+        if (now - createdAt >= 180000) {
+          r.status = 'TIMED_OUT';
+          r.errorMessage = 'Resource operation timed out after 180 seconds. Previous cached data is still available.';
+          r.completedAt = new Date();
+          await this.runRepo.save(r);
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to clean up stale resource runs: ${err.message}`);
+    }
+  }
+
   async createClientResource(clientId: string, dto: CreateQuickResourceInput, user: JwtPayload): Promise<any> {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client with ID '${clientId}' not found`);
 
     this.ensureNotProduction(client, 'Create Resource');
+    await this.cleanupStaleResourceRuns(clientId);
 
     if (!dto.resourceName || !dto.resourceName.trim()) {
       throw new BadRequestException('Resource name is required.');
@@ -2073,6 +2118,7 @@ export class ClientResourcesService {
     const client = await this.clientRepo.findOne({ where: { id: clientId } });
     if (!client) throw new NotFoundException(`Client with ID '${clientId}' not found`);
 
+    await this.cleanupStaleResourceRuns(clientId);
     const resourceDirectoryRoute = client.resourceDirectoryRoute || '/ResourceParent';
 
     const allAgents = await this.agentsService.getAllAgents();
@@ -2137,6 +2183,8 @@ export class ClientResourcesService {
 
     const scrapedList = (parsedResult.resources || []) as any[];
     let upsertedCount = 0;
+    let createdCount = 0;
+    let updatedCount = 0;
 
     for (const r of scrapedList) {
       const remoteResourceId = String(r.remoteResourceId || r.resourceCode || '').trim();
@@ -2175,12 +2223,14 @@ export class ClientResourcesService {
           selectAllServices: true,
           linkedUsername: r.linkedUsername || null,
           isShownInRegistration: true,
+          branchName: targetBranch || (client as any).branchName || null,
           remoteStatus: resourceStatus,
           status: resourceStatus,
           isPresentRemotely: true,
           lastVerifiedAt: new Date(),
           lastSyncedAt: new Date(),
         });
+        createdCount++;
       } else {
         snap.resourceCode = r.resourceCode || snap.resourceCode || remoteResourceId;
         snap.resourceName = r.resourceName || snap.resourceName;
@@ -2195,16 +2245,30 @@ export class ClientResourcesService {
         }
         if (r.department) snap.department = r.department;
         if (r.linkedUsername) snap.linkedUsername = r.linkedUsername;
+        if (targetBranch) snap.branchName = targetBranch;
         snap.remoteStatus = resourceStatus;
         snap.status = resourceStatus;
         snap.isPresentRemotely = true;
         snap.lastVerifiedAt = new Date();
         snap.lastSyncedAt = new Date();
+        updatedCount++;
       }
 
       await this.resourceSnapshotRepo.save(snap);
       upsertedCount++;
     }
+
+    const humanScraped = scrapedList.filter((r) => r.isResourceHuman === true).length;
+    const nonHumanScraped = scrapedList.filter((r) => r.isResourceHuman === false).length;
+    const totalInScope = await this.resourceSnapshotRepo.count({
+      where: targetBranch ? { clientId: client.id, branchName: targetBranch } : { clientId: client.id },
+    });
+    const totalInDatabase = await this.resourceSnapshotRepo.count({
+      where: { clientId: client.id },
+    });
+
+    const branchLabel = targetBranch ? ` for branch "${targetBranch}"` : '';
+    const message = `Discovered and synchronized ${upsertedCount} live resources${branchLabel} (${createdCount} created, ${updatedCount} updated). Database total: ${totalInScope} in branch, ${totalInDatabase} client-wide.`;
 
     await this.writeAuditLog({
       clientId: client.id,
@@ -2212,14 +2276,21 @@ export class ClientResourcesService {
       action: 'CLIENT_RESOURCES_SYNCED',
       entityType: 'CLIENT_RESOURCE',
       entityId: client.id,
-      details: { totalScraped: scrapedList.length, upsertedCount },
+      details: { totalScraped: scrapedList.length, upsertedCount, createdCount, updatedCount, targetBranch, totalInScope, totalInDatabase },
     });
 
     return {
       success: true,
       liveStatus: 'LIVE',
-      message: `Discovered and synchronized ${upsertedCount} live resources.`,
+      message,
+      targetBranch: targetBranch || null,
       totalScraped: upsertedCount,
+      createdCount,
+      updatedCount,
+      humanCount: humanScraped,
+      nonHumanCount: nonHumanScraped,
+      totalInScope,
+      totalInDatabase,
       resources: scrapedList,
     };
   }

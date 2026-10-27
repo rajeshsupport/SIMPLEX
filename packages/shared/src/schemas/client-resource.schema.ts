@@ -1,23 +1,27 @@
 import { z } from 'zod';
 
-export const CreateQuickResourceSchema = z.object({
-  clientId: z.string().uuid('Invalid Client ID format'),
-  resourceName: z
-    .string()
-    .min(1, 'Resource name is required')
-    .max(250, 'Resource name max 250 characters')
-    .trim(),
-  isResourceHuman: z.boolean().default(true),
-  resourceType: z.string().min(1, 'Resource type is required').max(150).trim(),
-  specialty: z.string().min(1, 'Specialty is required').max(150).trim(),
-  departments: z.string().min(1, 'Departments is required').trim().default('ALL'),
-  colorIdentificationCode: z.string().max(10).default('FFFFFF').optional(),
-  services: z.string().min(1, 'Services is required').trim().default('ALL'),
-  operatingFrom: z.string().max(10).default('00:00').optional(),
-  operatingTo: z.string().max(10).default('23:55').optional(),
-  branchId: z.string().optional(),
-  targetBranch: z.string().optional(),
-});
+export const CreateQuickResourceSchema = z
+  .object({
+    clientId: z.string().uuid('Invalid Client ID format'),
+    resourceName: z
+      .string()
+      .min(1, 'Resource name is required')
+      .max(250, 'Resource name max 250 characters')
+      .trim(),
+    isResourceHuman: z.boolean().default(true),
+    resourceType: z.string().min(1, 'Resource type is required').max(150).trim(),
+    specialty: z.string().min(1, 'Specialty is required').max(150).trim(),
+    departments: z.string().min(1, 'Departments is required').trim().default('ALL'),
+    colorIdentificationCode: z.string().max(10).default('FFFFFF').optional(),
+    services: z.string().min(1, 'Services is required').trim().default('ALL'),
+    operatingFrom: z.string().max(10).default('00:00').optional(),
+    operatingTo: z.string().max(10).default('23:55').optional(),
+    branchId: z.string().optional(),
+    targetBranch: z.string().optional(),
+    allowReuseIfExisting: z.boolean().optional().default(true),
+    reconcileOnly: z.boolean().optional().default(false),
+  })
+  .passthrough();
 
 export type CreateQuickResourceDto = z.infer<typeof CreateQuickResourceSchema>;
 

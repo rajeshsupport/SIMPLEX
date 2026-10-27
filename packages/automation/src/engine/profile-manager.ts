@@ -161,42 +161,121 @@ export class BrowserProfileManager {
   }
 
   /**
+   * Detects the installed Google Chrome executable path for the current platform.
+   */
+  public static detectChromeExecutable(): string | null {
+    if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
+      return process.env.CHROME_PATH;
+    }
+
+    if (process.platform === 'win32') {
+      const candidates = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
+        path.join(process.env.PROGRAMFILES || '', 'Google\\Chrome\\Application\\chrome.exe'),
+        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google\\Chrome\\Application\\chrome.exe'),
+      ];
+      for (const cand of candidates) {
+        if (cand && fs.existsSync(cand)) {
+          return cand;
+        }
+      }
+      return null;
+    }
+
+    if (process.platform === 'darwin') {
+      const macCandidates = [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        path.join(process.env.HOME || '', 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+      ];
+      for (const cand of macCandidates) {
+        if (cand && fs.existsSync(cand)) {
+          return cand;
+        }
+      }
+      return null;
+    }
+
+    const linuxCandidates = [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/local/bin/google-chrome',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/snap/bin/chromium',
+    ];
+    for (const cand of linuxCandidates) {
+      if (fs.existsSync(cand)) {
+        return cand;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Internal helper to launch persistent context with robust options.
+   * For interactive / headed mode, disables fixed viewport emulation (viewport: null)
+   * and starts maximized so the page fills 100% of the user's screen.
    */
   private static async doLaunch(
     userDataDir: string,
     options: ProfileOptions,
     isHeadless: boolean
   ): Promise<BrowserContext> {
+    const isInteractive = options.isHeaded || !isHeadless;
+    const effectiveViewport = options.viewport !== undefined
+      ? options.viewport
+      : (isInteractive ? null : { width: 1440, height: 900 });
+
+    const launchArgs = [
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-extensions',
+      '--disable-component-update',
+      '--disable-background-networking',
+      '--disable-sync',
+    ];
+
+    if (isInteractive) {
+      launchArgs.push('--start-maximized');
+    } else {
+      launchArgs.push('--window-position=100,100');
+    }
+
     const launchOptions: any = {
       headless: isHeadless,
-      viewport: options.viewport || { width: 1440, height: 900 },
+      viewport: effectiveViewport,
       slowMo: options.slowMo || 0,
-      args: [
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-extensions',
-        '--disable-component-update',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--window-position=100,100',
-      ],
+      args: launchArgs,
       ignoreHTTPSErrors: true,
     };
 
-    if (options.isHeaded) {
+    const chromePath = this.detectChromeExecutable();
+
+    // 1. Primary Attempt: Google Chrome executablePath
+    if (chromePath) {
       try {
         return await chromium.launchPersistentContext(userDataDir, {
           ...launchOptions,
-          channel: 'chrome',
+          executablePath: chromePath,
         });
-      } catch {
-        // Fallback to bundled Chromium if Google Chrome channel is not available
-        return await chromium.launchPersistentContext(userDataDir, launchOptions);
+      } catch (err: any) {
+        console.warn('[BROWSER] Google Chrome launch via executablePath failed, falling back to channel chrome...');
       }
     }
 
-    return await chromium.launchPersistentContext(userDataDir, launchOptions);
+    // 2. Secondary Attempt: Google Chrome channel
+    try {
+      return await chromium.launchPersistentContext(userDataDir, {
+        ...launchOptions,
+        channel: 'chrome',
+      });
+    } catch {
+      // 3. Fallback to bundled Chromium only if Google Chrome is completely unavailable
+      return await chromium.launchPersistentContext(userDataDir, launchOptions);
+    }
   }
 
   /**
